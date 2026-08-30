@@ -33,7 +33,7 @@ jobs:
           gradle-version: '9.5.0'
       - name: Install Android API 37
         shell: bash
-        run: sdkmanager "platforms;android-37" "build-tools;36.0.0"
+        run: sdkmanager "platforms;android-37.0" "build-tools;37.0.0"
       - name: Canonical verification
         run: bash scripts/verify.sh
       - name: Build TEST APK

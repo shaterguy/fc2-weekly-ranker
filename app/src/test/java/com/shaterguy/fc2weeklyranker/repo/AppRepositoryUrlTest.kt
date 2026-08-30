@@ -14,4 +14,12 @@ class AppRepositoryUrlTest {
             ),
         )
     }
+
+    @Test
+    fun `stable video id ignores host case default port and fragment`() {
+        assertEquals(
+            AppRepository.stableVideoId("123", "https://media.example.test/a.mp4?token=A"),
+            AppRepository.stableVideoId("123", "HTTPS://MEDIA.EXAMPLE.TEST:443/a.mp4?token=A#player"),
+        )
+    }
 }

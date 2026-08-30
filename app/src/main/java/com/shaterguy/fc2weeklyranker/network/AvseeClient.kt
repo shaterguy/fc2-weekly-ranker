@@ -9,6 +9,8 @@ import okhttp3.Request
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import java.net.URI
+import java.net.URLDecoder
+import java.nio.charset.StandardCharsets
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalDateTime
@@ -42,7 +44,7 @@ class AvseeClient(
             val boardUrl = "$baseUrl$BOARD_PATH&page=$page"
             val links = parseBoardLinks(fetch(boardUrl), baseUrl)
             if (links.isEmpty()) break
-            var sawOlder = false
+            val parsedInstants = mutableListOf<Instant>()
             var parsedOnPage = 0
             var failedOnPage = 0
             for (link in links) {
@@ -52,13 +54,14 @@ class AvseeClient(
                     failedOnPage += 1
                 }.getOrNull() ?: continue
                 parsedOnPage += 1
-                if (detail.postedAt.isBefore(window.startInclusive)) sawOlder = true
+                parsedInstants += detail.postedAt
                 if (window.contains(detail.postedAt)) out.putIfAbsent(detail.id, detail)
             }
             check(parsedOnPage > 0 || failedOnPage == 0) {
                 "게시물 상세 파싱에 모두 실패했습니다. 사이트 형식이 변경되었는지 확인해 주세요. (page=$page, failed=$failedOnPage)"
             }
-            if (sawOlder && page >= 2) break
+            val newestOnPage = parsedInstants.maxOrNull()
+            if (page >= 2 && newestOnPage != null && newestOnPage.isBefore(window.startInclusive)) break
         }
         out.values.toList()
     }
@@ -69,7 +72,13 @@ class AvseeClient(
 
     internal fun parseBoardLinks(html: String, baseUrl: String): List<String> {
         val doc = Jsoup.parse(html, baseUrl)
-        return doc.select("a[href*='bo_table=javfc2'][href*='wr_id=']")
+        val selector = "a[href*='bo_table=javfc2'][href*='wr_id=']"
+        val scope = listOf("#bo_list", ".tbl_head01", "main")
+            .asSequence()
+            .mapNotNull(doc::selectFirst)
+            .firstOrNull { it.select(selector).isNotEmpty() }
+            ?: doc
+        return scope.select(selector)
             .mapNotNull { it.absUrl("href").takeIf(String::isNotBlank) }
             .distinct()
     }
@@ -150,22 +159,73 @@ class AvseeClient(
         doc.select("#good_button strong, #bo_v_act .bo_v_good strong, [id*=good] strong, [class*=good] strong").forEach { node ->
             Regex("\\d+").find(node.text())?.value?.toIntOrNull()?.let { return it }
         }
-        return Regex("추천\\s*(?:수)?\\s*[:：]?\\s*(\\d+)")
-            .find(doc.body()?.text().orEmpty())?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
+
+        val bodyText = doc.body()?.text().orEmpty()
+        listOf(
+            Regex("(?:추천|좋아요)\\s*(?:수)?\\s*[:：]?\\s*(\\d+)", RegexOption.IGNORE_CASE),
+            Regex("(\\d+)\\s*(?:추천|좋아요)", RegexOption.IGNORE_CASE),
+        ).forEach { pattern ->
+            pattern.find(bodyText)?.groupValues?.getOrNull(1)?.toIntOrNull()?.let { return it }
+        }
+
+        val infoText = doc.selectFirst("#bo_v_info, .bo_v_info")?.text().orEmpty()
+        val dateStart = listOf(
+            Regex("20\\d{2}[-./]\\d{1,2}[-./]\\d{1,2}\\s+\\d{1,2}:\\d{2}"),
+            Regex("(?<!\\d)\\d{2}-\\d{2}-\\d{2}\\s+\\d{1,2}:\\d{2}"),
+            Regex("(?<!\\d)\\d{1,2}[.]\\d{1,2}\\s+\\d{1,2}:\\d{2}"),
+        ).firstNotNullOfOrNull { it.find(infoText)?.range?.first }
+        if (dateStart != null) {
+            val metrics = Regex("(?<![\\d.])\\d{1,9}(?![\\d.])")
+                .findAll(infoText.substring(0, dateStart))
+                .mapNotNull { it.value.toIntOrNull() }
+                .toList()
+            if (metrics.size >= 3) return metrics.last()
+        }
+        return 0
     }
 
     private fun parseMedia(doc: Document, detailUrl: String): List<RemoteMedia> {
         val raw = buildList {
             doc.select("video[src], source[src]").forEach { add(it.absUrl("src") to "DIRECT") }
-            doc.select("iframe[src]").forEach { add(it.absUrl("src") to "IFRAME") }
+            doc.select("iframe[src]").forEach {
+                val wrapper = it.absUrl("src")
+                val direct = embeddedMediaUrl(wrapper)
+                if (direct != null) add(direct to "DIRECT") else add(wrapper to "IFRAME")
+            }
             doc.select("a[href]").forEach {
                 val url = it.absUrl("href")
                 if (looksLikeMedia(url)) add(url to "DIRECT")
             }
         }
-        return raw.filter { it.first.startsWith("https://") }
-            .distinctBy { it.first }
-            .mapIndexed { index, pair -> RemoteMedia(pair.first, detailUrl, pair.second, index) }
+
+        val unique = LinkedHashMap<String, Pair<String, String>>()
+        raw.forEach { (url, kind) ->
+            if (!url.startsWith("https://", ignoreCase = true)) return@forEach
+            val canonical = canonicalMediaUrl(url)
+            val existing = unique[canonical]
+            if (existing == null || (existing.second == "IFRAME" && kind == "DIRECT")) {
+                unique[canonical] = canonical to kind
+            }
+        }
+        return unique.values.mapIndexed { index, pair -> RemoteMedia(pair.first, detailUrl, pair.second, index) }
+    }
+
+    private fun embeddedMediaUrl(wrapperUrl: String): String? {
+        val rawQuery = runCatching { URI(wrapperUrl).rawQuery }.getOrNull().orEmpty()
+        if (rawQuery.isBlank()) return null
+        rawQuery.split('&').forEach { part ->
+            var value = part.substringAfter('=', "")
+            if (value.isBlank()) return@forEach
+            repeat(3) {
+                if (value.startsWith("https://", ignoreCase = true) && looksLikeMedia(value)) {
+                    return canonicalMediaUrl(value)
+                }
+                val decoded = runCatching { URLDecoder.decode(value, StandardCharsets.UTF_8) }.getOrDefault(value)
+                if (decoded == value) return@repeat
+                value = decoded
+            }
+        }
+        return null
     }
 
     private fun looksLikeMedia(url: String): Boolean {
@@ -191,5 +251,31 @@ class AvseeClient(
             .firstOrNull { it[0] == key }?.get(1)
     }.getOrNull()
 
-    companion object { const val USER_AGENT: String = UA }
+    companion object {
+        const val USER_AGENT: String = UA
+
+        internal fun canonicalMediaUrl(url: String): String = runCatching {
+            val uri = URI(url).normalize()
+            val scheme = uri.scheme?.lowercase() ?: return@runCatching url.substringBefore('#')
+            val host = uri.host?.lowercase() ?: return@runCatching url.substringBefore('#')
+            val port = when {
+                uri.port == -1 -> ""
+                scheme == "https" && uri.port == 443 -> ""
+                scheme == "http" && uri.port == 80 -> ""
+                else -> ":${uri.port}"
+            }
+            val path = uri.rawPath.orEmpty().ifBlank { "/" }
+            val query = uri.rawQuery?.let { "?$it" }.orEmpty()
+            "$scheme://$host$port$path$query"
+        }.getOrElse { url.substringBefore('#') }
+
+        internal fun isHlsUrl(url: String): Boolean = runCatching {
+            URI(url).path.lowercase().endsWith(".m3u8")
+        }.getOrDefault(false)
+
+        internal fun isDownloadableMediaUrl(url: String): Boolean = runCatching {
+            val path = URI(url).path.lowercase()
+            path.endsWith(".mp4") || path.endsWith(".webm")
+        }.getOrDefault(false)
+    }
 }

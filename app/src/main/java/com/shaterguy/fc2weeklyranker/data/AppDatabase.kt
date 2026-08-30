@@ -10,6 +10,7 @@ import androidx.room.OnConflictStrategy
 import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.RoomDatabase
+import androidx.room.Transaction
 import androidx.room.Upsert
 import kotlinx.coroutines.flow.Flow
 
@@ -67,6 +68,9 @@ interface PostDao {
     @Query("SELECT * FROM posts WHERE snapshotKey = :snapshotKey ORDER BY dailyRate DESC, recommendationCount DESC, postedAtEpochMillis DESC, id DESC")
     fun postsForSnapshot(snapshotKey: String): Flow<List<PostEntity>>
 
+    @Query("SELECT * FROM posts WHERE postedAtEpochMillis BETWEEN :startInclusiveMillis AND :upperInclusiveMillis ORDER BY dailyRate DESC, recommendationCount DESC, postedAtEpochMillis DESC, id DESC")
+    fun postsInWindow(startInclusiveMillis: Long, upperInclusiveMillis: Long): Flow<List<PostEntity>>
+
     @Query("SELECT COUNT(*) FROM posts WHERE snapshotKey = :snapshotKey")
     suspend fun snapshotCount(snapshotKey: String): Int
 
@@ -99,6 +103,25 @@ interface VideoDao {
 
     @Upsert
     suspend fun upsert(videos: List<VideoEntity>)
+
+    @Query("DELETE FROM videos WHERE postId = :postId")
+    suspend fun deleteForPost(postId: String)
+
+    @Query("DELETE FROM videos WHERE postId = :postId AND id NOT IN (:keepIds)")
+    suspend fun deleteForPostExcept(postId: String, keepIds: List<String>)
+
+    @Query("DELETE FROM videos WHERE id = :id")
+    suspend fun deleteById(id: String)
+
+    @Transaction
+    suspend fun replaceForPost(postId: String, videos: List<VideoEntity>) {
+        if (videos.isEmpty()) {
+            deleteForPost(postId)
+            return
+        }
+        upsert(videos)
+        deleteForPostExcept(postId, videos.map { it.id })
+    }
 }
 
 @Dao

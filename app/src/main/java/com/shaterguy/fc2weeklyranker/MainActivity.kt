@@ -48,11 +48,13 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.shaterguy.fc2weeklyranker.data.DownloadEntity
 import com.shaterguy.fc2weeklyranker.data.PostEntity
 import com.shaterguy.fc2weeklyranker.data.VideoEntity
 import com.shaterguy.fc2weeklyranker.domain.windowFor
 import com.shaterguy.fc2weeklyranker.media.NativeVideoPlayer
 import com.shaterguy.fc2weeklyranker.media.RestrictedIframePlayer
+import com.shaterguy.fc2weeklyranker.network.AvseeClient
 import com.shaterguy.fc2weeklyranker.ui.MainViewModel
 import java.time.Instant
 import java.time.ZoneId
@@ -110,7 +112,53 @@ private fun VideoDetailScreen(vm: MainViewModel, postId: String, onBack: () -> U
 
 @Composable
 private fun VideoCard(vm: MainViewModel, postId: String, index: Int, video: VideoEntity) {
-    Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) { Text("영상 ${index + 1}", fontWeight = FontWeight.SemiBold); if (video.sourceKind == "DIRECT") { NativeVideoPlayer(video); Button(onClick = { vm.queueDownload(video.id) }, modifier = Modifier.semantics { contentDescription = "영상 ${index + 1} 다운로드" }) { Text("다운로드") } } else { Text("원본 iframe 재생 문맥으로 영상을 불러옵니다."); RestrictedIframePlayer(video, { candidate -> vm.registerProbedVideo(postId, candidate, video.url, index + 100) }) } } }
+    val downloadFlow = remember(video.id) { vm.download(video.id) }
+    val download by downloadFlow.collectAsState(initial = null)
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("영상 ${index + 1}", fontWeight = FontWeight.SemiBold)
+            if (video.sourceKind == "DIRECT") {
+                NativeVideoPlayer(video)
+                when {
+                    AvseeClient.isDownloadableMediaUrl(video.url) -> {
+                        val busy = download?.status == "ENQUEUED" || download?.status == "RUNNING"
+                        val completed = download?.status == "COMPLETED"
+                        Button(
+                            onClick = { vm.queueDownload(video.id) },
+                            enabled = !busy && !completed,
+                            modifier = Modifier.semantics { contentDescription = "영상 ${index + 1} 다운로드" },
+                        ) { Text(if (download?.status == "FAILED") "다시 다운로드" else if (completed) "다운로드 완료" else "다운로드") }
+                        DownloadStatus(download)
+                    }
+                    AvseeClient.isHlsUrl(video.url) -> Text("HLS 스트림은 앱 내 재생을 지원하며 파일 다운로드는 지원하지 않습니다.")
+                    else -> Text("이 영상 형식은 파일 다운로드를 지원하지 않습니다.")
+                }
+            } else {
+                Text("원본 iframe 재생 문맥으로 영상을 불러옵니다.")
+                RestrictedIframePlayer(video, { candidate -> vm.registerProbedVideo(postId, video.id, candidate, video.url, index + 100) })
+            }
+        }
+    }
+}
+
+@Composable
+private fun DownloadStatus(download: DownloadEntity?) {
+    val text = when (download?.status) {
+        "ENQUEUED" -> "다운로드 대기 중"
+        "RUNNING" -> {
+            val total = download.totalBytes
+            if (total != null && total > 0L) {
+                val percent = (download.downloadedBytes * 100L / total).coerceIn(0L, 100L)
+                "다운로드 중 ${percent}%"
+            } else {
+                "다운로드 중 ${formatBytes(download.downloadedBytes)}"
+            }
+        }
+        "COMPLETED" -> "다운로드 완료 · ${formatBytes(download.downloadedBytes)}"
+        "FAILED" -> "다운로드 실패 · ${download.errorCode ?: "NETWORK"}"
+        else -> null
+    }
+    if (text != null) Text(text, style = MaterialTheme.typography.bodySmall)
 }
 
 @Composable
@@ -123,3 +171,9 @@ private fun StatusLine(loading: Boolean, message: String?, clear: () -> Unit) { 
 private val SEOUL = ZoneId.of("Asia/Seoul"); private val DATE_TIME = DateTimeFormatter.ofPattern("yyyy.MM.dd HH:mm:ss"); private val DATE = DateTimeFormatter.ofPattern("yyyy.MM.dd HH:mm")
 private fun formatDateTime(epochMillis: Long): String = Instant.ofEpochMilli(epochMillis).atZone(SEOUL).format(DATE_TIME)
 private fun formatDate(epochMillis: Long): String = Instant.ofEpochMilli(epochMillis).atZone(SEOUL).format(DATE)
+private fun formatBytes(bytes: Long): String = when {
+    bytes >= 1_073_741_824L -> "%.2f GB".format(bytes / 1_073_741_824.0)
+    bytes >= 1_048_576L -> "%.1f MB".format(bytes / 1_048_576.0)
+    bytes >= 1_024L -> "%.1f KB".format(bytes / 1_024.0)
+    else -> "$bytes B"
+}

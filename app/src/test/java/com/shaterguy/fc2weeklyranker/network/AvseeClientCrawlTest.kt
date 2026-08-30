@@ -7,6 +7,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.Instant
@@ -28,6 +29,14 @@ class AvseeClientCrawlTest {
         assertTrue(failure?.message?.contains("모두 실패") == true)
     }
 
+    @Test
+    fun `crawl continues past a mixed page instead of stopping on one old pinned row`() = runBlocking {
+        val client = AvseeClient(chronologyClient())
+        val window = windowFor(Instant.parse("2026-08-30T08:44:02Z"), 1)
+        val posts = client.crawlWindow("https://example.test", window)
+        assertEquals(listOf("301"), posts.map { it.id })
+    }
+
     private fun fakeClient(detailHtml: String): OkHttpClient = OkHttpClient.Builder()
         .addInterceptor { chain ->
             val request = chain.request()
@@ -37,13 +46,44 @@ class AvseeClientCrawlTest {
             } else {
                 "<a href='/bbs/board.php?bo_table=javfc2&wr_id=123'>Synthetic item</a>"
             }
-            Response.Builder()
-                .request(request)
-                .protocol(Protocol.HTTP_1_1)
-                .code(200)
-                .message("OK")
-                .body(body.toResponseBody("text/html; charset=utf-8".toMediaType()))
-                .build()
+            response(request, body)
         }
+        .build()
+
+    private fun chronologyClient(): OkHttpClient = OkHttpClient.Builder()
+        .addInterceptor { chain ->
+            val request = chain.request()
+            val id = request.url.queryParameter("wr_id")
+            val body = if (id != null) {
+                val posted = when (id) {
+                    "101" -> "2026-08-29 12:00:00"
+                    "201" -> "2026-08-01 12:00:00"
+                    "202" -> "2026-08-25 12:00:00"
+                    "301" -> "2026-08-20 12:00:00"
+                    else -> "2026-08-01 12:00:00"
+                }
+                "<h1>Post $id</h1><div id='bo_v_info'>작성일 $posted 추천 7</div>"
+            } else {
+                when (request.url.queryParameter("page")?.toIntOrNull() ?: 1) {
+                    1 -> board("101")
+                    2 -> board("201", "202")
+                    3 -> board("301")
+                    else -> board("401")
+                }
+            }
+            response(request, body)
+        }
+        .build()
+
+    private fun board(vararg ids: String): String = ids.joinToString(prefix = "<div id='bo_list'>", postfix = "</div>") { id ->
+        "<a href='/bbs/board.php?bo_table=javfc2&wr_id=$id'>Post $id</a>"
+    }
+
+    private fun response(request: okhttp3.Request, body: String): Response = Response.Builder()
+        .request(request)
+        .protocol(Protocol.HTTP_1_1)
+        .code(200)
+        .message("OK")
+        .body(body.toResponseBody("text/html; charset=utf-8".toMediaType()))
         .build()
 }

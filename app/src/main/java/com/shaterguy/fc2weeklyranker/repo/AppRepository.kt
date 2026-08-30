@@ -8,6 +8,7 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.workDataOf
 import com.shaterguy.fc2weeklyranker.data.AppDatabase
+import com.shaterguy.fc2weeklyranker.data.DownloadEntity
 import com.shaterguy.fc2weeklyranker.data.FavoriteEntity
 import com.shaterguy.fc2weeklyranker.data.PostEntity
 import com.shaterguy.fc2weeklyranker.data.SettingsStore
@@ -25,9 +26,14 @@ import java.security.MessageDigest
 import java.time.Instant
 
 class AppRepository(private val context: Context, private val db: AppDatabase, val settings: SettingsStore, private val source: AvseeClient) {
-    fun posts(snapshotKey: String): Flow<List<PostEntity>> = db.postDao().postsForSnapshot(snapshotKey)
+    fun posts(anchorMillis: Long, pageIndex: Int): Flow<List<PostEntity>> {
+        val window = windowFor(Instant.ofEpochMilli(anchorMillis), pageIndex)
+        return db.postDao().postsInWindow(window.startInclusive.toEpochMilli(), window.upperInclusive.toEpochMilli())
+    }
+
     fun favorites(): Flow<List<PostEntity>> = db.postDao().favorites()
     fun videos(postId: String): Flow<List<VideoEntity>> = db.videoDao().forPost(postId)
+    fun download(videoId: String): Flow<DownloadEntity?> = db.downloadDao().observe(videoId)
     suspend fun ensureAnchor(): Long = settings.ensureAnchor()
 
     suspend fun ensurePage(pageIndex: Int) {
@@ -66,23 +72,51 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
         val post = db.postDao().byId(postId) ?: return
         val detailUrl = rebaseDetailUrl(post.url, settings.baseUrl.first())
         val detail = source.loadDetail(detailUrl)
-        val entities = detail.media.map { media -> VideoEntity(stableVideoId(postId, media.url), postId, media.url, media.referer, AvseeClient.USER_AGENT, media.kind, media.ordinal, System.currentTimeMillis()) }
-        if (entities.isNotEmpty()) db.videoDao().upsert(entities)
+        val now = System.currentTimeMillis()
+        val entities = detail.media.map { media ->
+            val canonical = AvseeClient.canonicalMediaUrl(media.url)
+            VideoEntity(stableVideoId(postId, canonical), postId, canonical, media.referer, AvseeClient.USER_AGENT, media.kind, media.ordinal, now)
+        }
+        db.videoDao().replaceForPost(postId, entities)
     }
 
-    suspend fun registerProbedVideo(postId: String, url: String, referer: String, ordinal: Int) {
-        if (!url.startsWith("https://")) return
-        db.videoDao().upsert(listOf(VideoEntity(stableVideoId(postId, url), postId, url, referer, AvseeClient.USER_AGENT, "DIRECT", ordinal, System.currentTimeMillis())))
+    suspend fun registerProbedVideo(postId: String, wrapperVideoId: String, url: String, referer: String, ordinal: Int) {
+        if (!url.startsWith("https://", ignoreCase = true)) return
+        val canonical = AvseeClient.canonicalMediaUrl(url)
+        val directId = stableVideoId(postId, canonical)
+        db.videoDao().upsert(listOf(VideoEntity(directId, postId, canonical, referer, AvseeClient.USER_AGENT, "DIRECT", ordinal, System.currentTimeMillis())))
+        if (wrapperVideoId != directId) db.videoDao().deleteById(wrapperVideoId)
     }
 
-    fun queueDownload(videoId: String) {
-        val request = OneTimeWorkRequestBuilder<VideoDownloadWorker>().setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()).setInputData(workDataOf(VideoDownloadWorker.KEY_VIDEO_ID to videoId)).build()
+    suspend fun queueDownload(videoId: String) {
+        val video = db.videoDao().byId(videoId) ?: return
+        val dao = db.downloadDao()
+        val previous = dao.byVideoId(videoId)
+        if (previous?.status == "COMPLETED") return
+        val unsupported = when {
+            video.sourceKind != "DIRECT" -> "NOT_DIRECT"
+            AvseeClient.isHlsUrl(video.url) -> "HLS_UNSUPPORTED"
+            !AvseeClient.isDownloadableMediaUrl(video.url) -> "UNSUPPORTED_MEDIA"
+            else -> null
+        }
+        if (unsupported != null) {
+            dao.upsert(DownloadEntity(videoId, "FAILED", previous?.contentUri, previous?.downloadedBytes ?: 0L, previous?.totalBytes, unsupported, System.currentTimeMillis()))
+            return
+        }
+        dao.upsert(DownloadEntity(videoId, "ENQUEUED", previous?.contentUri, previous?.downloadedBytes ?: 0L, previous?.totalBytes, null, System.currentTimeMillis()))
+        val request = OneTimeWorkRequestBuilder<VideoDownloadWorker>()
+            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+            .setInputData(workDataOf(VideoDownloadWorker.KEY_VIDEO_ID to videoId))
+            .build()
         WorkManager.getInstance(context).enqueueUniqueWork("video-download-$videoId", ExistingWorkPolicy.KEEP, request)
     }
 
     companion object {
         fun snapshotKey(anchorMillis: Long, pageIndex: Int): String = "$anchorMillis:$pageIndex"
-        fun stableVideoId(postId: String, url: String): String = MessageDigest.getInstance("SHA-256").digest("$postId|$url".toByteArray()).take(12).joinToString("") { "%02x".format(it) }
+        fun stableVideoId(postId: String, url: String): String {
+            val canonical = AvseeClient.canonicalMediaUrl(url)
+            return MessageDigest.getInstance("SHA-256").digest("$postId|$canonical".toByteArray()).take(12).joinToString("") { "%02x".format(it) }
+        }
 
         internal fun rebaseDetailUrl(originalUrl: String, baseUrl: String): String {
             val original = URI(originalUrl)

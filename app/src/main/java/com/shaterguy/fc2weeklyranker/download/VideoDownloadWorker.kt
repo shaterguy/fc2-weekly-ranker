@@ -10,6 +10,7 @@ import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import com.shaterguy.fc2weeklyranker.AppGraph
 import com.shaterguy.fc2weeklyranker.data.DownloadEntity
+import com.shaterguy.fc2weeklyranker.network.AvseeClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.Request
@@ -21,9 +22,19 @@ class VideoDownloadWorker(appContext: Context, params: WorkerParameters) : Corou
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val videoId = inputData.getString(KEY_VIDEO_ID) ?: return@withContext Result.failure()
         val video = AppGraph.database.videoDao().byId(videoId) ?: return@withContext Result.failure()
-        if (video.sourceKind != "DIRECT") return@withContext Result.failure(workDataOf("code" to "NOT_DIRECT"))
         val dao = AppGraph.database.downloadDao()
         val previous = dao.byVideoId(videoId)
+        val unsupported = when {
+            video.sourceKind != "DIRECT" -> "NOT_DIRECT"
+            AvseeClient.isHlsUrl(video.url) -> "HLS_UNSUPPORTED"
+            !AvseeClient.isDownloadableMediaUrl(video.url) -> "UNSUPPORTED_MEDIA"
+            else -> null
+        }
+        if (unsupported != null) {
+            dao.upsert(state(videoId, "FAILED", previous?.contentUri, previous?.downloadedBytes ?: 0L, previous?.totalBytes, unsupported))
+            return@withContext Result.failure(workDataOf("code" to unsupported))
+        }
+
         var uri = previous?.contentUri?.let(android.net.Uri::parse)
         var existingBytes = previous?.downloadedBytes ?: 0L
         if (uri == null) {
@@ -47,7 +58,12 @@ class VideoDownloadWorker(appContext: Context, params: WorkerParameters) : Corou
                 val body = response.body
                 val append = response.code == 206 && existingBytes > 0L
                 if (!append) existingBytes = 0L
-                val total: Long? = when { response.code == 206 -> existingBytes + body.contentLength().coerceAtLeast(0L); body.contentLength() >= 0L -> body.contentLength(); else -> null }
+                val bodyLength = body.contentLength()
+                val total: Long? = when {
+                    response.code == 206 && bodyLength >= 0L -> existingBytes + bodyLength
+                    response.code == 200 && bodyLength >= 0L -> bodyLength
+                    else -> null
+                }
                 val descriptor = applicationContext.contentResolver.openFileDescriptor(uri!!, "rw") ?: throw IOException("OPEN_FAILED")
                 descriptor.use { pfd ->
                     FileOutputStream(pfd.fileDescriptor).use { output ->

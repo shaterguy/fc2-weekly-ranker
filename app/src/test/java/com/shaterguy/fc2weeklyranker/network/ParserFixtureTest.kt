@@ -2,6 +2,7 @@ package com.shaterguy.fc2weeklyranker.network
 
 import okhttp3.OkHttpClient
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.Instant
@@ -10,8 +11,14 @@ class ParserFixtureTest {
     private val parser = AvseeClient(OkHttpClient())
 
     @Test
-    fun `extracts unique post links from board fixture`() {
-        val html = "<table><tr><td><a href='/bbs/board.php?bo_table=javfc2&wr_id=123'>fixture</a><a href='/bbs/board.php?bo_table=javfc2&wr_id=123'>duplicate</a></td></tr></table>"
+    fun `extracts unique post links from board list without sidebar links`() {
+        val html = """
+            <aside><a href='/bbs/board.php?bo_table=javfc2&wr_id=999'>sidebar old recommendation</a></aside>
+            <div id='bo_list'><table><tbody><tr><td>
+              <a href='/bbs/board.php?bo_table=javfc2&wr_id=123'>fixture</a>
+              <a href='/bbs/board.php?bo_table=javfc2&wr_id=123'>duplicate</a>
+            </td></tr></tbody></table></div>
+        """.trimIndent()
         assertEquals(
             listOf("https://example.test/bbs/board.php?bo_table=javfc2&wr_id=123"),
             parser.parseBoardLinks(html, "https://example.test"),
@@ -45,6 +52,50 @@ class ParserFixtureTest {
         )
         assertEquals(Instant.parse("2026-08-29T10:28:00Z"), post.postedAt)
         assertEquals(12, post.recommendationCount)
+    }
+
+    @Test
+    fun `falls back to the last site metric before timestamp for recommendation`() {
+        val html = """
+            <h1>Live-shaped metric fallback</h1>
+            <div id='bo_v_info'>M Manager 11 4913 12 08.29 19:28</div>
+        """.trimIndent()
+        val post = parser.parseDetail(
+            html,
+            "https://example.test/bbs/board.php?bo_table=javfc2&wr_id=457",
+            Instant.parse("2026-08-30T08:44:02Z"),
+        )
+        assertEquals(12, post.recommendationCount)
+    }
+
+    @Test
+    fun `iframe containing direct stream does not create an extra wrapper card`() {
+        val html = """
+            <h1>Media identity fixture</h1>
+            <div id='bo_v_info'>M Manager 1 100 4 08.29 19:28</div>
+            <video src='https://MEDIA.example.test/path/a.mp4#player'></video>
+            <iframe src='https://player.example.test/embed?url=https%3A%2F%2Fmedia.example.test%2Fpath%2Fa.mp4'></iframe>
+        """.trimIndent()
+        val post = parser.parseDetail(
+            html,
+            "https://example.test/bbs/board.php?bo_table=javfc2&wr_id=458",
+            Instant.parse("2026-08-30T08:44:02Z"),
+        )
+        assertEquals(1, post.media.size)
+        assertEquals("DIRECT", post.media.single().kind)
+        assertEquals("https://media.example.test/path/a.mp4", post.media.single().url)
+    }
+
+    @Test
+    fun `canonical media identity and download contract distinguish hls`() {
+        assertEquals(
+            "https://media.example.test/a.mp4?token=A",
+            AvseeClient.canonicalMediaUrl("HTTPS://MEDIA.EXAMPLE.TEST:443/a.mp4?token=A#fragment"),
+        )
+        assertTrue(AvseeClient.isDownloadableMediaUrl("https://media.example.test/a.mp4?token=A"))
+        assertTrue(AvseeClient.isDownloadableMediaUrl("https://media.example.test/a.webm"))
+        assertTrue(AvseeClient.isHlsUrl("https://media.example.test/master.m3u8?token=A"))
+        assertFalse(AvseeClient.isDownloadableMediaUrl("https://media.example.test/master.m3u8?token=A"))
     }
 
     @Test

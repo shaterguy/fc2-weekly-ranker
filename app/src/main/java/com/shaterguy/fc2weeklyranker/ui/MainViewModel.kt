@@ -25,7 +25,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val isLoading = loading.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     val baseUrl = repo.settings.baseUrl.stateIn(viewModelScope, SharingStarted.Eagerly, "https://01.avsee.is")
     val anchorEpochMillis = combine(repo.settings.anchorEpochMillis, localAnchor) { stored, local -> local ?: stored }.filterNotNull().stateIn(viewModelScope, SharingStarted.Eagerly, System.currentTimeMillis())
-    val posts = combine(anchorEpochMillis, page) { anchor, index -> AppRepository.snapshotKey(anchor, index) }.flatMapLatest(repo::posts).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    val posts = combine(anchorEpochMillis, page) { anchor, index -> anchor to index }
+        .flatMapLatest { (anchor, index) -> repo.posts(anchor, index) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val favorites = repo.favorites().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     init { viewModelScope.launch { val anchor = repo.ensureAnchor(); localAnchor.value = anchor; runOperation { repo.ensurePage(0) } } }
@@ -34,9 +36,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun refreshAnchor() { viewModelScope.launch { page.value = 0; runOperation { localAnchor.value = repo.manualRefresh() } } }
     fun toggleFavorite(postId: String) { viewModelScope.launch { runOperation { repo.toggleFavorite(postId) } } }
     fun videos(postId: String) = repo.videos(postId)
+    fun download(videoId: String) = repo.download(videoId)
     fun loadVideos(postId: String) { viewModelScope.launch { runOperation { repo.loadVideos(postId) } } }
-    fun registerProbedVideo(postId: String, url: String, referer: String, ordinal: Int) { viewModelScope.launch { repo.registerProbedVideo(postId, url, referer, ordinal) } }
-    fun queueDownload(videoId: String) = repo.queueDownload(videoId)
+    fun registerProbedVideo(postId: String, wrapperVideoId: String, url: String, referer: String, ordinal: Int) {
+        viewModelScope.launch { repo.registerProbedVideo(postId, wrapperVideoId, url, referer, ordinal) }
+    }
+    fun queueDownload(videoId: String) {
+        viewModelScope.launch {
+            runCatching { repo.queueDownload(videoId) }.onFailure { mutableMessage.value = "다운로드 요청 실패: ${safeMessage(it)}" }
+        }
+    }
     fun saveBaseUrl(input: String) {
         viewModelScope.launch {
             loading.value = true

@@ -83,12 +83,35 @@ jobs:
           APK="$OUT/fc2-weekly-ranker-test-v0.1.0-dev1.apk"
           "$BT/zipalign" -p -f 4 "$UNSIGNED" "$ALIGNED"
           APKSIGNER="$BT/apksigner" bash tools/sign_test.sh "$ALIGNED" "$PASS_FILE" "$APK" > "$OUT/APKSIGNER_VERIFY.txt"
-          "$BT/apksigner" verify --verbose --print-certs --min-sdk-version 29 "$APK" > "$OUT/APK_CERT.txt"
+          "$BT/apksigner" verify --verbose --print-certs-pem --min-sdk-version 29 "$APK" > "$OUT/APK_CERT.txt"
           BADGING="$("$BT/aapt" dump badging "$APK")"
           grep -Fq "package: name='com.shaterguy.fc2weeklyranker.dev' versionCode='1' versionName='0.1.0-dev1'" <<<"$BADGING"
           CERT_SHA256="$(awk -F= '/^certificate_sha256=/{print $2; exit}' "$OUT/APKSIGNER_VERIFY.txt" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
           [[ "$CERT_SHA256" =~ ^[0-9a-f]{64}$ ]]
-          grep -Fqi "$CERT_SHA256" "$OUT/APK_CERT.txt"
+          python3 - "$OUT/APK_CERT.txt" "$CERT_SHA256" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          from cryptography import x509
+          from cryptography.hazmat.primitives import hashes
+
+          data = Path(sys.argv[1]).read_bytes()
+          expected = sys.argv[2].lower()
+          blocks = re.findall(
+              rb"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
+              data,
+              flags=re.S,
+          )
+          if not blocks:
+              raise SystemExit("no signer certificate PEM found in independent verification")
+          fingerprints = {
+              x509.load_pem_x509_certificate(block + b"\n").fingerprint(hashes.SHA256()).hex()
+              for block in blocks
+          }
+          if expected not in fingerprints:
+              raise SystemExit("independent signer certificate fingerprint mismatch")
+          PY
           printf '%s\n' "$CERT_SHA256" > "$OUT/TEST_CERT_SHA256.txt"
           echo "TEST_CERT_SHA256=$CERT_SHA256"
           sha256sum "$APK" > "$OUT/SHA256SUMS.txt"

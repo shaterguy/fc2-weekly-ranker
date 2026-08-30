@@ -54,29 +54,38 @@ rm -f "$OUTPUT"
 
 VERIFY_LOG="$TMP/apksigner-verify.txt"
 STAGE=apk-verify
-"$APKSIGNER" verify --verbose --print-certs --min-sdk-version 29 "$OUTPUT" | tee "$VERIFY_LOG"
+"$APKSIGNER" verify --verbose --print-certs-pem --min-sdk-version 29 "$OUTPUT" | tee "$VERIFY_LOG"
 STAGE=verify-v3
 grep -Fq "Verified using v3 scheme (APK Signature Scheme v3): true" "$VERIFY_LOG"
 STAGE=verify-signer-count
 grep -Fq "Number of signers: 1" "$VERIFY_LOG"
 STAGE=verify-cert-digest
-PARSED_CERT_DIGEST_COUNT="$(awk '
-  /^Signer .* certificate SHA-256 digest:[[:space:]]*/ { count++ }
-  END { print count + 0 }
-' "$VERIFY_LOG")"
-[[ "$PARSED_CERT_DIGEST_COUNT" -ge 1 ]] || { echo "no signer certificate SHA-256 digest found" >&2; exit 1; }
-SIGNED_CERT_SHA256="$(awk -v expected="$DERIVED_CERT_SHA256" '
-  /^Signer .* certificate SHA-256 digest:[[:space:]]*/ {
-    digest=$0
-    sub(/^.*certificate SHA-256 digest:[[:space:]]*/, "", digest)
-    gsub(/[[:space:]:]/, "", digest)
-    digest=tolower(digest)
-    if (digest == expected) {
-      print digest
-      exit
-    }
-  }
-' "$VERIFY_LOG")"
+SIGNED_CERT_SHA256="$(python3 - "$VERIFY_LOG" "$DERIVED_CERT_SHA256" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes
+
+data = Path(sys.argv[1]).read_bytes()
+expected = sys.argv[2].lower()
+blocks = re.findall(
+    rb"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
+    data,
+    flags=re.S,
+)
+if not blocks:
+    raise SystemExit("no signer certificate PEM found")
+fingerprints = {
+    x509.load_pem_x509_certificate(block + b"\n").fingerprint(hashes.SHA256()).hex()
+    for block in blocks
+}
+if expected not in fingerprints:
+    raise SystemExit("signed certificate does not match derived certificate")
+print(expected)
+PY
+)"
 [[ "$SIGNED_CERT_SHA256" == "$DERIVED_CERT_SHA256" ]] || { echo "signed certificate does not match derived certificate" >&2; exit 1; }
 
 STAGE=complete

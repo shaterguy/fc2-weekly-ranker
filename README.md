@@ -5,7 +5,7 @@ Android TEST app for browsing the configured `javfc2` board in fixed seven-day w
 ## TEST channel
 
 - Branch lineage starts at `v0.1.0-dev1`.
-- Source version: `0.1.0-dev1`, `versionCode=1`.
+- Source version: `0.1.0-dev2`, `versionCode=2`.
 - TEST application ID: `com.shaterguy.fc2weeklyranker.dev`.
 - The configured default origin is `https://01.avsee.is`; users can replace it in Settings after an HTTPS connection check.
 - The anchor instant is persisted in DataStore and changes only when the user explicitly refreshes it.

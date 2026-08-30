@@ -1,6 +1,7 @@
 package com.shaterguy.fc2weeklyranker.network
 
 import com.shaterguy.fc2weeklyranker.domain.DateWindow
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -19,10 +20,15 @@ private val SEOUL = ZoneId.of("Asia/Seoul")
 data class RemoteMedia(val url: String, val referer: String, val kind: String, val ordinal: Int)
 data class RemotePost(val id: String, val url: String, val title: String, val postedAt: Instant, val recommendationCount: Int, val media: List<RemoteMedia>)
 
-class AvseeClient(private val http: OkHttpClient) {
-    suspend fun testConnection(baseUrl: String): Result<Unit> = runCatching { fetch("$baseUrl$BOARD_PATH"); Unit }
+class AvseeClient(
+    private val http: OkHttpClient,
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+) {
+    suspend fun testConnection(baseUrl: String): Result<Unit> = withContext(ioDispatcher) {
+        runCatching { fetch("$baseUrl$BOARD_PATH"); Unit }
+    }
 
-    suspend fun crawlWindow(baseUrl: String, window: DateWindow): List<RemotePost> = withContext(Dispatchers.IO) {
+    suspend fun crawlWindow(baseUrl: String, window: DateWindow): List<RemotePost> = withContext(ioDispatcher) {
         val out = LinkedHashMap<String, RemotePost>()
         for (page in 1..30) {
             val boardUrl = "$baseUrl$BOARD_PATH&page=$page"
@@ -39,7 +45,7 @@ class AvseeClient(private val http: OkHttpClient) {
         out.values.toList()
     }
 
-    suspend fun loadDetail(url: String): RemotePost = withContext(Dispatchers.IO) { parseDetail(fetch(url), url) }
+    suspend fun loadDetail(url: String): RemotePost = withContext(ioDispatcher) { parseDetail(fetch(url), url) }
 
     internal fun parseBoardLinks(html: String, baseUrl: String): List<String> {
         val doc = Jsoup.parse(html, baseUrl)

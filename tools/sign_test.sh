@@ -23,6 +23,7 @@ cleanup() {
 }
 trap cleanup EXIT
 APKSIGNER="${APKSIGNER:-apksigner}"
+PINNED_TEST_CERT_SHA256="ff32473e516ff59ca24ada94fe22e8282ce70fd66bd94fb0975340106d981cfd"
 
 STAGE=validate-input
 [[ -s "$INPUT" ]] || { echo "candidate APK not found or empty" >&2; exit 1; }
@@ -38,6 +39,8 @@ python3 "$ROOT/tools/derive_test_signing_identity.py" \
 
 DERIVED_CERT_SHA256="$(tr -d '[:space:]' < "$TMP/cert-sha256.txt" | tr '[:upper:]' '[:lower:]')"
 [[ "$DERIVED_CERT_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "invalid derived certificate fingerprint" >&2; exit 1; }
+STAGE=verify-pinned-derived-cert
+[[ "$DERIVED_CERT_SHA256" == "$PINNED_TEST_CERT_SHA256" ]] || { echo "derived certificate does not match pinned TEST certificate" >&2; exit 1; }
 
 STAGE=apk-sign
 rm -f "$OUTPUT"
@@ -60,7 +63,7 @@ grep -Fq "Verified using v3 scheme (APK Signature Scheme v3): true" "$VERIFY_LOG
 STAGE=verify-signer-count
 grep -Fq "Number of signers: 1" "$VERIFY_LOG"
 STAGE=verify-cert-digest
-SIGNED_CERT_SHA256="$(python3 - "$VERIFY_LOG" "$DERIVED_CERT_SHA256" <<'PY'
+SIGNED_CERT_SHA256="$(python3 - "$VERIFY_LOG" "$PINNED_TEST_CERT_SHA256" <<'PY'
 import re
 import sys
 from pathlib import Path
@@ -82,11 +85,11 @@ fingerprints = {
     for block in blocks
 }
 if expected not in fingerprints:
-    raise SystemExit("signed certificate does not match derived certificate")
+    raise SystemExit("signed certificate does not match pinned TEST certificate")
 print(expected)
 PY
 )"
-[[ "$SIGNED_CERT_SHA256" == "$DERIVED_CERT_SHA256" ]] || { echo "signed certificate does not match derived certificate" >&2; exit 1; }
+[[ "$SIGNED_CERT_SHA256" == "$PINNED_TEST_CERT_SHA256" ]] || { echo "signed certificate does not match pinned TEST certificate" >&2; exit 1; }
 
 STAGE=complete
 sha256sum "$OUTPUT"

@@ -86,9 +86,11 @@ jobs:
           "$BT/apksigner" verify --verbose --print-certs-pem --min-sdk-version 29 "$APK" > "$OUT/APK_CERT.txt"
           BADGING="$("$BT/aapt" dump badging "$APK")"
           grep -Fq "package: name='com.shaterguy.fc2weeklyranker.dev' versionCode='1' versionName='0.1.0-dev1'" <<<"$BADGING"
+          PINNED_TEST_CERT_SHA256='ff32473e516ff59ca24ada94fe22e8282ce70fd66bd94fb0975340106d981cfd'
           CERT_SHA256="$(awk -F= '/^certificate_sha256=/{print $2; exit}' "$OUT/APKSIGNER_VERIFY.txt" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
           [[ "$CERT_SHA256" =~ ^[0-9a-f]{64}$ ]]
-          python3 - "$OUT/APK_CERT.txt" "$CERT_SHA256" <<'PY'
+          [[ "$CERT_SHA256" == "$PINNED_TEST_CERT_SHA256" ]]
+          python3 - "$OUT/APK_CERT.txt" "$PINNED_TEST_CERT_SHA256" <<'PY'
           import re
           import sys
           from pathlib import Path

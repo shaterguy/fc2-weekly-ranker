@@ -60,7 +60,23 @@ grep -Fq "Verified using v3 scheme (APK Signature Scheme v3): true" "$VERIFY_LOG
 STAGE=verify-signer-count
 grep -Fq "Number of signers: 1" "$VERIFY_LOG"
 STAGE=verify-cert-digest
-SIGNED_CERT_SHA256="$(awk -F': ' '/Signer #1 certificate SHA-256 digest:/ {print $2; exit}' "$VERIFY_LOG" | tr -d '[:space:]:' | tr '[:upper:]' '[:lower:]')"
+PARSED_CERT_DIGEST_COUNT="$(awk '
+  /^Signer (#[0-9]+|\(.*\)) certificate SHA-256 digest:[[:space:]]*/ { count++ }
+  END { print count + 0 }
+' "$VERIFY_LOG")"
+[[ "$PARSED_CERT_DIGEST_COUNT" -ge 1 ]] || { echo "no signer certificate SHA-256 digest found" >&2; exit 1; }
+SIGNED_CERT_SHA256="$(awk -v expected="$DERIVED_CERT_SHA256" '
+  /^Signer (#[0-9]+|\(.*\)) certificate SHA-256 digest:[[:space:]]*/ {
+    digest=$0
+    sub(/^.*certificate SHA-256 digest:[[:space:]]*/, "", digest)
+    gsub(/[[:space:]:]/, "", digest)
+    digest=tolower(digest)
+    if (digest == expected) {
+      print digest
+      exit
+    }
+  }
+' "$VERIFY_LOG")"
 [[ "$SIGNED_CERT_SHA256" == "$DERIVED_CERT_SHA256" ]] || { echo "signed certificate does not match derived certificate" >&2; exit 1; }
 
 STAGE=complete

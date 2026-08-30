@@ -5,7 +5,7 @@ Android TEST app for browsing the configured `javfc2` board in fixed seven-day w
 ## TEST channel
 
 - Branch lineage starts at `v0.1.0-dev1`.
-- Source version: `0.1.0-dev3`, `versionCode=3`.
+- Source version: `0.1.0-dev5`, `versionCode=5`.
 - TEST application ID: `com.shaterguy.fc2weeklyranker.dev`.
 - The configured default origin is `https://01.avsee.is`; users can replace it in Settings after a board-and-detail parsing connection check.
 - The anchor instant is persisted in DataStore and changes only when the user explicitly refreshes it.
@@ -16,7 +16,7 @@ Android TEST app for browsing the configured `javfc2` board in fixed seven-day w
 
 ## Media path
 
-The detail screen renders media only. Static `video`, `source`, media links, and `iframe` sources are parsed first. Direct sources use Media3 with the same `Referer`, user agent, and runtime WebView cookie context. Iframe-only sources use a restricted WebView player that observes HTTPS media requests and `currentSrc`; discovered direct sources are stored without persisting cookies.
+The detail screen renders media only. Static `video`, `source`, media links, and `iframe` sources are parsed first. Direct sources use Media3 with the same `Referer`, user agent, and runtime WebView cookie context. Iframe wrapper query values that expose an `http://` media URL are promoted to `https://` before the source is accepted; cleartext playback and downloads remain disabled. Iframe-only sources use a restricted WebView player that observes HTTPS media requests and `currentSrc`; discovered direct sources are stored without persisting cookies.
 
 Downloads are unique WorkManager jobs and write to `MediaStore.Downloads`, with HTTP Range resume when the server returns `206`.
 

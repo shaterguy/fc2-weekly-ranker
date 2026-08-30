@@ -217,15 +217,31 @@ class AvseeClient(
             var value = part.substringAfter('=', "")
             if (value.isBlank()) return@forEach
             repeat(3) {
-                if (value.startsWith("https://", ignoreCase = true) && looksLikeMedia(value)) {
-                    return canonicalMediaUrl(value)
-                }
+                secureEmbeddedMediaUrl(value)?.let { return it }
                 val decoded = runCatching { URLDecoder.decode(value, StandardCharsets.UTF_8.name()) }.getOrDefault(value)
                 if (decoded == value) return@repeat
                 value = decoded
             }
+            secureEmbeddedMediaUrl(value)?.let { return it }
         }
         return null
+    }
+
+    private fun secureEmbeddedMediaUrl(value: String): String? {
+        if (!looksLikeMedia(value)) return null
+        val uri = runCatching { URI(value) }.getOrNull() ?: return null
+        return when (uri.scheme?.lowercase()) {
+            "https" -> canonicalMediaUrl(value)
+            "http" -> {
+                val host = uri.host ?: return null
+                if (uri.userInfo != null || uri.port !in listOf(-1, 80, 443)) return null
+                val renderedHost = if (host.contains(':')) "[$host]" else host
+                val path = uri.rawPath.orEmpty().ifBlank { "/" }
+                val query = uri.rawQuery?.let { "?$it" }.orEmpty()
+                canonicalMediaUrl("https://$renderedHost$path$query")
+            }
+            else -> null
+        }
     }
 
     private fun looksLikeMedia(url: String): Boolean {

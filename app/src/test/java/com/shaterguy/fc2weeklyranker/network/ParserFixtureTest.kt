@@ -87,6 +87,24 @@ class ParserFixtureTest {
     }
 
     @Test
+    fun `encoded http iframe media is promoted to https without cleartext playback`() {
+        val html = """
+            <h1>Legacy wrapper fixture</h1>
+            <div id='bo_v_info'>M Manager 1 100 4 08.29 19:28</div>
+            <iframe src='https://player.example.test/player.php?720=http%3A%2F%2Fcdn.example.test%2Fh%2Fclip.mp4'></iframe>
+        """.trimIndent()
+        val post = parser.parseDetail(
+            html,
+            "https://example.test/bbs/board.php?bo_table=javfc2&wr_id=459",
+            Instant.parse("2026-08-30T08:44:02Z"),
+        )
+        assertEquals(1, post.media.size)
+        assertEquals("DIRECT", post.media.single().kind)
+        assertEquals("https://cdn.example.test/h/clip.mp4", post.media.single().url)
+        assertTrue(AvseeClient.isDownloadableMediaUrl(post.media.single().url))
+    }
+
+    @Test
     fun `canonical media identity and download contract distinguish hls`() {
         assertEquals(
             "https://media.example.test/a.mp4?token=A",

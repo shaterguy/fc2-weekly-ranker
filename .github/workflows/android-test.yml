@@ -38,9 +38,11 @@ jobs:
         run: bash scripts/verify.sh
       - name: Build TEST APK
         run: gradle --no-daemon --stacktrace :app:assembleDebug
-      - name: Checksum
+      - name: Prepare TEST provenance
         shell: bash
-        run: sha256sum app/build/outputs/apk/debug/app-debug.apk > app/build/outputs/apk/debug/app-debug.apk.sha256
+        run: |
+          printf '%s\n' "$GITHUB_SHA" > app/build/outputs/apk/debug/SOURCE_COMMIT.txt
+          sha256sum app/build/outputs/apk/debug/app-debug.apk > app/build/outputs/apk/debug/app-debug.apk.sha256
       - name: Upload TEST artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -48,5 +50,22 @@ jobs:
           path: |
             app/build/outputs/apk/debug/app-debug.apk
             app/build/outputs/apk/debug/app-debug.apk.sha256
+            app/build/outputs/apk/debug/SOURCE_COMMIT.txt
+          if-no-files-found: error
+          retention-days: 14
+      - name: Prepare apksigner tool bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          TOOL_DIR="$RUNNER_TEMP/apksigner-tool"
+          mkdir -p "$TOOL_DIR/lib"
+          cp "$ANDROID_HOME/build-tools/37.0.0/apksigner" "$TOOL_DIR/apksigner"
+          cp "$ANDROID_HOME/build-tools/37.0.0/lib/apksigner.jar" "$TOOL_DIR/lib/apksigner.jar"
+          sha256sum "$TOOL_DIR/apksigner" "$TOOL_DIR/lib/apksigner.jar" > "$TOOL_DIR/APKSIGNER_SHA256SUMS.txt"
+      - name: Upload apksigner tool
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: fc2-weekly-ranker-apksigner-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/apksigner-tool
           if-no-files-found: error
           retention-days: 14

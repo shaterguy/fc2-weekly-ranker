@@ -61,12 +61,12 @@ STAGE=verify-signer-count
 grep -Fq "Number of signers: 1" "$VERIFY_LOG"
 STAGE=verify-cert-digest
 PARSED_CERT_DIGEST_COUNT="$(awk '
-  /^Signer (#[0-9]+|\(.*\)) certificate SHA-256 digest:[[:space:]]*/ { count++ }
+  /^Signer .* certificate SHA-256 digest:[[:space:]]*/ { count++ }
   END { print count + 0 }
 ' "$VERIFY_LOG")"
 [[ "$PARSED_CERT_DIGEST_COUNT" -ge 1 ]] || { echo "no signer certificate SHA-256 digest found" >&2; exit 1; }
 SIGNED_CERT_SHA256="$(awk -v expected="$DERIVED_CERT_SHA256" '
-  /^Signer (#[0-9]+|\(.*\)) certificate SHA-256 digest:[[:space:]]*/ {
+  /^Signer .* certificate SHA-256 digest:[[:space:]]*/ {
     digest=$0
     sub(/^.*certificate SHA-256 digest:[[:space:]]*/, "", digest)
     gsub(/[[:space:]:]/, "", digest)

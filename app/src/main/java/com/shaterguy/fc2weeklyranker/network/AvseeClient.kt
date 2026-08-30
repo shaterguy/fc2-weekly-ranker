@@ -220,7 +220,7 @@ class AvseeClient(
                 if (value.startsWith("https://", ignoreCase = true) && looksLikeMedia(value)) {
                     return canonicalMediaUrl(value)
                 }
-                val decoded = runCatching { URLDecoder.decode(value, StandardCharsets.UTF_8) }.getOrDefault(value)
+                val decoded = runCatching { URLDecoder.decode(value, StandardCharsets.UTF_8.name()) }.getOrDefault(value)
                 if (decoded == value) return@repeat
                 value = decoded
             }

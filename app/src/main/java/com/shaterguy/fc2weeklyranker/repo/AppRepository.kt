@@ -20,6 +20,7 @@ import com.shaterguy.fc2weeklyranker.network.AvseeClient
 import com.shaterguy.fc2weeklyranker.network.BaseUrlPolicy
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
+import java.net.URI
 import java.security.MessageDigest
 import java.time.Instant
 
@@ -63,7 +64,8 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
 
     suspend fun loadVideos(postId: String) {
         val post = db.postDao().byId(postId) ?: return
-        val detail = source.loadDetail(post.url)
+        val detailUrl = rebaseDetailUrl(post.url, settings.baseUrl.first())
+        val detail = source.loadDetail(detailUrl)
         val entities = detail.media.map { media -> VideoEntity(stableVideoId(postId, media.url), postId, media.url, media.referer, AvseeClient.USER_AGENT, media.kind, media.ordinal, System.currentTimeMillis()) }
         if (entities.isNotEmpty()) db.videoDao().upsert(entities)
     }
@@ -81,5 +83,15 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
     companion object {
         fun snapshotKey(anchorMillis: Long, pageIndex: Int): String = "$anchorMillis:$pageIndex"
         fun stableVideoId(postId: String, url: String): String = MessageDigest.getInstance("SHA-256").digest("$postId|$url".toByteArray()).take(12).joinToString("") { "%02x".format(it) }
+
+        internal fun rebaseDetailUrl(originalUrl: String, baseUrl: String): String {
+            val original = URI(originalUrl)
+            val base = URI(baseUrl)
+            require(original.scheme.equals("https", ignoreCase = true))
+            require(base.scheme.equals("https", ignoreCase = true))
+            val path = original.rawPath?.takeIf { it.startsWith("/") } ?: "/"
+            val query = original.rawQuery?.let { "?$it" }.orEmpty()
+            return "https://${base.host}$path$query"
+        }
     }
 }

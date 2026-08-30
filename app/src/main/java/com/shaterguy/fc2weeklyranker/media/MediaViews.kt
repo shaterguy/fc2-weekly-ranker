@@ -54,6 +54,7 @@ fun RestrictedIframePlayer(video: VideoEntity, onMediaDiscovered: (String) -> Un
         WebView(context).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
+            settings.userAgentString = video.userAgent
             settings.allowFileAccess = false
             settings.allowContentAccess = false
             settings.allowFileAccessFromFileURLs = false
@@ -83,7 +84,7 @@ fun RestrictedIframePlayer(video: VideoEntity, onMediaDiscovered: (String) -> Un
                     }
                 }
             }
-            loadUrl(video.url, mapOf("Referer" to video.referer, "User-Agent" to video.userAgent))
+            loadUrl(video.url, mapOf("Referer" to video.referer))
         }
     }
     DisposableEffect(webView) { onDispose { webView.stopLoading(); webView.loadUrl("about:blank"); webView.clearHistory(); webView.destroy() } }

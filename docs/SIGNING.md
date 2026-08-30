@@ -6,4 +6,4 @@ Its signing identity is deterministically derived from a private out-of-reposito
 
 The first successfully signed TEST APK establishes the certificate SHA-256 for this TEST lineage. That public fingerprint must then be pinned in the repository and verified for every later TEST build before it is delivered.
 
-Release packaging signs the exact successful GitHub Actions APK with `tools/sign_test.sh`. The TEST APK uses APK Signature Scheme v2 and v3 with one signer. Future TEST versions must retain the pinned certificate and increase `versionCode` so they can update the previous TEST installation in place.
+The TEST app has `minSdk=29` (Android 10). Release packaging therefore requires APK Signature Scheme v3 with one signer; v2 is not required for the supported platform range. Future TEST versions must retain the pinned certificate and increase `versionCode` so they can update the previous TEST installation in place.

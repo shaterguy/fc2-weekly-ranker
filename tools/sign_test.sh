@@ -46,7 +46,7 @@ rm -f "$OUTPUT"
   --cert "$TMP/fc2-weekly-ranker-test-cert.pem" \
   --min-sdk-version 29 \
   --v1-signing-enabled false \
-  --v2-signing-enabled true \
+  --v2-signing-enabled false \
   --v3-signing-enabled true \
   --v4-signing-enabled false \
   --out "$OUTPUT" \
@@ -55,8 +55,6 @@ rm -f "$OUTPUT"
 VERIFY_LOG="$TMP/apksigner-verify.txt"
 STAGE=apk-verify
 "$APKSIGNER" verify --verbose --print-certs --min-sdk-version 29 "$OUTPUT" | tee "$VERIFY_LOG"
-STAGE=verify-v2
-grep -Fq "Verified using v2 scheme (APK Signature Scheme v2): true" "$VERIFY_LOG"
 STAGE=verify-v3
 grep -Fq "Verified using v3 scheme (APK Signature Scheme v3): true" "$VERIFY_LOG"
 STAGE=verify-signer-count
@@ -68,6 +66,5 @@ SIGNED_CERT_SHA256="$(awk -F': ' '/Signer #1 certificate SHA-256 digest:/ {print
 STAGE=complete
 sha256sum "$OUTPUT"
 echo "certificate_sha256=$SIGNED_CERT_SHA256"
-echo "signature_v2=true"
 echo "signature_v3=true"
 echo "signers=1"

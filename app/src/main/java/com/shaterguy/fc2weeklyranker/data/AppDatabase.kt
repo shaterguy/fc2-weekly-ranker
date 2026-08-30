@@ -94,33 +94,42 @@ interface PostDao {
 }
 
 @Dao
-interface VideoDao {
+abstract class VideoDao {
     @Query("SELECT * FROM videos WHERE postId = :postId ORDER BY ordinal ASC, discoveredAtEpochMillis ASC")
-    fun forPost(postId: String): Flow<List<VideoEntity>>
+    abstract fun forPost(postId: String): Flow<List<VideoEntity>>
 
     @Query("SELECT * FROM videos WHERE id = :id LIMIT 1")
-    suspend fun byId(id: String): VideoEntity?
+    abstract suspend fun byId(id: String): VideoEntity?
 
     @Upsert
-    suspend fun upsert(videos: List<VideoEntity>)
+    abstract suspend fun upsert(videos: List<VideoEntity>)
 
     @Query("DELETE FROM videos WHERE postId = :postId")
-    suspend fun deleteForPost(postId: String)
+    abstract suspend fun deleteForPost(postId: String)
 
     @Query("DELETE FROM videos WHERE postId = :postId AND id NOT IN (:keepIds)")
-    suspend fun deleteForPostExcept(postId: String, keepIds: List<String>)
+    abstract suspend fun deleteForPostExcept(postId: String, keepIds: List<String>)
 
     @Query("DELETE FROM videos WHERE id = :id")
-    suspend fun deleteById(id: String)
+    abstract suspend fun deleteById(id: String)
 
     @Transaction
-    suspend fun replaceForPost(postId: String, videos: List<VideoEntity>) {
+    open suspend fun replaceForPost(postId: String, videos: List<VideoEntity>) {
         if (videos.isEmpty()) {
             deleteForPost(postId)
             return
         }
         upsert(videos)
         deleteForPostExcept(postId, videos.map { it.id })
+    }
+
+    @Transaction
+    open suspend fun replaceIframeWithDirect(wrapperVideoId: String, direct: VideoEntity): Boolean {
+        val wrapper = byId(wrapperVideoId) ?: return false
+        if (wrapper.sourceKind != "IFRAME") return false
+        upsert(listOf(direct))
+        deleteById(wrapperVideoId)
+        return true
     }
 }
 

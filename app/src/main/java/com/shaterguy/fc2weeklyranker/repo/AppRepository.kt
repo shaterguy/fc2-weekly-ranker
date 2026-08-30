@@ -83,9 +83,8 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
     suspend fun registerProbedVideo(postId: String, wrapperVideoId: String, url: String, referer: String, ordinal: Int) {
         if (!url.startsWith("https://", ignoreCase = true)) return
         val canonical = AvseeClient.canonicalMediaUrl(url)
-        val directId = stableVideoId(postId, canonical)
-        db.videoDao().upsert(listOf(VideoEntity(directId, postId, canonical, referer, AvseeClient.USER_AGENT, "DIRECT", ordinal, System.currentTimeMillis())))
-        if (wrapperVideoId != directId) db.videoDao().deleteById(wrapperVideoId)
+        val direct = VideoEntity(stableVideoId(postId, canonical), postId, canonical, referer, AvseeClient.USER_AGENT, "DIRECT", ordinal, System.currentTimeMillis())
+        db.videoDao().replaceIframeWithDirect(wrapperVideoId, direct)
     }
 
     suspend fun queueDownload(videoId: String) {

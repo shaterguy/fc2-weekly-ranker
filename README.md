@@ -5,12 +5,14 @@ Android TEST app for browsing the configured `javfc2` board in fixed seven-day w
 ## TEST channel
 
 - Branch lineage starts at `v0.1.0-dev1`.
-- Source version: `0.1.0-dev2`, `versionCode=2`.
+- Source version: `0.1.0-dev3`, `versionCode=3`.
 - TEST application ID: `com.shaterguy.fc2weeklyranker.dev`.
-- The configured default origin is `https://01.avsee.is`; users can replace it in Settings after an HTTPS connection check.
+- The configured default origin is `https://01.avsee.is`; users can replace it in Settings after a board-and-detail parsing connection check.
 - The anchor instant is persisted in DataStore and changes only when the user explicitly refreshes it.
 - Page `n` covers `anchorDate-(7n+6)` through `anchorDate-7n` in `Asia/Seoul`.
+- Yearless board posting timestamps such as `MM.dd HH:mm` are resolved relative to the ranking window in `Asia/Seoul`, including year-boundary handling.
 - Ranking rate is `recommendations / max(1 day, exact elapsed time)`.
+- If every detail on a board page fails parsing, the crawl reports a source-format failure instead of silently returning an empty ranking.
 
 ## Media path
 
@@ -31,4 +33,4 @@ Downloads are unique WorkManager jobs and write to `MediaStore.Downloads`, with 
 
 GitHub Actions is the build authority. `scripts/verify.sh` is the canonical candidate/release verification entry point. Action dependencies are pinned to commit SHAs, and artifact identity includes both `github.run_id` and `github.run_attempt` so reruns cannot collide.
 
-The repository intentionally does not contain real media, real session material, or source-site content fixtures.
+The repository intentionally does not contain real media, real session material, or copied source-site content fixtures; parser tests use synthetic HTML shaped like the supported page contract.

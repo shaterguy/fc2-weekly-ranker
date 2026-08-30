@@ -65,9 +65,8 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "${SIGNING_PASSPHRASE:-}" ]]; then
-            echo 'configured=false' >> "$GITHUB_OUTPUT"
-            echo 'Dedicated TEST signing secret is not configured; signed artifact intentionally skipped.'
-            exit 0
+            echo 'ERROR: FC2_WEEKLY_RANKER_TEST_SIGNING_PASSPHRASE is required for the installable TEST APK.' >&2
+            exit 1
           fi
           [[ "$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')" == '3.12' ]]
           python3 -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: \

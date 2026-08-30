@@ -5,12 +5,13 @@ Android TEST app for browsing the configured `javfc2` board in fixed seven-day w
 ## TEST channel
 
 - Branch lineage starts at `v0.1.0-dev1`.
-- Source version: `0.1.0-dev5`, `versionCode=5`.
+- Source version: `0.1.0-dev6`, `versionCode=6`.
 - TEST application ID: `com.shaterguy.fc2weeklyranker.dev`.
 - The configured default origin is `https://01.avsee.is`; users can replace it in Settings after a board-and-detail parsing connection check.
 - The anchor instant is persisted in DataStore and changes only when the user explicitly refreshes it.
 - Page `n` covers `anchorDate-(7n+6)` through `anchorDate-7n` in `Asia/Seoul`.
-- Yearless board posting timestamps such as `MM.dd HH:mm` are resolved relative to the ranking window in `Asia/Seoul`, including year-boundary handling.
+- Recent relative posting timestamps such as `3시간전` are resolved against the actual detail observation time; yearless timestamps such as `MM.dd HH:mm` use the ranking window only to infer the year.
+- Relative posting timestamps are accepted only from the post-info header so comment timestamps cannot replace the post timestamp.
 - Ranking rate is `recommendations / max(1 day, exact elapsed time)`.
 - If every detail on a board page fails parsing, the crawl reports a source-format failure instead of silently returning an empty ranking.
 

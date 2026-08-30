@@ -38,6 +38,42 @@ class ParserFixtureTest {
     }
 
     @Test
+    fun `parses site shaped relative posting timestamp from post info before comment dates`() {
+        val html = """
+            <h1>Relative FC2 fixture</h1>
+            <div id='bo_v_info'>M Manager 1 1262 1 3시간전</div>
+            <section class='comments'>C Cangi 99 999 88 08.29 19:28</section>
+        """.trimIndent()
+        val post = parser.parseDetail(
+            html = html,
+            detailUrl = "https://example.test/bbs/board.php?bo_table=javfc2&wr_id=455",
+            yearReferenceInstant = Instant.parse("2026-08-24T14:59:59Z"),
+            relativeReferenceInstant = Instant.parse("2026-08-30T13:00:00Z"),
+        )
+        assertEquals(Instant.parse("2026-08-30T10:00:00Z"), post.postedAt)
+        assertEquals(1, post.recommendationCount)
+    }
+
+    @Test
+    fun `parses minute and just now relative posting timestamps`() {
+        val observedAt = Instant.parse("2026-08-30T13:00:00Z")
+        val minutePost = parser.parseDetail(
+            "<h1>Minute fixture</h1><div id='bo_v_info'>M Manager 1 100 4 43분전</div>",
+            "https://example.test/bbs/board.php?bo_table=javfc2&wr_id=454",
+            observedAt,
+            observedAt,
+        )
+        val justNowPost = parser.parseDetail(
+            "<h1>Just now fixture</h1><div id='bo_v_info'>M Manager 1 100 4 방금전</div>",
+            "https://example.test/bbs/board.php?bo_table=javfc2&wr_id=453",
+            observedAt,
+            observedAt,
+        )
+        assertEquals(Instant.parse("2026-08-30T12:17:00Z"), minutePost.postedAt)
+        assertEquals(observedAt, justNowPost.postedAt)
+    }
+
+    @Test
     fun `parses site shaped yearless posting timestamp relative to ranking window`() {
         val html = """
             <h1>Synthetic FC2 fixture</h1>

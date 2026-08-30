@@ -22,6 +22,16 @@ class AvseeClientCrawlTest {
     }
 
     @Test
+    fun `connection probe accepts current relative timestamp contract`() = runBlocking {
+        val observedAt = Instant.parse("2026-08-30T13:00:00Z")
+        val client = AvseeClient(
+            http = fakeClient(detailHtml = "<h1>Live-shaped detail</h1><div id='bo_v_info'>M Manager 1 1262 1 3시간전</div>"),
+            now = { observedAt },
+        )
+        assertTrue(client.testConnection("https://example.test").isSuccess)
+    }
+
+    @Test
     fun `crawl reports all detail parse failures instead of returning an empty ranking`() = runBlocking {
         val client = AvseeClient(fakeClient(detailHtml = "<h1>Broken detail</h1>"))
         val window = windowFor(Instant.parse("2026-08-30T08:44:02Z"), 0)
@@ -35,6 +45,18 @@ class AvseeClientCrawlTest {
         val window = windowFor(Instant.parse("2026-08-30T08:44:02Z"), 1)
         val posts = client.crawlWindow("https://example.test", window)
         assertEquals(listOf("301"), posts.map { it.id })
+    }
+
+    @Test
+    fun `historical crawl does not reinterpret a current relative post inside the old window`() = runBlocking {
+        val observedAt = Instant.parse("2026-08-30T13:00:00Z")
+        val client = AvseeClient(
+            http = relativeThenOldClient(),
+            now = { observedAt },
+        )
+        val window = windowFor(Instant.parse("2026-08-30T08:44:02Z"), 1)
+        val posts = client.crawlWindow("https://example.test", window)
+        assertEquals(listOf("302"), posts.map { it.id })
     }
 
     private fun fakeClient(detailHtml: String): OkHttpClient = OkHttpClient.Builder()
@@ -69,6 +91,27 @@ class AvseeClientCrawlTest {
                     2 -> board("201", "202")
                     3 -> board("301")
                     else -> board("401")
+                }
+            }
+            response(request, body)
+        }
+        .build()
+
+    private fun relativeThenOldClient(): OkHttpClient = OkHttpClient.Builder()
+        .addInterceptor { chain ->
+            val request = chain.request()
+            val id = request.url.queryParameter("wr_id")
+            val body = if (id != null) {
+                when (id) {
+                    "301" -> "<h1>Current relative</h1><div id='bo_v_info'>M Manager 1 1262 1 3시간전</div>"
+                    "302" -> "<h1>Historical target</h1><div id='bo_v_info'>M Manager 1 900 5 08.20 12:00</div>"
+                    else -> "<h1>Old stop row</h1><div id='bo_v_info'>M Manager 1 100 1 08.01 12:00</div>"
+                }
+            } else {
+                when (request.url.queryParameter("page")?.toIntOrNull() ?: 1) {
+                    1 -> board("301")
+                    2 -> board("302")
+                    else -> board("303")
                 }
             }
             response(request, body)

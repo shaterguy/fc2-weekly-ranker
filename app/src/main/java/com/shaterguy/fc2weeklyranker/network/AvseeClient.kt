@@ -26,6 +26,7 @@ data class RemotePost(val id: String, val url: String, val title: String, val po
 class AvseeClient(
     private val http: OkHttpClient,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val now: () -> Instant = { Instant.now() },
 ) {
     suspend fun testConnection(baseUrl: String): Result<Unit> = withContext(ioDispatcher) {
         runCatching {
@@ -33,7 +34,9 @@ class AvseeClient(
             val links = parseBoardLinks(fetch(boardUrl), baseUrl)
             check(links.isNotEmpty()) { "게시물 링크를 찾을 수 없습니다." }
             val detailUrl = links.first()
-            parseDetail(fetch(detailUrl, boardUrl), detailUrl, Instant.now())
+            val html = fetch(detailUrl, boardUrl)
+            val observedAt = now()
+            parseDetail(html, detailUrl, observedAt, observedAt)
             Unit
         }
     }
@@ -49,7 +52,14 @@ class AvseeClient(
             var failedOnPage = 0
             for (link in links) {
                 val detail = runCatching {
-                    parseDetail(fetch(link, boardUrl), link, window.upperInclusive)
+                    val html = fetch(link, boardUrl)
+                    val observedAt = now()
+                    parseDetail(
+                        html = html,
+                        detailUrl = link,
+                        yearReferenceInstant = window.upperInclusive,
+                        relativeReferenceInstant = observedAt,
+                    )
                 }.onFailure {
                     failedOnPage += 1
                 }.getOrNull() ?: continue
@@ -67,7 +77,9 @@ class AvseeClient(
     }
 
     suspend fun loadDetail(url: String): RemotePost = withContext(ioDispatcher) {
-        parseDetail(fetch(url), url, Instant.now())
+        val html = fetch(url)
+        val observedAt = now()
+        parseDetail(html, url, observedAt, observedAt)
     }
 
     internal fun parseBoardLinks(html: String, baseUrl: String): List<String> {
@@ -86,52 +98,82 @@ class AvseeClient(
     internal fun parseDetail(
         html: String,
         detailUrl: String,
-        referenceInstant: Instant = Instant.now(),
+        yearReferenceInstant: Instant = Instant.now(),
+        relativeReferenceInstant: Instant = yearReferenceInstant,
     ): RemotePost {
         val doc = Jsoup.parse(html, detailUrl)
         val id = queryParam(detailUrl, "wr_id") ?: detailUrl.substringAfterLast('=').take(80)
         val title = listOf("#bo_v_title .bo_v_tit", "#bo_v_title", "h1", "h2")
             .firstNotNullOfOrNull { selector -> doc.selectFirst(selector)?.text()?.trim()?.takeIf(String::isNotBlank) }
             ?: "게시물 $id"
-        val postedAt = parsePostedAt(doc, referenceInstant) ?: error("게시시각을 찾을 수 없습니다.")
+        val postedAt = parsePostedAt(doc, yearReferenceInstant, relativeReferenceInstant)
+            ?: error("게시시각을 찾을 수 없습니다.")
         return RemotePost(id, detailUrl, title, postedAt, parseRecommendation(doc), parseMedia(doc, detailUrl))
     }
 
-    private fun parsePostedAt(doc: Document, referenceInstant: Instant): Instant? {
+    private fun parsePostedAt(
+        doc: Document,
+        yearReferenceInstant: Instant,
+        relativeReferenceInstant: Instant,
+    ): Instant? {
         doc.select("time[datetime]").firstNotNullOfOrNull { node ->
             runCatching { Instant.parse(node.attr("datetime")) }.getOrNull()
         }?.let { return it }
 
-        val texts = listOfNotNull(
-            doc.selectFirst("#bo_v_info")?.text()?.takeIf(String::isNotBlank),
-            doc.body()?.text()?.takeIf(String::isNotBlank),
-        ).distinct()
+        val infoText = doc.selectFirst("#bo_v_info, .bo_v_info")
+            ?.text()
+            ?.trim()
+            ?.takeIf(String::isNotBlank)
+        if (infoText != null) {
+            parseAbsoluteOrYearless(infoText, yearReferenceInstant)?.let { return it }
+            parseRelativeInstant(infoText, relativeReferenceInstant)?.let { return it }
+        }
 
-        for (text in texts) {
-            Regex("(20\\d{2})[-./](\\d{1,2})[-./](\\d{1,2})\\s+(\\d{1,2}):(\\d{2})(?::(\\d{2}))?")
-                .find(text)?.let { match ->
-                    val g = match.groupValues
-                    return localInstant(g[1].toInt(), g[2].toInt(), g[3].toInt(), g[4].toInt(), g[5].toInt(), g[6])
-                }
-            Regex("(?<!\\d)(\\d{2})-(\\d{2})-(\\d{2})\\s+(\\d{1,2}):(\\d{2})(?::(\\d{2}))?")
-                .find(text)?.let { match ->
-                    val g = match.groupValues
-                    return localInstant(2000 + g[1].toInt(), g[2].toInt(), g[3].toInt(), g[4].toInt(), g[5].toInt(), g[6])
-                }
-            Regex("(?<!\\d)(\\d{1,2})[.](\\d{1,2})\\s+(\\d{1,2}):(\\d{2})(?::(\\d{2}))?")
-                .find(text)?.let { match ->
-                    val g = match.groupValues
-                    return inferYearlessInstant(
-                        month = g[1].toInt(),
-                        day = g[2].toInt(),
-                        hour = g[3].toInt(),
-                        minute = g[4].toInt(),
-                        secondText = g[5],
-                        referenceInstant = referenceInstant,
-                    )
-                }
+        val bodyText = doc.body()?.text()?.trim()?.takeIf(String::isNotBlank)
+        if (bodyText != null && bodyText != infoText) {
+            parseAbsoluteOrYearless(bodyText, yearReferenceInstant)?.let { return it }
         }
         return null
+    }
+
+    private fun parseAbsoluteOrYearless(text: String, referenceInstant: Instant): Instant? {
+        Regex("(20\\d{2})[-./](\\d{1,2})[-./](\\d{1,2})\\s+(\\d{1,2}):(\\d{2})(?::(\\d{2}))?")
+            .find(text)?.let { match ->
+                val g = match.groupValues
+                return localInstant(g[1].toInt(), g[2].toInt(), g[3].toInt(), g[4].toInt(), g[5].toInt(), g[6])
+            }
+        Regex("(?<!\\d)(\\d{2})-(\\d{2})-(\\d{2})\\s+(\\d{1,2}):(\\d{2})(?::(\\d{2}))?")
+            .find(text)?.let { match ->
+                val g = match.groupValues
+                return localInstant(2000 + g[1].toInt(), g[2].toInt(), g[3].toInt(), g[4].toInt(), g[5].toInt(), g[6])
+            }
+        Regex("(?<!\\d)(\\d{1,2})[.](\\d{1,2})\\s+(\\d{1,2}):(\\d{2})(?::(\\d{2}))?")
+            .find(text)?.let { match ->
+                val g = match.groupValues
+                return inferYearlessInstant(
+                    month = g[1].toInt(),
+                    day = g[2].toInt(),
+                    hour = g[3].toInt(),
+                    minute = g[4].toInt(),
+                    secondText = g[5],
+                    referenceInstant = referenceInstant,
+                )
+            }
+        return null
+    }
+
+    private fun parseRelativeInstant(text: String, referenceInstant: Instant): Instant? {
+        if (Regex("방금\\s*전").containsMatchIn(text)) return referenceInstant
+        val match = Regex("(?<!\\d)(\\d{1,6})\\s*(초|분|시간|일)\\s*전").find(text) ?: return null
+        val amount = match.groupValues[1].toLongOrNull() ?: return null
+        val duration = when (match.groupValues[2]) {
+            "초" -> Duration.ofSeconds(amount)
+            "분" -> Duration.ofMinutes(amount)
+            "시간" -> Duration.ofHours(amount)
+            "일" -> Duration.ofDays(amount)
+            else -> return null
+        }
+        return runCatching { referenceInstant.minus(duration) }.getOrNull()
     }
 
     private fun localInstant(year: Int, month: Int, day: Int, hour: Int, minute: Int, secondText: String): Instant? =
@@ -173,6 +215,8 @@ class AvseeClient(
             Regex("20\\d{2}[-./]\\d{1,2}[-./]\\d{1,2}\\s+\\d{1,2}:\\d{2}"),
             Regex("(?<!\\d)\\d{2}-\\d{2}-\\d{2}\\s+\\d{1,2}:\\d{2}"),
             Regex("(?<!\\d)\\d{1,2}[.]\\d{1,2}\\s+\\d{1,2}:\\d{2}"),
+            Regex("(?<!\\d)\\d{1,6}\\s*(?:초|분|시간|일)\\s*전"),
+            Regex("방금\\s*전"),
         ).firstNotNullOfOrNull { it.find(infoText)?.range?.first }
         if (dateStart != null) {
             val metrics = Regex("(?<![\\d.])\\d{1,9}(?![\\d.])")

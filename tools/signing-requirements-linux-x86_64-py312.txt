@@ -1,0 +1,7 @@
+# Hash-locked signing runtime for GitHub-hosted Ubuntu 24.04 / Python 3.12 x86_64.
+cryptography==45.0.6 \
+    --hash=sha256:f4028f29a9f38a2025abedb2e409973709c660d44319c61762202206ed577c42
+cffi==1.17.1 \
+    --hash=sha256:b62ce867176a75d03a665bad002af8e6d54644fad99a3c70905c543130e39d93
+pycparser==2.22 \
+    --hash=sha256:c3702b6d3dd8c7abc1afa565d7e63d53a1d0bd86cdc24edd75470f4de499cfcc

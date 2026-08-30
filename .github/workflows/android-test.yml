@@ -36,36 +36,78 @@ jobs:
         run: sdkmanager "platforms;android-37.0" "build-tools;37.0.0"
       - name: Canonical verification
         run: bash scripts/verify.sh
-      - name: Build TEST APK
-        run: gradle --no-daemon --stacktrace :app:assembleDebug
-      - name: Prepare TEST provenance
-        shell: bash
-        run: |
-          printf '%s\n' "$GITHUB_SHA" > app/build/outputs/apk/debug/SOURCE_COMMIT.txt
-          sha256sum app/build/outputs/apk/debug/app-debug.apk > app/build/outputs/apk/debug/app-debug.apk.sha256
-      - name: Upload TEST artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: fc2-weekly-ranker-test-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            app/build/outputs/apk/debug/app-debug.apk
-            app/build/outputs/apk/debug/app-debug.apk.sha256
-            app/build/outputs/apk/debug/SOURCE_COMMIT.txt
-          if-no-files-found: error
-          retention-days: 14
-      - name: Prepare apksigner tool bundle
+      - name: Build unsigned TEST APK
         shell: bash
         run: |
           set -euo pipefail
-          TOOL_DIR="$RUNNER_TEMP/apksigner-tool"
-          mkdir -p "$TOOL_DIR/lib"
-          cp "$ANDROID_HOME/build-tools/37.0.0/apksigner" "$TOOL_DIR/apksigner"
-          cp "$ANDROID_HOME/build-tools/37.0.0/lib/apksigner.jar" "$TOOL_DIR/lib/apksigner.jar"
-          sha256sum "$TOOL_DIR/apksigner" "$TOOL_DIR/lib/apksigner.jar" > "$TOOL_DIR/APKSIGNER_SHA256SUMS.txt"
-      - name: Upload apksigner tool
+          gradle --no-daemon --stacktrace :app:assembleDebug
+          APK="$(find app/build/outputs/apk/debug -maxdepth 1 -type f -name '*-unsigned.apk' -print -quit)"
+          test -s "$APK"
+          BADGING="$("$ANDROID_HOME/build-tools/37.0.0/aapt" dump badging "$APK")"
+          grep -Fq "package: name='com.shaterguy.fc2weeklyranker.dev' versionCode='1' versionName='0.1.0-dev1'" <<<"$BADGING"
+          printf '%s\n' "$GITHUB_SHA" > app/build/outputs/apk/debug/SOURCE_COMMIT.txt
+          sha256sum "$APK" > app/build/outputs/apk/debug/UNSIGNED_SHA256SUMS.txt
+      - name: Upload unsigned TEST provenance
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: fc2-weekly-ranker-apksigner-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/apksigner-tool
+          name: fc2-weekly-ranker-unsigned-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            app/build/outputs/apk/debug/*-unsigned.apk
+            app/build/outputs/apk/debug/UNSIGNED_SHA256SUMS.txt
+            app/build/outputs/apk/debug/SOURCE_COMMIT.txt
+          if-no-files-found: error
+          retention-days: 14
+      - name: Sign and verify TEST APK when signing secret is configured
+        id: sign
+        shell: bash
+        env:
+          SIGNING_PASSPHRASE: ${{ secrets.FC2_WEEKLY_RANKER_TEST_SIGNING_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${SIGNING_PASSPHRASE:-}" ]]; then
+            echo 'configured=false' >> "$GITHUB_OUTPUT"
+            echo 'Dedicated TEST signing secret is not configured; signed artifact intentionally skipped.'
+            exit 0
+          fi
+          [[ "$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')" == '3.12' ]]
+          python3 -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: \
+            -r tools/signing-requirements-linux-x86_64-py312.txt
+          PASS_FILE="$RUNNER_TEMP/fc2-ranker-signing-pass"
+          trap 'rm -f "$PASS_FILE"' EXIT
+          umask 077
+          printf '%s' "$SIGNING_PASSPHRASE" > "$PASS_FILE"
+          BT="$ANDROID_HOME/build-tools/37.0.0"
+          UNSIGNED="$(find app/build/outputs/apk/debug -maxdepth 1 -type f -name '*-unsigned.apk' -print -quit)"
+          OUT=app/build/outputs/fc2-weekly-ranker-test
+          mkdir -p "$OUT"
+          ALIGNED="$OUT/fc2-weekly-ranker-test-v0.1.0-dev1-aligned-unsigned.apk"
+          APK="$OUT/fc2-weekly-ranker-test-v0.1.0-dev1.apk"
+          "$BT/zipalign" -p -f 4 "$UNSIGNED" "$ALIGNED"
+          APKSIGNER="$BT/apksigner" bash tools/sign_test.sh "$ALIGNED" "$PASS_FILE" "$APK" > "$OUT/APKSIGNER_VERIFY.txt"
+          "$BT/apksigner" verify --verbose --print-certs --min-sdk-version 29 "$APK" > "$OUT/APK_CERT.txt"
+          BADGING="$("$BT/aapt" dump badging "$APK")"
+          grep -Fq "package: name='com.shaterguy.fc2weeklyranker.dev' versionCode='1' versionName='0.1.0-dev1'" <<<"$BADGING"
+          grep -Fqi '3b9db303bc351b0f5b4c5076c6c4bb13c26ff2a4592c70f93c9ad5ee760e57f0' "$OUT/APK_CERT.txt"
+          sha256sum "$APK" > "$OUT/SHA256SUMS.txt"
+          printf '%s\n' "$GITHUB_SHA" > "$OUT/SOURCE_COMMIT.txt"
+          echo 'configured=true' >> "$GITHUB_OUTPUT"
+      - name: Upload signed TEST evidence
+        if: steps.sign.outputs.configured == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: fc2-weekly-ranker-signed-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            app/build/outputs/fc2-weekly-ranker-test/APKSIGNER_VERIFY.txt
+            app/build/outputs/fc2-weekly-ranker-test/APK_CERT.txt
+            app/build/outputs/fc2-weekly-ranker-test/SHA256SUMS.txt
+            app/build/outputs/fc2-weekly-ranker-test/SOURCE_COMMIT.txt
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload direct installable TEST APK
+        if: steps.sign.outputs.configured == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          path: app/build/outputs/fc2-weekly-ranker-test/fc2-weekly-ranker-test-v0.1.0-dev1.apk
+          archive: false
           if-no-files-found: error
           retention-days: 14

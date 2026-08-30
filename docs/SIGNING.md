@@ -2,10 +2,8 @@
 
 The TEST package is `com.shaterguy.fc2weeklyranker.dev`.
 
-Its signing identity is deterministically derived from the private repository Actions secret with `tools/derive_test_signing_identity.py`. The passphrase, derived private key, PKCS12 keystore, and raw signing material must never be committed, logged, or uploaded as a GitHub artifact.
+Its signing identity is deterministically derived from a private out-of-repository passphrase using `tools/derive_test_signing_identity.py`. The passphrase and derived private signing material must never be committed, logged, or uploaded as a GitHub artifact. CI writes the derived PKCS #8 private key and X.509 certificate only inside its temporary runner directory, signs with `apksigner --key/--cert`, and removes the temporary files when the signing script exits.
 
-This repository is establishing its first TEST signing lineage. No certificate fingerprint is authoritative until a successful GitHub Actions run signs and verifies the installable TEST APK with the repository secret. That first successful run records the public certificate SHA-256 in `TEST_CERT_SHA256.txt`; the next signing-lineage commit must pin that exact fingerprint in the signing script, workflow verification, and this document before final TEST delivery.
+The first successfully signed TEST APK establishes the certificate SHA-256 for this TEST lineage. That public fingerprint must then be pinned in the repository and verified for every later TEST build before it is delivered.
 
-The bootstrap signing run verifies that the APK is signed by the certificate derived from the configured secret, uses APK Signature Scheme v2 and v3, has exactly one signer, and preserves the expected TEST package/version identity.
-
-Future TEST versions must retain the pinned certificate and increase `versionCode` so they can update the previous TEST installation in place.
+Release packaging signs the exact successful GitHub Actions APK with `tools/sign_test.sh`. The TEST APK uses APK Signature Scheme v2 and v3 with one signer. Future TEST versions must retain the pinned certificate and increase `versionCode` so they can update the previous TEST installation in place.

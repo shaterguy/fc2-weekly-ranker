@@ -12,7 +12,6 @@ from pathlib import Path
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.primitives.serialization import pkcs12
 from cryptography.x509.oid import NameOID
 
 E = 65537
@@ -105,7 +104,7 @@ def derive_certificate(secret: bytes, key):
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pass-file", required=True)
-    parser.add_argument("--out-p12", required=True)
+    parser.add_argument("--out-key", required=True)
     parser.add_argument("--out-cert", required=True)
     args = parser.parse_args()
     secret = Path(args.pass_file).read_bytes().strip()
@@ -113,13 +112,13 @@ def main() -> None:
         raise SystemExit("signing passphrase is unexpectedly short")
     key = derive_key(secret)
     cert = derive_certificate(secret, key)
-    Path(args.out_p12).write_bytes(pkcs12.serialize_key_and_certificates(
-        b"fc2-weekly-ranker-test",
-        key,
-        cert,
-        None,
-        serialization.BestAvailableEncryption(secret),
+    key_path = Path(args.out_key)
+    key_path.write_bytes(key.private_bytes(
+        serialization.Encoding.DER,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
     ))
+    key_path.chmod(0o600)
     Path(args.out_cert).write_bytes(cert.public_bytes(serialization.Encoding.PEM))
     print(cert.fingerprint(hashes.SHA256()).hex())
 

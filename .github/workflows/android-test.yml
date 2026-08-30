@@ -57,7 +57,7 @@ jobs:
             app/build/outputs/apk/debug/SOURCE_COMMIT.txt
           if-no-files-found: error
           retention-days: 14
-      - name: Sign and verify TEST APK when signing secret is configured
+      - name: Sign and verify TEST APK
         id: sign
         shell: bash
         env:
@@ -86,7 +86,11 @@ jobs:
           "$BT/apksigner" verify --verbose --print-certs --min-sdk-version 29 "$APK" > "$OUT/APK_CERT.txt"
           BADGING="$("$BT/aapt" dump badging "$APK")"
           grep -Fq "package: name='com.shaterguy.fc2weeklyranker.dev' versionCode='1' versionName='0.1.0-dev1'" <<<"$BADGING"
-          grep -Fqi '3b9db303bc351b0f5b4c5076c6c4bb13c26ff2a4592c70f93c9ad5ee760e57f0' "$OUT/APK_CERT.txt"
+          CERT_SHA256="$(awk -F= '/^certificate_sha256=/{print $2; exit}' "$OUT/APKSIGNER_VERIFY.txt" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+          [[ "$CERT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          grep -Fqi "$CERT_SHA256" "$OUT/APK_CERT.txt"
+          printf '%s\n' "$CERT_SHA256" > "$OUT/TEST_CERT_SHA256.txt"
+          echo "TEST_CERT_SHA256=$CERT_SHA256"
           sha256sum "$APK" > "$OUT/SHA256SUMS.txt"
           printf '%s\n' "$GITHUB_SHA" > "$OUT/SOURCE_COMMIT.txt"
           echo 'configured=true' >> "$GITHUB_OUTPUT"
@@ -98,6 +102,7 @@ jobs:
           path: |
             app/build/outputs/fc2-weekly-ranker-test/APKSIGNER_VERIFY.txt
             app/build/outputs/fc2-weekly-ranker-test/APK_CERT.txt
+            app/build/outputs/fc2-weekly-ranker-test/TEST_CERT_SHA256.txt
             app/build/outputs/fc2-weekly-ranker-test/SHA256SUMS.txt
             app/build/outputs/fc2-weekly-ranker-test/SOURCE_COMMIT.txt
           if-no-files-found: error

@@ -2,10 +2,10 @@
 
 The TEST package is `com.shaterguy.fc2weeklyranker.dev`.
 
-Its signing identity is deterministically derived from a private out-of-repository passphrase using `tools/derive_test_signing_identity.py`. The passphrase, derived private key, PKCS12 keystore, and raw signing material must never be committed, logged, or uploaded as a GitHub artifact.
+Its signing identity is deterministically derived from the private repository Actions secret with `tools/derive_test_signing_identity.py`. The passphrase, derived private key, PKCS12 keystore, and raw signing material must never be committed, logged, or uploaded as a GitHub artifact.
 
-Expected TEST certificate SHA-256:
+This repository is establishing its first TEST signing lineage. No certificate fingerprint is authoritative until a successful GitHub Actions run signs and verifies the installable TEST APK with the repository secret. That first successful run records the public certificate SHA-256 in `TEST_CERT_SHA256.txt`; the next signing-lineage commit must pin that exact fingerprint in the signing script, workflow verification, and this document before final TEST delivery.
 
-`3b9db303bc351b0f5b4c5076c6c4bb13c26ff2a4592c70f93c9ad5ee760e57f0`
+The bootstrap signing run verifies that the APK is signed by the certificate derived from the configured secret, uses APK Signature Scheme v2 and v3, has exactly one signer, and preserves the expected TEST package/version identity.
 
-Release packaging signs the exact successful GitHub Actions APK with `tools/sign_test.sh`. `apksigner` strips any pre-existing debug signature and applies the fixed TEST identity with APK Signature Scheme v2 and v3. Future TEST versions must retain this certificate and increase `versionCode` so they can update the previous TEST installation in place.
+Future TEST versions must retain the pinned certificate and increase `versionCode` so they can update the previous TEST installation in place.

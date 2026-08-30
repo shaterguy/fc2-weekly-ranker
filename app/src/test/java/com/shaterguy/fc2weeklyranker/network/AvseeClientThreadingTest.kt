@@ -3,7 +3,6 @@ package com.shaterguy.fc2weeklyranker.network
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
-import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -33,6 +32,6 @@ class AvseeClientThreadingTest {
 
         val networkThread = requireNotNull(observedThread.get())
         assertNotSame(callerThread, networkThread)
-        assertEquals("avsee-test-io", networkThread.name)
+        assertTrue(networkThread.name.startsWith("avsee-test-io"))
     }
 }

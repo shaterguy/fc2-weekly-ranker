@@ -86,7 +86,7 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
     }
 
     companion object {
-        fun snapshotKey(anchorMillis: Long, pageIndex: Int): String = "$anchorMillis:$pageIndex"
+        fun snapshotKey(anchorMillis: Long, pageIndex: Int): String = "ranking-v2:$anchorMillis:$pageIndex"
         fun stableVideoId(postId: String, url: String): String = MessageDigest.getInstance("SHA-256").digest("$postId|$url".toByteArray()).take(12).joinToString("") { "%02x".format(it) }
 
         internal fun rebaseDetailUrl(originalUrl: String, baseUrl: String): String {

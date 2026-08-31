@@ -69,7 +69,7 @@ class AvseeClientCrawlTest {
     }
 
     @Test
-    fun `detail requests run concurrently with a limit of four`() = runBlocking {
+    fun `detail requests run concurrently with a limit of five`() = runBlocking {
         val active = AtomicInteger()
         val maximum = AtomicInteger()
         val client = AvseeClient(
@@ -77,7 +77,7 @@ class AvseeClientCrawlTest {
                 val id = request.url.queryParameter("wr_id")
                 if (id == null) {
                     when (request.url.queryParameter("page") ?: "1") {
-                        "1" -> board("101", "102", "103", "104")
+                        "1" -> board("101", "102", "103", "104", "105")
                         "2" -> board("201")
                         else -> ""
                     }
@@ -100,9 +100,9 @@ class AvseeClientCrawlTest {
             windowFor(Instant.parse("2026-08-30T08:44:02Z"), 0),
         )
 
-        assertEquals(4, posts.size)
+        assertEquals(5, posts.size)
         assertTrue("expected concurrent detail requests", maximum.get() >= 2)
-        assertTrue("detail request limit exceeded", maximum.get() <= 4)
+        assertTrue("detail request limit exceeded", maximum.get() <= 5)
     }
 
     private fun fakeClient(detailHtml: String): OkHttpClient = interceptingClient { request ->

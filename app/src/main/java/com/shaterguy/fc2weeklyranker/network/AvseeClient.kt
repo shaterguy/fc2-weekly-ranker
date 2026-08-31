@@ -13,6 +13,8 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
+import org.jsoup.nodes.TextNode
 import java.net.URI
 import java.time.Duration
 import java.time.Instant
@@ -54,15 +56,18 @@ class AvseeClient(
     suspend fun crawlWindow(baseUrl: String, window: DateWindow): List<RemotePost> = withContext(ioDispatcher) {
         val out = LinkedHashMap<String, RemotePost>()
         val detailLimiter = Semaphore(MAX_PARALLEL_DETAIL_REQUESTS)
+        val seenLinks = HashSet<String>()
         for (page in 1..30) {
             val boardUrl = "$baseUrl$BOARD_PATH&page=$page"
             val links = parseBoardLinks(fetchForCrawl(boardUrl), baseUrl)
             if (links.isEmpty()) break
+            val unseenLinks = links.filter(seenLinks::add)
+            if (unseenLinks.isEmpty()) break
             var sawOlder = false
             var parsedOnPage = 0
             var failedOnPage = 0
             val details = coroutineScope {
-                links.map { link ->
+                unseenLinks.map { link ->
                     async {
                         runCatching {
                             detailLimiter.withPermit {
@@ -98,7 +103,13 @@ class AvseeClient(
 
     internal fun parseBoardLinks(html: String, baseUrl: String): List<String> {
         val doc = Jsoup.parse(html, baseUrl)
-        return doc.select("a[href*='bo_table=javfc2'][href*='wr_id=']")
+        val selector = "a[href*='bo_table=javfc2'][href*='wr_id=']"
+        val scope = listOf("#bo_list", ".tbl_head01", "main")
+            .asSequence()
+            .mapNotNull(doc::selectFirst)
+            .firstOrNull { it.select(selector).isNotEmpty() }
+            ?: doc
+        return scope.select(selector)
             .mapNotNull { it.absUrl("href").takeIf(String::isNotBlank) }
             .distinct()
     }
@@ -123,7 +134,9 @@ class AvseeClient(
         }?.let { return it }
 
         val texts = listOfNotNull(
-            doc.selectFirst("#bo_v_info")?.text()?.takeIf(String::isNotBlank),
+            doc.selectFirst("#bo_v_info, .bo_v_info")
+                ?.let(::elementTextWithBoundaries)
+                ?.takeIf(String::isNotBlank),
             doc.body()?.text()?.takeIf(String::isNotBlank),
         ).distinct()
 
@@ -175,12 +188,55 @@ class AvseeClient(
             .minByOrNull { candidate -> Duration.between(candidate, referenceInstant).abs() }
     }
 
+    private fun elementTextWithBoundaries(element: Element): String = element.childNodes()
+        .asSequence()
+        .mapNotNull { node ->
+            val text = when (node) {
+                is TextNode -> node.text()
+                is Element -> elementTextWithBoundaries(node)
+                else -> null
+            }?.trim()
+            text?.takeIf(String::isNotBlank)
+        }
+        .joinToString(" ")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+
+    private fun postingTimestampStart(text: String): Int? = listOf(
+        Regex("20\\d{2}[-./]\\d{1,2}[-./]\\d{1,2}\\s+\\d{1,2}:\\d{2}"),
+        Regex("(?<!\\d)\\d{2}-\\d{2}-\\d{2}\\s+\\d{1,2}:\\d{2}"),
+        Regex("(?<!\\d)\\d{1,2}[.]\\d{1,2}\\s+\\d{1,2}:\\d{2}"),
+        Regex("(?<!\\d)\\d{1,6}\\s*(?:초|분|시간|일)\\s*전"),
+        Regex("방금\\s*전"),
+    ).mapNotNull { pattern -> pattern.find(text)?.range?.first }
+        .minOrNull()
+
+    private fun metricsBeforePostingTimestamp(text: String): List<Int> {
+        val timestampStart = postingTimestampStart(text) ?: return emptyList()
+        return Regex("(?<![\\d.])\\d{1,9}(?![\\d.])")
+            .findAll(text.substring(0, timestampStart))
+            .mapNotNull { it.value.toIntOrNull() }
+            .toList()
+    }
+
     private fun parseRecommendation(doc: Document): Int {
         doc.select("#good_button strong, #bo_v_act .bo_v_good strong, [id*=good] strong, [class*=good] strong").forEach { node ->
             Regex("\\d+").find(node.text())?.value?.toIntOrNull()?.let { return it }
         }
-        return Regex("추천\\s*(?:수)?\\s*[:：]?\\s*(\\d+)")
-            .find(doc.body()?.text().orEmpty())?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
+
+        val bodyText = doc.body()?.text().orEmpty()
+        listOf(
+            Regex("(?:추천|좋아요)\\s*(?:수)?\\s*[:：]?\\s*(\\d+)", RegexOption.IGNORE_CASE),
+            Regex("(\\d+)\\s*(?:추천|좋아요)", RegexOption.IGNORE_CASE),
+        ).forEach { pattern ->
+            pattern.find(bodyText)?.groupValues?.getOrNull(1)?.toIntOrNull()?.let { return it }
+        }
+
+        val infoText = doc.selectFirst("#bo_v_info, .bo_v_info")
+            ?.let(::elementTextWithBoundaries)
+            .orEmpty()
+        val metrics = metricsBeforePostingTimestamp(infoText)
+        return if (metrics.size >= 3) metrics.last() else 0
     }
 
     private fun parseMedia(doc: Document, detailUrl: String): List<RemoteMedia> {
@@ -227,7 +283,7 @@ class AvseeClient(
 
     companion object {
         const val USER_AGENT: String = UA
-        private const val MAX_PARALLEL_DETAIL_REQUESTS = 4
+        private const val MAX_PARALLEL_DETAIL_REQUESTS = 5
         private const val MAX_CRAWL_CACHE_ENTRIES = 256
     }
 }

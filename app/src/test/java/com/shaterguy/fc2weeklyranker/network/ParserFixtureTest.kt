@@ -10,8 +10,14 @@ class ParserFixtureTest {
     private val parser = AvseeClient(OkHttpClient())
 
     @Test
-    fun `extracts unique post links from board fixture`() {
-        val html = "<table><tr><td><a href='/bbs/board.php?bo_table=javfc2&wr_id=123'>fixture</a><a href='/bbs/board.php?bo_table=javfc2&wr_id=123'>duplicate</a></td></tr></table>"
+    fun `extracts unique post links from board list without sidebar links`() {
+        val html = """
+            <aside><a href='/bbs/board.php?bo_table=javfc2&wr_id=999'>sidebar recommendation</a></aside>
+            <div id='bo_list'><table><tr><td>
+              <a href='/bbs/board.php?bo_table=javfc2&wr_id=123'>fixture</a>
+              <a href='/bbs/board.php?bo_table=javfc2&wr_id=123'>duplicate</a>
+            </td></tr></table></div>
+        """.trimIndent()
         assertEquals(
             listOf("https://example.test/bbs/board.php?bo_table=javfc2&wr_id=123"),
             parser.parseBoardLinks(html, "https://example.test"),
@@ -44,6 +50,22 @@ class ParserFixtureTest {
             Instant.parse("2026-08-30T08:44:02Z"),
         )
         assertEquals(Instant.parse("2026-08-29T10:28:00Z"), post.postedAt)
+        assertEquals(12, post.recommendationCount)
+    }
+
+    @Test
+    fun `falls back to the last site metric before timestamp for recommendation`() {
+        val html = """
+            <h1>Live-shaped recommendation fallback</h1>
+            <div id='bo_v_info'>
+              <span>M Manager</span><span>11</span><span>4913</span><span>12</span><span>08.29 19:28</span>
+            </div>
+        """.trimIndent()
+        val post = parser.parseDetail(
+            html,
+            "https://example.test/bbs/board.php?bo_table=javfc2&wr_id=457",
+            Instant.parse("2026-08-30T08:44:02Z"),
+        )
         assertEquals(12, post.recommendationCount)
     }
 

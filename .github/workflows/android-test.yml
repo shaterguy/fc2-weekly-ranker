@@ -44,7 +44,7 @@ jobs:
           APK="$(find app/build/outputs/apk/debug -maxdepth 1 -type f -name '*-unsigned.apk' -print -quit)"
           test -s "$APK"
           BADGING="$("$ANDROID_HOME/build-tools/37.0.0/aapt" dump badging "$APK")"
-          grep -Fq "package: name='com.shaterguy.fc2weeklyranker.dev' versionCode='12' versionName='0.1.0-dev12'" <<<"$BADGING"
+          grep -Fq "package: name='com.shaterguy.fc2weeklyranker.dev' versionCode='13' versionName='0.1.0-dev13'" <<<"$BADGING"
           printf '%s\n' "$GITHUB_SHA" > app/build/outputs/apk/debug/SOURCE_COMMIT.txt
           sha256sum "$APK" > app/build/outputs/apk/debug/UNSIGNED_SHA256SUMS.txt
       - name: Upload unsigned TEST provenance
@@ -79,13 +79,13 @@ jobs:
           UNSIGNED="$(find app/build/outputs/apk/debug -maxdepth 1 -type f -name '*-unsigned.apk' -print -quit)"
           OUT=app/build/outputs/fc2-weekly-ranker-test
           mkdir -p "$OUT"
-          ALIGNED="$OUT/fc2-weekly-ranker-test-v0.1.0-dev12-aligned-unsigned.apk"
-          APK="$OUT/fc2-weekly-ranker-test-v0.1.0-dev12.apk"
+          ALIGNED="$OUT/fc2-weekly-ranker-test-v0.1.0-dev13-aligned-unsigned.apk"
+          APK="$OUT/fc2-weekly-ranker-test-v0.1.0-dev13.apk"
           "$BT/zipalign" -p -f 4 "$UNSIGNED" "$ALIGNED"
           APKSIGNER="$BT/apksigner" bash tools/sign_test.sh "$ALIGNED" "$PASS_FILE" "$APK" > "$OUT/APKSIGNER_VERIFY.txt"
           "$BT/apksigner" verify --verbose --print-certs-pem --min-sdk-version 29 "$APK" > "$OUT/APK_CERT.txt"
           BADGING="$("$BT/aapt" dump badging "$APK")"
-          grep -Fq "package: name='com.shaterguy.fc2weeklyranker.dev' versionCode='12' versionName='0.1.0-dev12'" <<<"$BADGING"
+          grep -Fq "package: name='com.shaterguy.fc2weeklyranker.dev' versionCode='13' versionName='0.1.0-dev13'" <<<"$BADGING"
           PINNED_TEST_CERT_SHA256='ff32473e516ff59ca24ada94fe22e8282ce70fd66bd94fb0975340106d981cfd'
           CERT_SHA256="$(awk -F= '/^certificate_sha256=/{print $2; exit}' "$OUT/APKSIGNER_VERIFY.txt" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
           [[ "$CERT_SHA256" =~ ^[0-9a-f]{64}$ ]]
@@ -136,7 +136,7 @@ jobs:
         if: steps.sign.outputs.configured == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          path: app/build/outputs/fc2-weekly-ranker-test/fc2-weekly-ranker-test-v0.1.0-dev12.apk
+          path: app/build/outputs/fc2-weekly-ranker-test/fc2-weekly-ranker-test-v0.1.0-dev13.apk
           archive: false
           if-no-files-found: error
           retention-days: 14

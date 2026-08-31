@@ -5,6 +5,7 @@ import androidx.room.Room
 import com.shaterguy.fc2weeklyranker.data.AppDatabase
 import com.shaterguy.fc2weeklyranker.data.SettingsStore
 import com.shaterguy.fc2weeklyranker.network.AvseeClient
+import com.shaterguy.fc2weeklyranker.network.RetryingDns
 import com.shaterguy.fc2weeklyranker.repo.AppRepository
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
@@ -39,7 +40,7 @@ object AppGraph {
             .followRedirects(true)
             .followSslRedirects(false)
             .build()
-        sourceClient = AvseeClient(httpClient)
+        sourceClient = AvseeClient(httpClient.newBuilder().dns(RetryingDns()).build())
         repository = AppRepository(app, database, settings, sourceClient)
     }
 }

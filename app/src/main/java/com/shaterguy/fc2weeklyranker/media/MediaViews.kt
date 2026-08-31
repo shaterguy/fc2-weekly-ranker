@@ -139,7 +139,6 @@ fun RestrictedIframePlayer(video: VideoEntity, onMediaDiscovered: (String) -> Un
     }
 
     fun probeDom(view: WebView) {
-        if (view.isDestroyed) return
         view.evaluateJavascript(MEDIA_PROBE_SCRIPT) { raw ->
             val domCandidates = decodeMediaCandidates(raw)
             if (domCandidates.isNotEmpty()) {
@@ -151,7 +150,6 @@ fun RestrictedIframePlayer(video: VideoEntity, onMediaDiscovered: (String) -> Un
     }
 
     fun probeAfterVisualState(view: WebView) {
-        if (view.isDestroyed) return
         val requestId = visualRequestId[0]++
         view.postVisualStateCallback(
             requestId,

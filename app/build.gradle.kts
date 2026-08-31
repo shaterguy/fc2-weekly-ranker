@@ -12,8 +12,8 @@ android {
         applicationId = "com.shaterguy.fc2weeklyranker.dev"
         minSdk = 29
         targetSdk = 36
-        versionCode = 15
-        versionName = "0.1.0-dev15"
+        versionCode = 16
+        versionName = "0.1.0-dev16"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

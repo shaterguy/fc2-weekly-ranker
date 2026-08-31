@@ -5,16 +5,17 @@ Android TEST app for browsing the configured `javfc2` board in fixed seven-day w
 ## TEST channel
 
 - Branch lineage starts at `v0.1.0-dev1`.
-- Source version: `0.1.0-dev15`, `versionCode=15`. Runtime source is restored exactly to the user-verified dev12 crawler baseline except for isolated recommendation parsing and cache revision.
+- Source version: `0.1.0-dev16`, `versionCode=16`. The crawler targets the live board-card, published-time, and recommendation-count contracts verified on 2026-08-31.
 - TEST application ID: `com.shaterguy.fc2weeklyranker.dev`.
 - The configured default origin is `https://01.avsee.is`; users can replace it in Settings after a board-and-detail parsing connection check.
 - The anchor instant is persisted in DataStore and changes only when the user explicitly refreshes it.
 - Page `n` covers `anchorDate-(7n+6)` through `anchorDate-7n` in `Asia/Seoul`.
-- Yearless board posting timestamps such as `MM.dd HH:mm` are resolved relative to the ranking window in `Asia/Seoul`, including year-boundary handling.
+- Exact `itemprop=datePublished` KST timestamps are preferred; yearless fallback timestamps such as `MM.dd HH:mm` are resolved relative to the ranking window in `Asia/Seoul`.
 - Ranking rate is `recommendations / max(1 day, exact elapsed time)`.
 - If every detail on a board page fails parsing, the crawl reports a source-format failure instead of silently returning an empty ranking.
+- Only cards inside `#fboardlist .list-item` are crawled, excluding sidebar recommendations and unrelated new-post widgets. The board is requested in descending posting-time order and crawling stops only after every successfully parsed card on a page is older than the target window.
 - Board and detail HTML already fetched during the current app session is reused across adjacent seven-day pages; up to four detail requests run concurrently. Manual anchor refresh clears this crawl cache.
-- Board-link discovery and posting-time parsing remain on the dev12 path. Recommendation parsing adds only explicit labels and the proven live metadata metric sequence before the posting timestamp.
+- Recommendation counts are read from the live `#wr_good` contract, with prior explicit-label and metadata fallbacks retained.
 
 ## Media path
 

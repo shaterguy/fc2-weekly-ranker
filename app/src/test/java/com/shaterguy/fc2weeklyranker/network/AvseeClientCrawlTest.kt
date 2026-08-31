@@ -105,6 +105,40 @@ class AvseeClientCrawlTest {
         assertTrue("detail request limit exceeded", maximum.get() <= 4)
     }
 
+    @Test
+    fun `one older card does not stop later pages`() = runBlocking {
+        val client = AvseeClient(
+            interceptingClient { request ->
+                val id = request.url.queryParameter("wr_id")
+                if (id == null) {
+                    assertEquals("wr_datetime", request.url.queryParameter("sst"))
+                    assertEquals("desc", request.url.queryParameter("sod"))
+                    when (request.url.queryParameter("page") ?: "1") {
+                        "1" -> board("101", "102")
+                        "2" -> board("201")
+                        "3" -> board("301")
+                        else -> ""
+                    }
+                } else {
+                    when (id) {
+                        "101" -> detail(id, "2026-08-29 12:00")
+                        "102" -> detail(id, "2026-08-01 12:00")
+                        "201" -> detail(id, "2026-08-28 12:00")
+                        "301" -> detail(id, "2026-08-01 12:00")
+                        else -> error("Unexpected detail id: $id")
+                    }
+                }
+            },
+        )
+
+        val posts = client.crawlWindow(
+            "https://example.test",
+            windowFor(Instant.parse("2026-08-30T08:44:02Z"), 0),
+        )
+
+        assertEquals(listOf("101", "201"), posts.map { it.id })
+    }
+
     private fun fakeClient(detailHtml: String): OkHttpClient = interceptingClient { request ->
         if (request.url.queryParameter("wr_id") != null) {
             detailHtml
@@ -127,9 +161,9 @@ class AvseeClientCrawlTest {
         .build()
 
     private fun board(vararg ids: String): String = ids.joinToString(
-        prefix = "<div>",
-        postfix = "</div>",
-    ) { id -> "<a href='/bbs/board.php?bo_table=javfc2&wr_id=$id'>Synthetic item $id</a>" }
+        prefix = "<form id='fboardlist'><div class='list-container'>",
+        postfix = "</div></form>",
+    ) { id -> "<div class='list-item'><h2><a href='/bbs/board.php?bo_table=javfc2&wr_id=$id'>Synthetic item $id</a></h2></div>" }
 
     private fun detail(id: String, postedAt: String): String =
         "<h1>FC2PPV-$id</h1><div id='bo_v_info'>$postedAt</div>"

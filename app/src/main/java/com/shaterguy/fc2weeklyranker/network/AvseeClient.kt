@@ -21,7 +21,7 @@ import java.time.ZoneId
 import java.util.Collections
 import java.util.LinkedHashMap
 
-private const val BOARD_PATH = "/bbs/board.php?bo_table=javfc2"
+private const val BOARD_PATH = "/bbs/board.php?bo_table=javfc2&sop=and&sst=wr_datetime&sod=desc"
 private const val UA = "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 Chrome/151 Mobile Safari/537.36"
 private val SEOUL = ZoneId.of("Asia/Seoul")
 
@@ -58,9 +58,9 @@ class AvseeClient(
             val boardUrl = "$baseUrl$BOARD_PATH&page=$page"
             val links = parseBoardLinks(fetchForCrawl(boardUrl), baseUrl)
             if (links.isEmpty()) break
-            var sawOlder = false
             var parsedOnPage = 0
             var failedOnPage = 0
+            var olderOnPage = 0
             val details = coroutineScope {
                 links.map { link ->
                     async {
@@ -77,13 +77,13 @@ class AvseeClient(
                     failedOnPage += 1
                 }.getOrNull() ?: continue
                 parsedOnPage += 1
-                if (detail.postedAt.isBefore(window.startInclusive)) sawOlder = true
+                if (detail.postedAt.isBefore(window.startInclusive)) olderOnPage += 1
                 if (window.contains(detail.postedAt)) out.putIfAbsent(detail.id, detail)
             }
             check(parsedOnPage > 0 || failedOnPage == 0) {
                 "게시물 상세 파싱에 모두 실패했습니다. 사이트 형식이 변경되었는지 확인해 주세요. (page=$page, failed=$failedOnPage)"
             }
-            if (sawOlder && page >= 2) break
+            if (failedOnPage == 0 && parsedOnPage > 0 && olderOnPage == parsedOnPage) break
         }
         out.values.toList()
     }
@@ -98,7 +98,7 @@ class AvseeClient(
 
     internal fun parseBoardLinks(html: String, baseUrl: String): List<String> {
         val doc = Jsoup.parse(html, baseUrl)
-        return doc.select("a[href*='bo_table=javfc2'][href*='wr_id=']")
+        return doc.select("#fboardlist .list-item h2 a[href*='bo_table=javfc2'][href*='wr_id=']")
             .mapNotNull { it.absUrl("href").takeIf(String::isNotBlank) }
             .distinct()
     }
@@ -118,6 +118,10 @@ class AvseeClient(
     }
 
     private fun parsePostedAt(doc: Document, referenceInstant: Instant): Instant? {
+        doc.select("[itemprop=datePublished][content]").firstNotNullOfOrNull { node ->
+            parsePublishedContent(node.attr("content"))
+        }?.let { return it }
+
         doc.select("time[datetime]").firstNotNullOfOrNull { node ->
             runCatching { Instant.parse(node.attr("datetime")) }.getOrNull()
         }?.let { return it }
@@ -154,6 +158,15 @@ class AvseeClient(
         return null
     }
 
+    private fun parsePublishedContent(value: String): Instant? {
+        Regex("(20\\d{2})-(\\d{1,2})-(\\d{1,2})KST(\\d{1,2}):(\\d{2})(?::(\\d{2}))?")
+            .matchEntire(value.trim())?.let { match ->
+                val g = match.groupValues
+                return localInstant(g[1].toInt(), g[2].toInt(), g[3].toInt(), g[4].toInt(), g[5].toInt(), g[6])
+            }
+        return runCatching { Instant.parse(value.trim()) }.getOrNull()
+    }
+
     private fun localInstant(year: Int, month: Int, day: Int, hour: Int, minute: Int, secondText: String): Instant? =
         runCatching {
             LocalDateTime.of(year, month, day, hour, minute, secondText.ifBlank { "0" }.toInt())
@@ -176,7 +189,7 @@ class AvseeClient(
     }
 
     private fun parseRecommendation(doc: Document): Int {
-        doc.select("#good_button strong, #bo_v_act .bo_v_good strong, [id*=good] strong, [class*=good] strong").forEach { node ->
+        doc.select("#wr_good, [onclick*=apms_good] b, .view-good b, #good_button strong, #bo_v_act .bo_v_good strong, [id*=good] strong, [class*=good] strong").forEach { node ->
             Regex("\\d+").find(node.text())?.value?.toIntOrNull()?.let { return it }
         }
 

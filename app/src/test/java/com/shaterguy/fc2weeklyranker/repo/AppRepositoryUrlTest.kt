@@ -5,8 +5,8 @@ import org.junit.Test
 
 class AppRepositoryUrlTest {
     @Test
-    fun `snapshot key invalidates recommendation parser revision`() {
-        assertEquals("ranking-v3:1234:2", AppRepository.snapshotKey(1234L, 2))
+    fun `snapshot key invalidates live board parser revision`() {
+        assertEquals("ranking-v4:1234:2", AppRepository.snapshotKey(1234L, 2))
     }
 
     @Test

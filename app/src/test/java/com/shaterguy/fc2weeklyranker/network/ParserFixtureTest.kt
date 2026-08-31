@@ -10,12 +10,40 @@ class ParserFixtureTest {
     private val parser = AvseeClient(OkHttpClient())
 
     @Test
-    fun `extracts unique post links from board fixture`() {
-        val html = "<table><tr><td><a href='/bbs/board.php?bo_table=javfc2&wr_id=123'>fixture</a><a href='/bbs/board.php?bo_table=javfc2&wr_id=123'>duplicate</a></td></tr></table>"
+    fun `extracts only actual board cards and ignores sidebar links`() {
+        val html = """
+            <form id='fboardlist'>
+              <div class='list-item'>
+                <a href='/bbs/board.php?bo_table=javfc2&wr_id=123'>image duplicate</a>
+                <h2><a href='/bbs/board.php?bo_table=javfc2&wr_id=123'>actual title</a></h2>
+              </div>
+            </form>
+            <aside><a href='/bbs/board.php?bo_table=javfc2&wr_id=999'>sidebar recommendation</a></aside>
+        """.trimIndent()
         assertEquals(
             listOf("https://example.test/bbs/board.php?bo_table=javfc2&wr_id=123"),
             parser.parseBoardLinks(html, "https://example.test"),
         )
+    }
+
+    @Test
+    fun `reads exact live published content and wr good count`() {
+        val html = """
+            <h1 itemprop='headline'>Live-shaped FC2 fixture</h1>
+            <div class='view-head'>
+              <i class='fa fa-comment'></i><b>49</b>
+              <i class='fa fa-eye'></i>44726
+              <i class='fa fa-thumbs-up'></i>37
+              <span itemprop='datePublished' content='2026-08-29KST19:28:42'>2일전</span>
+            </div>
+            <div class='view-good'><a href='#' onclick="apms_good('javfc2', '607221', 'good', 'wr_good')"><b id='wr_good'>37</b></a></div>
+        """.trimIndent()
+        val post = parser.parseDetail(
+            html,
+            "https://example.test/bbs/board.php?bo_table=javfc2&wr_id=607221",
+        )
+        assertEquals(Instant.parse("2026-08-29T10:28:42Z"), post.postedAt)
+        assertEquals(37, post.recommendationCount)
     }
 
     @Test

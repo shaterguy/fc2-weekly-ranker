@@ -283,20 +283,21 @@ private fun VideoCard(vm: MainViewModel, index: Int, video: VideoEntity) {
 @Composable
 private fun DownloadControls(vm: MainViewModel, video: VideoEntity, index: Int) {
     val download by remember(video.id) { vm.download(video.id) }.collectAsState(initial = null)
+    val state = download
     when {
         !VideoDownloadWorker.supportsFileDownload(video.url) -> {
             Text("스트리밍 주소는 동영상 파일로 저장할 수 없습니다.", style = MaterialTheme.typography.bodySmall)
         }
-        download?.status == DownloadStatus.QUEUED -> {
+        state?.status == DownloadStatus.QUEUED -> {
             Text("다운로드 대기 중", style = MaterialTheme.typography.bodySmall)
-            download.errorCode?.let { Text("재시도 대기: $it", style = MaterialTheme.typography.bodySmall) }
+            state.errorCode?.let { Text("재시도 대기: $it", style = MaterialTheme.typography.bodySmall) }
             OutlinedButton(
                 onClick = { vm.stopDownload(video.id) },
                 modifier = Modifier.semantics { contentDescription = "영상 ${index + 1} 다운로드 정지" },
             ) { Text("정지") }
         }
-        download?.status == DownloadStatus.RUNNING -> {
-            DownloadProgress(download.downloadedBytes, download.totalBytes)
+        state?.status == DownloadStatus.RUNNING -> {
+            DownloadProgress(state.downloadedBytes, state.totalBytes)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(
                     onClick = { vm.pauseDownload(video.id) },
@@ -308,8 +309,8 @@ private fun DownloadControls(vm: MainViewModel, video: VideoEntity, index: Int) 
                 ) { Text("정지") }
             }
         }
-        download?.status == DownloadStatus.PAUSED -> {
-            DownloadProgress(download.downloadedBytes, download.totalBytes, prefix = "일시정지")
+        state?.status == DownloadStatus.PAUSED -> {
+            DownloadProgress(state.downloadedBytes, state.totalBytes, prefix = "일시정지")
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = { vm.queueDownload(video.id) },
@@ -321,22 +322,22 @@ private fun DownloadControls(vm: MainViewModel, video: VideoEntity, index: Int) 
                 ) { Text("정지") }
             }
         }
-        download?.status == DownloadStatus.FINALIZING -> {
+        state?.status == DownloadStatus.FINALIZING -> {
             LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
             Text("다운로드 파일 저장을 마무리하고 있습니다…", style = MaterialTheme.typography.bodySmall)
         }
-        download?.status == DownloadStatus.COMPLETED -> {
+        state?.status == DownloadStatus.COMPLETED -> {
             Text("다운로드 완료", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
             Text("기기 다운로드 폴더의 Weekly Ranker에서 확인할 수 있습니다.", style = MaterialTheme.typography.bodySmall)
         }
-        download?.status == DownloadStatus.FAILED -> {
-            Text("다운로드 실패: ${download.errorCode ?: "알 수 없는 오류"}", color = MaterialTheme.colorScheme.error)
+        state?.status == DownloadStatus.FAILED -> {
+            Text("다운로드 실패: ${state.errorCode ?: "알 수 없는 오류"}", color = MaterialTheme.colorScheme.error)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(
                     onClick = { vm.queueDownload(video.id) },
                     modifier = Modifier.semantics { contentDescription = "영상 ${index + 1} 다운로드 다시 시도" },
                 ) { Text("다시 다운로드") }
-                if (download.contentUri != null) {
+                if (state.contentUri != null) {
                     TextButton(
                         onClick = { vm.stopDownload(video.id) },
                         modifier = Modifier.semantics { contentDescription = "영상 ${index + 1} 부분 다운로드 삭제" },
@@ -344,7 +345,7 @@ private fun DownloadControls(vm: MainViewModel, video: VideoEntity, index: Int) 
                 }
             }
         }
-        download?.status == DownloadStatus.STOPPED -> {
+        state?.status == DownloadStatus.STOPPED -> {
             Text("다운로드를 정지했습니다.", style = MaterialTheme.typography.bodySmall)
             Button(
                 onClick = { vm.queueDownload(video.id) },

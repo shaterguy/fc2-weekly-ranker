@@ -5,7 +5,7 @@ Android TEST app for browsing the configured `javfc2` board in fixed seven-day w
 ## TEST channel
 
 - Branch lineage starts at `v0.1.0-dev1`.
-- Source version: `0.1.0-dev20`, `versionCode=20`. The crawler targets the live board-card, published-time, and recommendation-count contracts verified on 2026-08-31.
+- Source version: `0.1.0-dev21`, `versionCode=21`. The crawler preserves the live board-card, published-time, and recommendation-count contracts verified on 2026-08-31 while reducing crawl latency through wider bounded detail concurrency and next-board-page prefetch.
 - TEST application ID: `com.shaterguy.fc2weeklyranker.dev`.
 - The configured default origin is `https://01.avsee.is`; users can replace it in Settings after a board-and-detail parsing connection check.
 - The anchor instant is persisted in DataStore and changes only when the user explicitly refreshes it.
@@ -14,8 +14,9 @@ Android TEST app for browsing the configured `javfc2` board in fixed seven-day w
 - Ranking rate is `recommendations / max(1 day, exact elapsed time)`.
 - If every detail on a board page fails parsing, the crawl reports a source-format failure instead of silently returning an empty ranking.
 - Only cards inside `#fboardlist .list-item` are crawled, excluding sidebar recommendations and unrelated new-post widgets. The board is requested in descending posting-time order and crawling stops only after every successfully parsed card on a page is older than the target window.
-- Board and detail HTML already fetched during the current app session is reused across adjacent seven-day pages; up to four detail requests run concurrently. Manual anchor refresh clears this crawl cache.
+- Board and detail HTML already fetched during the current app session is reused across adjacent seven-day pages; up to eight detail requests run concurrently, and the next board page is prefetched while the current page details are being parsed. Manual anchor refresh clears this crawl cache.
 - Recommendation counts are read from the live `#wr_good` contract, with prior explicit-label and metadata fallbacks retained.
+- Navigation Compose page transitions are disabled at the app level; the app does not override Android's system animation scale.
 
 ## Media path
 

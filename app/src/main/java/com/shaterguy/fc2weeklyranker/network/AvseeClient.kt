@@ -54,15 +54,19 @@ class AvseeClient(
     suspend fun crawlWindow(baseUrl: String, window: DateWindow): List<RemotePost> = withContext(ioDispatcher) {
         val out = LinkedHashMap<String, RemotePost>()
         val detailLimiter = Semaphore(MAX_PARALLEL_DETAIL_REQUESTS)
-        for (page in 1..30) {
+        var prefetchedBoard: Pair<Int, Result<List<String>>>? = null
+        for (page in 1..MAX_CRAWL_PAGES) {
             val boardUrl = "$baseUrl$BOARD_PATH&page=$page"
-            val links = parseBoardLinks(fetchForCrawl(boardUrl), baseUrl)
+            val prefetched = prefetchedBoard?.takeIf { it.first == page }
+            prefetchedBoard = null
+            val links = prefetched?.second?.getOrThrow()
+                ?: parseBoardLinks(fetchForCrawl(boardUrl), baseUrl)
             if (links.isEmpty()) break
             var parsedOnPage = 0
             var failedOnPage = 0
             var olderOnPage = 0
-            val details = coroutineScope {
-                links.map { link ->
+            val pageResult = coroutineScope {
+                val detailDeferreds = links.map { link ->
                     async {
                         runCatching {
                             detailLimiter.withPermit {
@@ -70,9 +74,22 @@ class AvseeClient(
                             }
                         }
                     }
-                }.awaitAll()
+                }
+                val nextBoardDeferred = if (page < MAX_CRAWL_PAGES) {
+                    async {
+                        val nextPage = page + 1
+                        val nextBoardUrl = "$baseUrl$BOARD_PATH&page=$nextPage"
+                        nextPage to runCatching {
+                            parseBoardLinks(fetchForCrawl(nextBoardUrl), baseUrl)
+                        }
+                    }
+                } else {
+                    null
+                }
+                detailDeferreds.awaitAll() to nextBoardDeferred?.await()
             }
-            for (result in details) {
+            prefetchedBoard = pageResult.second
+            for (result in pageResult.first) {
                 val detail = result.onFailure {
                     failedOnPage += 1
                 }.getOrNull() ?: continue
@@ -261,7 +278,8 @@ class AvseeClient(
 
     companion object {
         const val USER_AGENT: String = UA
-        private const val MAX_PARALLEL_DETAIL_REQUESTS = 4
+        private const val MAX_CRAWL_PAGES = 30
+        private const val MAX_PARALLEL_DETAIL_REQUESTS = 8
         private const val MAX_CRAWL_CACHE_ENTRIES = 256
     }
 }

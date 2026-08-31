@@ -12,6 +12,9 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.Instant
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 class AvseeClientCrawlTest {
@@ -64,20 +67,21 @@ class AvseeClientCrawlTest {
 
         assertEquals(listOf("101"), current.map { it.id })
         assertEquals(listOf("201"), previous.map { it.id })
-        assertEquals(3, boardRequests.get())
+        assertEquals(4, boardRequests.get())
         assertEquals(3, detailRequests.get())
     }
 
     @Test
-    fun `detail requests run concurrently with a limit of four`() = runBlocking {
+    fun `detail requests run concurrently with a limit of eight`() = runBlocking {
         val active = AtomicInteger()
         val maximum = AtomicInteger()
+        val currentIds = (101..108).map(Int::toString)
         val client = AvseeClient(
             interceptingClient { request ->
                 val id = request.url.queryParameter("wr_id")
                 if (id == null) {
                     when (request.url.queryParameter("page") ?: "1") {
-                        "1" -> board("101", "102", "103", "104")
+                        "1" -> board(*currentIds.toTypedArray())
                         "2" -> board("201")
                         else -> ""
                     }
@@ -100,9 +104,56 @@ class AvseeClientCrawlTest {
             windowFor(Instant.parse("2026-08-30T08:44:02Z"), 0),
         )
 
+        assertEquals(8, posts.size)
+        assertTrue("expected more than the dev20 concurrency of four", maximum.get() >= 5)
+        assertTrue("detail request limit exceeded", maximum.get() <= 8)
+    }
+
+    @Test
+    fun `next board page is prefetched while current details are loading`() = runBlocking {
+        val activeDetails = AtomicInteger()
+        val firstDetailStarted = CountDownLatch(1)
+        val nextBoardRequested = CountDownLatch(1)
+        val prefetchedWhileActive = AtomicBoolean(false)
+        val client = AvseeClient(
+            interceptingClient { request ->
+                val id = request.url.queryParameter("wr_id")
+                if (id == null) {
+                    when (request.url.queryParameter("page") ?: "1") {
+                        "1" -> board("101", "102", "103", "104")
+                        "2" -> {
+                            check(firstDetailStarted.await(1, TimeUnit.SECONDS)) { "detail request did not start" }
+                            prefetchedWhileActive.set(activeDetails.get() > 0)
+                            nextBoardRequested.countDown()
+                            board("201")
+                        }
+                        else -> ""
+                    }
+                } else {
+                    if (id == "201") {
+                        detail(id, "2026-08-01 12:00")
+                    } else {
+                        activeDetails.incrementAndGet()
+                        firstDetailStarted.countDown()
+                        try {
+                            check(nextBoardRequested.await(1, TimeUnit.SECONDS)) { "next board page was not prefetched" }
+                            Thread.sleep(25)
+                            detail(id, "2026-08-29 12:00")
+                        } finally {
+                            activeDetails.decrementAndGet()
+                        }
+                    }
+                }
+            },
+        )
+
+        val posts = client.crawlWindow(
+            "https://example.test",
+            windowFor(Instant.parse("2026-08-30T08:44:02Z"), 0),
+        )
+
         assertEquals(4, posts.size)
-        assertTrue("expected concurrent detail requests", maximum.get() >= 2)
-        assertTrue("detail request limit exceeded", maximum.get() <= 4)
+        assertTrue("next board page should overlap current detail loading", prefetchedWhileActive.get())
     }
 
     @Test

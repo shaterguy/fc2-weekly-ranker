@@ -55,6 +55,25 @@ class ParserFixtureTest {
     }
 
     @Test
+    fun `finds live header without legacy info selector and ignores comment relative time`() {
+        val html = """
+            <h1>Selector drift fixture</h1>
+            <div class='view-meta'>
+              <span>M</span><span>Manager</span><span>1</span><span>1262</span><span>4</span><span>3시간전</span>
+            </div>
+            <section class='comments'><div>230 Cangi 2시간전</div></section>
+        """.trimIndent()
+        val post = parser.parseDetail(
+            html = html,
+            detailUrl = "https://example.test/bbs/board.php?bo_table=javfc2&wr_id=452",
+            yearReferenceInstant = Instant.parse("2026-08-24T14:59:59Z"),
+            relativeReferenceInstant = Instant.parse("2026-08-30T13:00:00Z"),
+        )
+        assertEquals(Instant.parse("2026-08-30T10:00:00Z"), post.postedAt)
+        assertEquals(4, post.recommendationCount)
+    }
+
+    @Test
     fun `parses minute and just now relative posting timestamps`() {
         val observedAt = Instant.parse("2026-08-30T13:00:00Z")
         val minutePost = parser.parseDetail(

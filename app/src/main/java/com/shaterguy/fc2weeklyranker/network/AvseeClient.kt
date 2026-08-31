@@ -111,6 +111,23 @@ class AvseeClient(
         return RemotePost(id, detailUrl, title, postedAt, parseRecommendation(doc), parseMedia(doc, detailUrl))
     }
 
+    private fun postInfoText(doc: Document): String? {
+        doc.selectFirst("#bo_v_info, .bo_v_info")
+            ?.text()
+            ?.trim()
+            ?.takeIf(String::isNotBlank)
+            ?.let { return it }
+
+        return doc.getAllElements()
+            .asSequence()
+            .map { it.text().trim() }
+            .filter(String::isNotBlank)
+            .distinct()
+            .filter { postingTimestampStart(it) != null }
+            .filter { metricsBeforePostingTimestamp(it).size >= 3 }
+            .minByOrNull { it.length }
+    }
+
     private fun parsePostedAt(
         doc: Document,
         yearReferenceInstant: Instant,
@@ -120,10 +137,7 @@ class AvseeClient(
             runCatching { Instant.parse(node.attr("datetime")) }.getOrNull()
         }?.let { return it }
 
-        val infoText = doc.selectFirst("#bo_v_info, .bo_v_info")
-            ?.text()
-            ?.trim()
-            ?.takeIf(String::isNotBlank)
+        val infoText = postInfoText(doc)
         if (infoText != null) {
             parseAbsoluteOrYearless(infoText, yearReferenceInstant)?.let { return it }
             parseRelativeInstant(infoText, relativeReferenceInstant)?.let { return it }
@@ -176,6 +190,23 @@ class AvseeClient(
         return runCatching { referenceInstant.minus(duration) }.getOrNull()
     }
 
+    private fun postingTimestampStart(text: String): Int? = listOf(
+        Regex("20\\d{2}[-./]\\d{1,2}[-./]\\d{1,2}\\s+\\d{1,2}:\\d{2}"),
+        Regex("(?<!\\d)\\d{2}-\\d{2}-\\d{2}\\s+\\d{1,2}:\\d{2}"),
+        Regex("(?<!\\d)\\d{1,2}[.]\\d{1,2}\\s+\\d{1,2}:\\d{2}"),
+        Regex("(?<!\\d)\\d{1,6}\\s*(?:초|분|시간|일)\\s*전"),
+        Regex("방금\\s*전"),
+    ).mapNotNull { pattern -> pattern.find(text)?.range?.first }
+        .minOrNull()
+
+    private fun metricsBeforePostingTimestamp(text: String): List<Int> {
+        val timestampStart = postingTimestampStart(text) ?: return emptyList()
+        return Regex("(?<![\\d.])\\d{1,9}(?![\\d.])")
+            .findAll(text.substring(0, timestampStart))
+            .mapNotNull { it.value.toIntOrNull() }
+            .toList()
+    }
+
     private fun localInstant(year: Int, month: Int, day: Int, hour: Int, minute: Int, secondText: String): Instant? =
         runCatching {
             LocalDateTime.of(year, month, day, hour, minute, secondText.ifBlank { "0" }.toInt())
@@ -210,21 +241,8 @@ class AvseeClient(
             pattern.find(bodyText)?.groupValues?.getOrNull(1)?.toIntOrNull()?.let { return it }
         }
 
-        val infoText = doc.selectFirst("#bo_v_info, .bo_v_info")?.text().orEmpty()
-        val dateStart = listOf(
-            Regex("20\\d{2}[-./]\\d{1,2}[-./]\\d{1,2}\\s+\\d{1,2}:\\d{2}"),
-            Regex("(?<!\\d)\\d{2}-\\d{2}-\\d{2}\\s+\\d{1,2}:\\d{2}"),
-            Regex("(?<!\\d)\\d{1,2}[.]\\d{1,2}\\s+\\d{1,2}:\\d{2}"),
-            Regex("(?<!\\d)\\d{1,6}\\s*(?:초|분|시간|일)\\s*전"),
-            Regex("방금\\s*전"),
-        ).firstNotNullOfOrNull { it.find(infoText)?.range?.first }
-        if (dateStart != null) {
-            val metrics = Regex("(?<![\\d.])\\d{1,9}(?![\\d.])")
-                .findAll(infoText.substring(0, dateStart))
-                .mapNotNull { it.value.toIntOrNull() }
-                .toList()
-            if (metrics.size >= 3) return metrics.last()
-        }
+        val metrics = metricsBeforePostingTimestamp(postInfoText(doc).orEmpty())
+        if (metrics.size >= 3) return metrics.last()
         return 0
     }
 

@@ -179,8 +179,29 @@ class AvseeClient(
         doc.select("#good_button strong, #bo_v_act .bo_v_good strong, [id*=good] strong, [class*=good] strong").forEach { node ->
             Regex("\\d+").find(node.text())?.value?.toIntOrNull()?.let { return it }
         }
-        return Regex("추천\\s*(?:수)?\\s*[:：]?\\s*(\\d+)")
-            .find(doc.body()?.text().orEmpty())?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
+
+        val bodyText = doc.body()?.text().orEmpty()
+        listOf(
+            Regex("(?:추천|좋아요)\\s*(?:수)?\\s*[:：]?\\s*(\\d+)", RegexOption.IGNORE_CASE),
+            Regex("(\\d+)\\s*(?:추천|좋아요)", RegexOption.IGNORE_CASE),
+        ).forEach { pattern ->
+            pattern.find(bodyText)?.groupValues?.getOrNull(1)?.toIntOrNull()?.let { return it }
+        }
+
+        val infoText = doc.selectFirst("#bo_v_info, .bo_v_info")?.text().orEmpty()
+        val dateStart = listOf(
+            Regex("20\\d{2}[-./]\\d{1,2}[-./]\\d{1,2}\\s+\\d{1,2}:\\d{2}"),
+            Regex("(?<!\\d)\\d{2}-\\d{2}-\\d{2}\\s+\\d{1,2}:\\d{2}"),
+            Regex("(?<!\\d)\\d{1,2}[.]\\d{1,2}\\s+\\d{1,2}:\\d{2}"),
+        ).firstNotNullOfOrNull { it.find(infoText)?.range?.first }
+        if (dateStart != null) {
+            val metrics = Regex("(?<![\\d.])\\d{1,9}(?![\\d.])")
+                .findAll(infoText.substring(0, dateStart))
+                .mapNotNull { it.value.toIntOrNull() }
+                .toList()
+            if (metrics.size >= 3) return metrics.last()
+        }
+        return 0
     }
 
     private fun parseMedia(doc: Document, detailUrl: String): List<RemoteMedia> {

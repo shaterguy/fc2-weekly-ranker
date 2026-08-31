@@ -48,6 +48,21 @@ class ParserFixtureTest {
     }
 
     @Test
+    fun `reads recommendation from proven live metadata sequence without a good button`() {
+        val html = """
+            <h1>Live-shaped metadata fixture</h1>
+            <div id='bo_v_info'>M Manager 11 4913 12 08.29 19:28</div>
+        """.trimIndent()
+        val post = parser.parseDetail(
+            html,
+            "https://example.test/bbs/board.php?bo_table=javfc2&wr_id=457",
+            Instant.parse("2026-08-30T08:44:02Z"),
+        )
+        assertEquals(Instant.parse("2026-08-29T10:28:00Z"), post.postedAt)
+        assertEquals(12, post.recommendationCount)
+    }
+
+    @Test
     fun `infers previous year for december post viewed from january window`() {
         val html = "<h1>Year boundary fixture</h1><div id='bo_v_info'>M Manager 1 100 2 12.31 23:55</div><div id='good_button'><strong>2</strong></div>"
         val post = parser.parseDetail(

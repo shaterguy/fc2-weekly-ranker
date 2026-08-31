@@ -5,7 +5,7 @@ Android TEST app for browsing the configured `javfc2` board in fixed seven-day w
 ## TEST channel
 
 - Branch lineage starts at `v0.1.0-dev1`.
-- Source version: `0.1.0-dev12`, `versionCode=12`. Runtime source remains based on the last known working `v0.1.0-dev3` baseline.
+- Source version: `0.1.0-dev15`, `versionCode=15`. Runtime source is restored exactly to the user-verified dev12 crawler baseline except for isolated recommendation parsing and cache revision.
 - TEST application ID: `com.shaterguy.fc2weeklyranker.dev`.
 - The configured default origin is `https://01.avsee.is`; users can replace it in Settings after a board-and-detail parsing connection check.
 - The anchor instant is persisted in DataStore and changes only when the user explicitly refreshes it.
@@ -14,6 +14,7 @@ Android TEST app for browsing the configured `javfc2` board in fixed seven-day w
 - Ranking rate is `recommendations / max(1 day, exact elapsed time)`.
 - If every detail on a board page fails parsing, the crawl reports a source-format failure instead of silently returning an empty ranking.
 - Board and detail HTML already fetched during the current app session is reused across adjacent seven-day pages; up to four detail requests run concurrently. Manual anchor refresh clears this crawl cache.
+- Board-link discovery and posting-time parsing remain on the dev12 path. Recommendation parsing adds only explicit labels and the proven live metadata metric sequence before the posting timestamp.
 
 ## Media path
 

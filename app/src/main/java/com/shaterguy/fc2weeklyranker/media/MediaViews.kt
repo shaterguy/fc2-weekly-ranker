@@ -133,13 +133,17 @@ fun RestrictedIframePlayer(video: VideoEntity, onMediaDiscovered: (String) -> Un
     val iframeHost = remember(video.url) { runCatching { URI(video.url).host.lowercase() }.getOrNull() }
     val latestNetworkCandidate = remember(video.id) { arrayOfNulls<String>(1) }
     val visualRequestId = remember(video.id) { longArrayOf(0L) }
+    val released = remember(video.id) { booleanArrayOf(false) }
 
     fun publish(candidates: List<String>) {
+        if (released[0]) return
         normalizeMediaCandidates(candidates).forEach(onMediaDiscovered)
     }
 
     fun probeDom(view: WebView) {
+        if (released[0]) return
         view.evaluateJavascript(MEDIA_PROBE_SCRIPT) { raw ->
+            if (released[0]) return@evaluateJavascript
             val domCandidates = decodeMediaCandidates(raw)
             if (domCandidates.isNotEmpty()) {
                 publish(domCandidates)
@@ -150,12 +154,13 @@ fun RestrictedIframePlayer(video: VideoEntity, onMediaDiscovered: (String) -> Un
     }
 
     fun probeAfterVisualState(view: WebView) {
+        if (released[0]) return
         val requestId = visualRequestId[0]++
         view.postVisualStateCallback(
             requestId,
             object : WebView.VisualStateCallback() {
                 override fun onComplete(requestId: Long) {
-                    probeDom(view)
+                    if (!released[0]) probeDom(view)
                 }
             },
         )
@@ -185,6 +190,7 @@ fun RestrictedIframePlayer(video: VideoEntity, onMediaDiscovered: (String) -> Un
                     val candidate = request.url.toString()
                     if (request.url.scheme == "https" && looksLikeMedia(candidate)) {
                         handler.post {
+                            if (released[0]) return@post
                             latestNetworkCandidate[0] = candidate
                             probeAfterVisualState(view)
                         }
@@ -201,6 +207,7 @@ fun RestrictedIframePlayer(video: VideoEntity, onMediaDiscovered: (String) -> Un
     }
     DisposableEffect(webView) {
         onDispose {
+            released[0] = true
             handler.removeCallbacksAndMessages(null)
             webView.stopLoading()
             webView.loadUrl("about:blank")

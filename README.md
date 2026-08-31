@@ -35,3 +35,5 @@ Downloads are unique WorkManager jobs and write to `MediaStore.Downloads`. Downl
 ## Remote verification
 
 GitHub Actions is the build authority. `scripts/verify.sh` is the canonical candidate/release verification entry point. Action dependencies are pinned to commit SHAs, and artifact identity includes both `github.run_id` and `github.run_attempt` so reruns cannot collide.
+
+The repository intentionally does not contain real media, real session material, or copied source-site content fixtures; parser tests use synthetic HTML shaped like the supported page contract.

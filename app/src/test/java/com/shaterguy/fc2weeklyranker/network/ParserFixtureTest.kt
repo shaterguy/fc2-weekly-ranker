@@ -66,6 +66,7 @@ class ParserFixtureTest {
             "https://example.test/bbs/board.php?bo_table=javfc2&wr_id=457",
             Instant.parse("2026-08-30T08:44:02Z"),
         )
+        assertEquals(Instant.parse("2026-08-29T10:28:00Z"), post.postedAt)
         assertEquals(12, post.recommendationCount)
     }
 

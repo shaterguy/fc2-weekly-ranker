@@ -8,6 +8,8 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
+import org.jsoup.nodes.TextNode
 import java.net.URI
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
@@ -111,16 +113,29 @@ class AvseeClient(
         return RemotePost(id, detailUrl, title, postedAt, parseRecommendation(doc), parseMedia(doc, detailUrl))
     }
 
+    private fun elementTextWithBoundaries(element: Element): String = element.childNodes()
+        .asSequence()
+        .mapNotNull { node ->
+            val text = when (node) {
+                is TextNode -> node.text()
+                is Element -> elementTextWithBoundaries(node)
+                else -> null
+            }?.trim()
+            text?.takeIf(String::isNotBlank)
+        }
+        .joinToString(" ")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+
     private fun postInfoText(doc: Document): String? {
         doc.selectFirst("#bo_v_info, .bo_v_info")
-            ?.text()
-            ?.trim()
+            ?.let(::elementTextWithBoundaries)
             ?.takeIf(String::isNotBlank)
             ?.let { return it }
 
         return doc.getAllElements()
             .asSequence()
-            .map { it.text().trim() }
+            .map(::elementTextWithBoundaries)
             .filter(String::isNotBlank)
             .distinct()
             .filter { postingTimestampStart(it) != null }

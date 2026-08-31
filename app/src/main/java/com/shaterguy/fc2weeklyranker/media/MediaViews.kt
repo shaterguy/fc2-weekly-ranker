@@ -1,7 +1,6 @@
 package com.shaterguy.fc2weeklyranker.media
 
 import android.app.Dialog
-import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -35,6 +34,8 @@ import com.shaterguy.fc2weeklyranker.data.VideoEntity
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URI
+
+private const val MEDIA_PROBE_SCRIPT = "(function(){var videos=Array.from(document.querySelectorAll('video')).map(function(v){var s=v.querySelector('source[src]');return v.currentSrc||v.src||(s?(s.currentSrc||s.src):'');}).filter(Boolean);if(videos.length){return JSON.stringify(videos);}return JSON.stringify(Array.from(document.querySelectorAll('source[src]')).map(function(s){return s.currentSrc||s.src||'';}).filter(Boolean));})()"
 
 @OptIn(UnstableApi::class)
 @Composable
@@ -128,8 +129,40 @@ private fun hideSystemBars(dialog: Dialog) {
 @Composable
 fun RestrictedIframePlayer(video: VideoEntity, onMediaDiscovered: (String) -> Unit, modifier: Modifier = Modifier) {
     val context = LocalContext.current
-    val handler = remember { Handler(Looper.getMainLooper()) }
+    val handler = remember(video.id) { Handler(Looper.getMainLooper()) }
     val iframeHost = remember(video.url) { runCatching { URI(video.url).host.lowercase() }.getOrNull() }
+    val latestNetworkCandidate = remember(video.id) { arrayOfNulls<String>(1) }
+    val visualRequestId = remember(video.id) { longArrayOf(0L) }
+
+    fun publish(candidates: List<String>) {
+        normalizeMediaCandidates(candidates).forEach(onMediaDiscovered)
+    }
+
+    fun probeDom(view: WebView) {
+        if (view.isDestroyed) return
+        view.evaluateJavascript(MEDIA_PROBE_SCRIPT) { raw ->
+            val domCandidates = decodeMediaCandidates(raw)
+            if (domCandidates.isNotEmpty()) {
+                publish(domCandidates)
+            } else {
+                latestNetworkCandidate[0]?.let { publish(listOf(it)) }
+            }
+        }
+    }
+
+    fun probeAfterVisualState(view: WebView) {
+        if (view.isDestroyed) return
+        val requestId = visualRequestId[0]++
+        view.postVisualStateCallback(
+            requestId,
+            object : WebView.VisualStateCallback() {
+                override fun onComplete(requestId: Long) {
+                    probeDom(view)
+                }
+            },
+        )
+    }
+
     val webView = remember(video.id) {
         WebView(context).apply {
             settings.javaScriptEnabled = true
@@ -153,24 +186,16 @@ fun RestrictedIframePlayer(video: VideoEntity, onMediaDiscovered: (String) -> Un
                 override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
                     val candidate = request.url.toString()
                     if (request.url.scheme == "https" && looksLikeMedia(candidate)) {
-                        handler.post { onMediaDiscovered(candidate) }
+                        handler.post {
+                            latestNetworkCandidate[0] = candidate
+                            probeAfterVisualState(view)
+                        }
                     }
                     return null
                 }
 
                 override fun onPageFinished(view: WebView, url: String) {
-                    view.evaluateJavascript(
-                        "(function(){return JSON.stringify(Array.from(document.querySelectorAll('video,source')).map(function(e){return e.currentSrc||e.src||'';}).filter(Boolean));})()",
-                    ) { raw ->
-                        runCatching {
-                            val decoded = JSONObject("{\"value\":$raw}").getString("value")
-                            val array = JSONArray(decoded)
-                            for (i in 0 until array.length()) {
-                                val candidate = array.optString(i)
-                                if (candidate.startsWith("https://") && looksLikeMedia(candidate)) onMediaDiscovered(candidate)
-                            }
-                        }
-                    }
+                    probeAfterVisualState(view)
                 }
             }
             loadUrl(video.url, mapOf("Referer" to video.referer))
@@ -178,6 +203,7 @@ fun RestrictedIframePlayer(video: VideoEntity, onMediaDiscovered: (String) -> Un
     }
     DisposableEffect(webView) {
         onDispose {
+            handler.removeCallbacksAndMessages(null)
             webView.stopLoading()
             webView.loadUrl("about:blank")
             webView.clearHistory()
@@ -187,7 +213,32 @@ fun RestrictedIframePlayer(video: VideoEntity, onMediaDiscovered: (String) -> Un
     AndroidView(modifier = modifier, factory = { webView })
 }
 
-private fun looksLikeMedia(url: String): Boolean {
-    val path = runCatching { Uri.parse(url).path.orEmpty().lowercase() }.getOrDefault("")
+internal fun decodeMediaCandidates(raw: String?): List<String> = runCatching {
+    if (raw.isNullOrBlank() || raw == "null") return@runCatching emptyList()
+    val decoded = JSONObject("{\"value\":$raw}").getString("value")
+    val array = JSONArray(decoded)
+    buildList {
+        for (i in 0 until array.length()) {
+            array.optString(i).takeIf(String::isNotBlank)?.let(::add)
+        }
+    }
+}.getOrDefault(emptyList())
+
+internal fun normalizeMediaCandidates(urls: List<String>): List<String> {
+    val seen = linkedSetOf<String>()
+    return urls.filter { it.startsWith("https://") && looksLikeMedia(it) }
+        .filter { seen.add(canonicalMediaKey(it)) }
+}
+
+private fun canonicalMediaKey(url: String): String = runCatching {
+    val uri = URI(url)
+    val scheme = uri.scheme?.lowercase() ?: "https"
+    val host = uri.host?.lowercase().orEmpty()
+    val path = uri.rawPath.orEmpty().trimEnd('/')
+    "$scheme://$host$path"
+}.getOrElse { url.substringBefore('?') }
+
+internal fun looksLikeMedia(url: String): Boolean {
+    val path = runCatching { URI(url).path.orEmpty().lowercase() }.getOrDefault("")
     return path.endsWith(".mp4") || path.endsWith(".m3u8") || path.endsWith(".webm")
 }

@@ -22,11 +22,22 @@ import com.shaterguy.fc2weeklyranker.network.AvseeClient
 import com.shaterguy.fc2weeklyranker.network.BaseUrlPolicy
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.net.URI
 import java.security.MessageDigest
 import java.time.Instant
 
 class AppRepository(private val context: Context, private val db: AppDatabase, val settings: SettingsStore, private val source: AvseeClient) {
+    private data class ProbeKey(val postId: String, val resolverOrdinal: Int)
+    private data class ProbeSession(
+        val candidates: LinkedHashMap<String, String> = linkedMapOf(),
+        var activeVideoIds: Set<String> = emptySet(),
+    )
+
+    private val videoMutationMutex = Mutex()
+    private val probeSessions = mutableMapOf<ProbeKey, ProbeSession>()
+
     fun posts(snapshotKey: String): Flow<List<PostEntity>> = db.postDao().postsForSnapshot(snapshotKey)
     fun favorites(): Flow<List<PostEntity>> = db.postDao().favorites()
     fun post(postId: String): Flow<PostEntity?> = db.postDao().observeById(postId)
@@ -77,6 +88,7 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
 
     suspend fun loadVideos(postId: String) {
         val post = db.postDao().byId(postId) ?: return
+        videoMutationMutex.withLock { clearProbeSessions(postId) }
         val detailUrl = rebaseDetailUrl(post.url, settings.baseUrl.first())
         val detail = source.loadDetail(detailUrl)
         val now = System.currentTimeMillis()
@@ -96,26 +108,41 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
                     now,
                 )
             }
-        val existing = db.videoDao().currentForPost(postId)
-        db.videoDao().reconcileForPost(postId, reconcileVideoRows(existing, entities))
+        videoMutationMutex.withLock {
+            val existing = db.videoDao().currentForPost(postId)
+            val activeProbeIds = probeSessions
+                .filterKeys { it.postId == postId }
+                .values
+                .flatMapTo(linkedSetOf()) { it.activeVideoIds }
+            db.videoDao().reconcileForPost(postId, reconcileVideoRows(existing, entities, detailUrl, activeProbeIds))
+        }
     }
 
     suspend fun registerProbedVideo(postId: String, url: String, referer: String, ordinal: Int) {
         if (!url.startsWith("https://")) return
-        db.videoDao().upsert(
-            listOf(
-                VideoEntity(
-                    stableVideoId(postId, url),
-                    postId,
-                    url,
-                    referer,
-                    AvseeClient.USER_AGENT,
-                    "DIRECT",
-                    ordinal,
-                    System.currentTimeMillis(),
-                ),
-            ),
-        )
+        videoMutationMutex.withLock {
+            val key = ProbeKey(postId, ordinal)
+            val session = probeSessions.getOrPut(key) { ProbeSession() }
+            val candidateKey = canonicalMediaKey(url)
+            session.candidates[candidateKey] = url
+            val existing = db.videoDao().currentForPost(postId)
+            val legacyRows = existing.filter { isLegacyProbeCandidate(it, ordinal, referer) }
+            val preferredLegacyIds = linkedSetOf<String>()
+            for (row in legacyRows) {
+                if (db.downloadDao().byVideoId(row.id) != null) preferredLegacyIds += row.id
+            }
+            val updates = reconcileProbeRows(
+                existing = existing,
+                preferredLegacyIds = preferredLegacyIds,
+                postId = postId,
+                referer = referer,
+                resolverOrdinal = ordinal,
+                candidates = session.candidates.values.toList(),
+                now = System.currentTimeMillis(),
+            )
+            if (updates.isNotEmpty()) db.videoDao().upsert(updates)
+            session.activeVideoIds = updates.filter { it.sourceKind == SOURCE_DIRECT }.mapTo(linkedSetOf()) { it.id }
+        }
     }
 
     suspend fun queueDownload(videoId: String) {
@@ -179,14 +206,27 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
         WorkManager.getInstance(context).enqueueUniqueWork(VideoDownloadWorker.workName(videoId), ExistingWorkPolicy.REPLACE, request)
     }
 
+    private fun clearProbeSessions(postId: String) {
+        probeSessions.keys.removeAll { it.postId == postId }
+    }
+
     private fun downloadState(videoId: String, status: String, contentUri: String?, downloadedBytes: Long, totalBytes: Long?, errorCode: String?) =
         DownloadEntity(videoId, status, contentUri, downloadedBytes, totalBytes, errorCode, System.currentTimeMillis())
 
     companion object {
+        const val SOURCE_DIRECT = "DIRECT"
+        const val SOURCE_IFRAME = "IFRAME"
+        const val SOURCE_HISTORICAL = "HISTORICAL"
+        private const val PROBE_ORDINAL_BASE = 1_000_000
+        private const val PROBE_SLOT_STRIDE = 1_000
+
         fun snapshotKey(anchorMillis: Long, pageIndex: Int): String = "ranking-v4:$anchorMillis:$pageIndex"
 
         fun stableVideoId(postId: String, url: String): String =
             MessageDigest.getInstance("SHA-256").digest("$postId|${canonicalMediaKey(url)}".toByteArray()).take(12).joinToString("") { "%02x".format(it) }
+
+        fun stableProbedVideoId(postId: String, resolverOrdinal: Int, slot: Int): String =
+            MessageDigest.getInstance("SHA-256").digest("$postId|probe|$resolverOrdinal|$slot".toByteArray()).take(12).joinToString("") { "%02x".format(it) }
 
         fun canonicalMediaKey(url: String): String = runCatching {
             val uri = URI(url)
@@ -196,12 +236,86 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
             "$scheme://$host$path"
         }.getOrElse { url.substringBefore('?') }
 
-        internal fun reconcileVideoRows(existing: List<VideoEntity>, fresh: List<VideoEntity>): List<VideoEntity> {
+        internal fun reconcileVideoRows(
+            existing: List<VideoEntity>,
+            fresh: List<VideoEntity>,
+            detailUrl: String,
+            activeProbeIds: Set<String> = emptySet(),
+        ): List<VideoEntity> {
+            val freshIds = fresh.mapTo(hashSetOf()) { it.id }
             val reconciled = linkedMapOf<String, VideoEntity>()
-            existing.filter { it.sourceKind == "DIRECT" }.forEach { reconciled[it.id] = it }
+            existing.forEach { row ->
+                when {
+                    row.sourceKind == SOURCE_IFRAME -> Unit
+                    row.sourceKind == SOURCE_DIRECT && row.id in activeProbeIds -> reconciled[row.id] = row
+                    row.sourceKind == SOURCE_DIRECT && row.referer == detailUrl && row.id in freshIds -> Unit
+                    row.sourceKind == SOURCE_DIRECT -> reconciled[row.id] = row.copy(sourceKind = SOURCE_HISTORICAL)
+                    else -> reconciled[row.id] = row
+                }
+            }
             fresh.forEach { reconciled[it.id] = it }
             return reconciled.values.sortedWith(compareBy<VideoEntity> { it.ordinal }.thenBy { it.discoveredAtEpochMillis })
         }
+
+        internal fun reconcileProbeRows(
+            existing: List<VideoEntity>,
+            preferredLegacyIds: Set<String>,
+            postId: String,
+            referer: String,
+            resolverOrdinal: Int,
+            candidates: List<String>,
+            now: Long,
+        ): List<VideoEntity> {
+            val normalized = linkedMapOf<String, String>()
+            candidates.filter { it.startsWith("https://") }.forEach { normalized[canonicalMediaKey(it)] = it }
+            if (normalized.isEmpty()) return emptyList()
+
+            val resolverRows = existing.filter { probeResolverOrdinal(it.ordinal) == resolverOrdinal }
+            val legacyRows = existing
+                .filter { isLegacyProbeCandidate(it, resolverOrdinal, referer) }
+                .sortedWith(compareByDescending<VideoEntity> { it.id in preferredLegacyIds }.thenBy { it.discoveredAtEpochMillis })
+            val usedIds = linkedSetOf<String>()
+            val updates = linkedMapOf<String, VideoEntity>()
+
+            normalized.values.forEachIndexed { slot, candidate ->
+                val ordinal = probeOrdinal(resolverOrdinal, slot)
+                val expectedId = stableProbedVideoId(postId, resolverOrdinal, slot)
+                val existingSlot = resolverRows.firstOrNull { probeSlot(it.ordinal) == slot }
+                    ?: existing.firstOrNull { it.id == expectedId }
+                    ?: if (slot == 0) legacyRows.firstOrNull() else null
+                val id = existingSlot?.id ?: expectedId
+                usedIds += id
+                updates[id] = VideoEntity(
+                    id = id,
+                    postId = postId,
+                    url = candidate,
+                    referer = referer,
+                    userAgent = AvseeClient.USER_AGENT,
+                    sourceKind = SOURCE_DIRECT,
+                    ordinal = ordinal,
+                    discoveredAtEpochMillis = now,
+                )
+            }
+
+            (resolverRows + legacyRows).distinctBy { it.id }
+                .filter { it.id !in usedIds }
+                .forEach { row -> updates[row.id] = row.copy(sourceKind = SOURCE_HISTORICAL, discoveredAtEpochMillis = now) }
+            return updates.values.toList()
+        }
+
+        private fun isLegacyProbeCandidate(row: VideoEntity, resolverOrdinal: Int, referer: String): Boolean {
+            if (row.ordinal != resolverOrdinal || row.sourceKind !in setOf(SOURCE_DIRECT, SOURCE_HISTORICAL)) return false
+            return canonicalMediaKey(row.referer) == canonicalMediaKey(referer)
+        }
+
+        private fun probeOrdinal(resolverOrdinal: Int, slot: Int): Int =
+            PROBE_ORDINAL_BASE + resolverOrdinal * PROBE_SLOT_STRIDE + slot
+
+        private fun probeResolverOrdinal(ordinal: Int): Int? =
+            if (ordinal >= PROBE_ORDINAL_BASE) (ordinal - PROBE_ORDINAL_BASE) / PROBE_SLOT_STRIDE else null
+
+        private fun probeSlot(ordinal: Int): Int? =
+            if (ordinal >= PROBE_ORDINAL_BASE) (ordinal - PROBE_ORDINAL_BASE) % PROBE_SLOT_STRIDE else null
 
         internal fun rebaseDetailUrl(originalUrl: String, baseUrl: String): String {
             val original = URI(originalUrl)

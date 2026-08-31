@@ -3,6 +3,11 @@ package com.shaterguy.fc2weeklyranker.network
 import com.shaterguy.fc2weeklyranker.domain.DateWindow
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -13,6 +18,8 @@ import java.time.Duration
 import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneId
+import java.util.Collections
+import java.util.LinkedHashMap
 
 private const val BOARD_PATH = "/bbs/board.php?bo_table=javfc2"
 private const val UA = "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 Chrome/151 Mobile Safari/537.36"
@@ -25,6 +32,14 @@ class AvseeClient(
     private val http: OkHttpClient,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
+    private val crawlHtmlCache = Collections.synchronizedMap(
+        object : LinkedHashMap<String, String>(MAX_CRAWL_CACHE_ENTRIES, 0.75f, true) {
+            override fun removeEldestEntry(
+                eldest: MutableMap.MutableEntry<String, String>?,
+            ): Boolean = size > MAX_CRAWL_CACHE_ENTRIES
+        },
+    )
+
     suspend fun testConnection(baseUrl: String): Result<Unit> = withContext(ioDispatcher) {
         runCatching {
             val boardUrl = "$baseUrl$BOARD_PATH"
@@ -38,17 +53,27 @@ class AvseeClient(
 
     suspend fun crawlWindow(baseUrl: String, window: DateWindow): List<RemotePost> = withContext(ioDispatcher) {
         val out = LinkedHashMap<String, RemotePost>()
+        val detailLimiter = Semaphore(MAX_PARALLEL_DETAIL_REQUESTS)
         for (page in 1..30) {
             val boardUrl = "$baseUrl$BOARD_PATH&page=$page"
-            val links = parseBoardLinks(fetch(boardUrl), baseUrl)
+            val links = parseBoardLinks(fetchForCrawl(boardUrl), baseUrl)
             if (links.isEmpty()) break
             var sawOlder = false
             var parsedOnPage = 0
             var failedOnPage = 0
-            for (link in links) {
-                val detail = runCatching {
-                    parseDetail(fetch(link, boardUrl), link, window.upperInclusive)
-                }.onFailure {
+            val details = coroutineScope {
+                links.map { link ->
+                    async {
+                        runCatching {
+                            detailLimiter.withPermit {
+                                parseDetail(fetchForCrawl(link, boardUrl), link, window.upperInclusive)
+                            }
+                        }
+                    }
+                }.awaitAll()
+            }
+            for (result in details) {
+                val detail = result.onFailure {
                     failedOnPage += 1
                 }.getOrNull() ?: continue
                 parsedOnPage += 1
@@ -61,6 +86,10 @@ class AvseeClient(
             if (sawOlder && page >= 2) break
         }
         out.values.toList()
+    }
+
+    internal fun clearCrawlCache() {
+        crawlHtmlCache.clear()
     }
 
     suspend fun loadDetail(url: String): RemotePost = withContext(ioDispatcher) {
@@ -173,6 +202,11 @@ class AvseeClient(
         return path.endsWith(".mp4") || path.endsWith(".m3u8") || path.endsWith(".webm")
     }
 
+    private fun fetchForCrawl(url: String, referer: String? = null): String {
+        crawlHtmlCache[url]?.let { return it }
+        return fetch(url, referer).also { crawlHtmlCache[url] = it }
+    }
+
     private fun fetch(url: String, referer: String? = null): String {
         val request = Request.Builder().url(url)
             .header("User-Agent", UA)
@@ -191,5 +225,9 @@ class AvseeClient(
             .firstOrNull { it[0] == key }?.get(1)
     }.getOrNull()
 
-    companion object { const val USER_AGENT: String = UA }
+    companion object {
+        const val USER_AGENT: String = UA
+        private const val MAX_PARALLEL_DETAIL_REQUESTS = 4
+        private const val MAX_CRAWL_CACHE_ENTRIES = 256
+    }
 }

@@ -47,7 +47,12 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
         })
     }
 
-    suspend fun manualRefresh(): Long { val anchor = settings.refreshAnchor(); refreshPage(0); return anchor }
+    suspend fun manualRefresh(): Long {
+        source.clearCrawlCache()
+        val anchor = settings.refreshAnchor()
+        refreshPage(0)
+        return anchor
+    }
 
     suspend fun setBaseUrl(input: String): Result<String> {
         val normalized = BaseUrlPolicy.normalize(input).getOrElse { return Result.failure(it) }

@@ -10,7 +10,6 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.annotation.OptIn
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.runtime.Composable
@@ -39,10 +38,17 @@ fun NativeVideoPlayer(video: VideoEntity, modifier: Modifier = Modifier) {
         val headers = linkedMapOf("Referer" to video.referer, "User-Agent" to video.userAgent)
         CookieManager.getInstance().getCookie(video.url)?.takeIf(String::isNotBlank)?.let { headers["Cookie"] = it }
         val dataSource = DefaultHttpDataSource.Factory().setUserAgent(video.userAgent).setDefaultRequestProperties(headers)
-        ExoPlayer.Builder(context).setMediaSourceFactory(DefaultMediaSourceFactory(dataSource)).build().apply { setMediaItem(MediaItem.fromUri(video.url)); prepare() }
+        ExoPlayer.Builder(context).setMediaSourceFactory(DefaultMediaSourceFactory(dataSource)).build().apply {
+            setMediaItem(MediaItem.fromUri(video.url))
+            prepare()
+        }
     }
     DisposableEffect(player) { onDispose { player.release() } }
-    AndroidView(modifier = modifier.fillMaxWidth().height(240.dp), factory = { PlayerView(it).apply { this.player = player; useController = true } }, update = { it.player = player })
+    AndroidView(
+        modifier = modifier.fillMaxWidth().height(240.dp),
+        factory = { PlayerView(it).apply { this.player = player; useController = true } },
+        update = { it.player = player },
+    )
 }
 
 @Composable
@@ -69,17 +75,26 @@ fun RestrictedIframePlayer(video: VideoEntity, onMediaDiscovered: (String) -> Un
                     val uri = request.url
                     return uri.scheme != "https" || uri.host?.lowercase() != iframeHost
                 }
+
                 override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
                     val candidate = request.url.toString()
-                    if (request.url.scheme == "https" && looksLikeMedia(candidate)) handler.post { onMediaDiscovered(candidate) }
+                    if (request.url.scheme == "https" && looksLikeMedia(candidate)) {
+                        handler.post { onMediaDiscovered(candidate) }
+                    }
                     return null
                 }
+
                 override fun onPageFinished(view: WebView, url: String) {
-                    view.evaluateJavascript("(function(){return JSON.stringify(Array.from(document.querySelectorAll('video,source')).map(function(e){return e.currentSrc||e.src||'';}).filter(Boolean));})()") { raw ->
+                    view.evaluateJavascript(
+                        "(function(){return JSON.stringify(Array.from(document.querySelectorAll('video,source')).map(function(e){return e.currentSrc||e.src||'';}).filter(Boolean));})()",
+                    ) { raw ->
                         runCatching {
                             val decoded = JSONObject("{\"value\":$raw}").getString("value")
                             val array = JSONArray(decoded)
-                            for (i in 0 until array.length()) { val candidate = array.optString(i); if (candidate.startsWith("https://") && looksLikeMedia(candidate)) onMediaDiscovered(candidate) }
+                            for (i in 0 until array.length()) {
+                                val candidate = array.optString(i)
+                                if (candidate.startsWith("https://") && looksLikeMedia(candidate)) onMediaDiscovered(candidate)
+                            }
                         }
                     }
                 }
@@ -87,8 +102,15 @@ fun RestrictedIframePlayer(video: VideoEntity, onMediaDiscovered: (String) -> Un
             loadUrl(video.url, mapOf("Referer" to video.referer))
         }
     }
-    DisposableEffect(webView) { onDispose { webView.stopLoading(); webView.loadUrl("about:blank"); webView.clearHistory(); webView.destroy() } }
-    Box(modifier) { AndroidView(modifier = Modifier.fillMaxWidth().height(260.dp), factory = { webView }) }
+    DisposableEffect(webView) {
+        onDispose {
+            webView.stopLoading()
+            webView.loadUrl("about:blank")
+            webView.clearHistory()
+            webView.destroy()
+        }
+    }
+    AndroidView(modifier = modifier, factory = { webView })
 }
 
 private fun looksLikeMedia(url: String): Boolean {

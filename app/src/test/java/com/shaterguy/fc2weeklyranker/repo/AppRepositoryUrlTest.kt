@@ -1,5 +1,6 @@
 package com.shaterguy.fc2weeklyranker.repo
 
+import com.shaterguy.fc2weeklyranker.download.VideoDownloadWorker
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -19,4 +20,19 @@ class AppRepositoryUrlTest {
             ),
         )
     }
+
+    @Test
+    fun `same media asset with a renewed token has one stable video id`() {
+        assertEquals(
+            AppRepository.stableVideoId("123", "https://cdn.example.test/video/a.mp4?token=old"),
+            AppRepository.stableVideoId("123", "https://cdn.example.test/video/a.mp4?token=new"),
+        )
+    }
+
+
+    @Test
+    fun `HLS manifest is never treated as a downloadable video file`() {
+        assertEquals(false, VideoDownloadWorker.supportsFileDownload("https://cdn.example.test/playlist.m3u8?token=abc"))
+    }
+
 }

@@ -10,6 +10,7 @@ import androidx.room.OnConflictStrategy
 import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.RoomDatabase
+import androidx.room.Transaction
 import androidx.room.Upsert
 import kotlinx.coroutines.flow.Flow
 
@@ -73,11 +74,17 @@ interface PostDao {
     @Query("SELECT * FROM posts WHERE id = :id LIMIT 1")
     suspend fun byId(id: String): PostEntity?
 
+    @Query("SELECT * FROM posts WHERE id = :id LIMIT 1")
+    fun observeById(id: String): Flow<PostEntity?>
+
     @Query("SELECT p.* FROM posts p INNER JOIN favorites f ON p.id = f.postId ORDER BY f.createdAtEpochMillis DESC")
     fun favorites(): Flow<List<PostEntity>>
 
     @Query("SELECT EXISTS(SELECT 1 FROM favorites WHERE postId = :postId)")
     suspend fun isFavorite(postId: String): Boolean
+
+    @Query("SELECT EXISTS(SELECT 1 FROM favorites WHERE postId = :postId)")
+    fun observeFavorite(postId: String): Flow<Boolean>
 
     @Upsert
     suspend fun upsert(posts: List<PostEntity>)
@@ -99,6 +106,15 @@ interface VideoDao {
 
     @Upsert
     suspend fun upsert(videos: List<VideoEntity>)
+
+    @Query("DELETE FROM videos WHERE postId = :postId")
+    suspend fun deleteForPost(postId: String)
+
+    @Transaction
+    suspend fun replaceForPost(postId: String, videos: List<VideoEntity>) {
+        deleteForPost(postId)
+        if (videos.isNotEmpty()) upsert(videos)
+    }
 }
 
 @Dao

@@ -109,6 +109,8 @@ private fun RankerApp(vm: MainViewModel = viewModel()) {
             exitTransition = { ExitTransition.None },
             popEnterTransition = { EnterTransition.None },
             popExitTransition = { ExitTransition.None },
+            predictivePopEnterTransition = { EnterTransition.None },
+            predictivePopExitTransition = { ExitTransition.None },
         ) {
             composable("ranking") { RankingScreen(vm) { id -> nav.navigate("detail/${Uri.encode(id)}") } }
             composable("favorites") { FavoritesScreen(vm) { id -> nav.navigate("detail/${Uri.encode(id)}") } }

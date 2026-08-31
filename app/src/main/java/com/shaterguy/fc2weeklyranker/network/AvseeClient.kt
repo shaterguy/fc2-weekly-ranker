@@ -13,6 +13,8 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
+import org.jsoup.nodes.TextNode
 import java.net.URI
 import java.time.Duration
 import java.time.Instant
@@ -131,8 +133,10 @@ class AvseeClient(
             runCatching { Instant.parse(node.attr("datetime")) }.getOrNull()
         }?.let { return it }
 
+        val info = doc.selectFirst("#bo_v_info, .bo_v_info")
         val texts = listOfNotNull(
-            doc.selectFirst("#bo_v_info")?.text()?.takeIf(String::isNotBlank),
+            info?.text()?.takeIf(String::isNotBlank),
+            info?.let(::elementTextWithBoundaries)?.takeIf(String::isNotBlank),
             doc.body()?.text()?.takeIf(String::isNotBlank),
         ).distinct()
 
@@ -184,6 +188,20 @@ class AvseeClient(
             .minByOrNull { candidate -> Duration.between(candidate, referenceInstant).abs() }
     }
 
+    private fun elementTextWithBoundaries(element: Element): String = element.childNodes()
+        .asSequence()
+        .mapNotNull { node ->
+            val text = when (node) {
+                is TextNode -> node.text()
+                is Element -> elementTextWithBoundaries(node)
+                else -> null
+            }?.trim()
+            text?.takeIf(String::isNotBlank)
+        }
+        .joinToString(" ")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+
     private fun postingTimestampStart(text: String): Int? = listOf(
         Regex("20\\d{2}[-./]\\d{1,2}[-./]\\d{1,2}\\s+\\d{1,2}:\\d{2}"),
         Regex("(?<!\\d)\\d{2}-\\d{2}-\\d{2}\\s+\\d{1,2}:\\d{2}"),
@@ -214,11 +232,13 @@ class AvseeClient(
             pattern.find(bodyText)?.groupValues?.getOrNull(1)?.toIntOrNull()?.let { return it }
         }
 
-        val infoText = doc.selectFirst("#bo_v_info, .bo_v_info")
-            ?.text()
-            .orEmpty()
-        val metrics = metricsBeforePostingTimestamp(infoText)
-        return if (metrics.size >= 3) metrics.last() else 0
+        val info = doc.selectFirst("#bo_v_info, .bo_v_info")
+        return listOfNotNull(
+            info?.text()?.takeIf(String::isNotBlank),
+            info?.let(::elementTextWithBoundaries)?.takeIf(String::isNotBlank),
+        ).distinct().firstNotNullOfOrNull { infoText ->
+            metricsBeforePostingTimestamp(infoText).takeIf { it.size >= 3 }?.last()
+        } ?: 0
     }
 
     private fun parseMedia(doc: Document, detailUrl: String): List<RemoteMedia> {

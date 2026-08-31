@@ -77,6 +77,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun queueDownload(videoId: String) { viewModelScope.launch { repo.queueDownload(videoId) } }
+    fun pauseDownload(videoId: String) { viewModelScope.launch { repo.pauseDownload(videoId) } }
+    fun stopDownload(videoId: String) { viewModelScope.launch { repo.stopDownload(videoId) } }
 
     fun saveBaseUrl(input: String) {
         viewModelScope.launch {

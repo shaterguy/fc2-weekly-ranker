@@ -9,6 +9,7 @@ import androidx.work.WorkManager
 import androidx.work.workDataOf
 import com.shaterguy.fc2weeklyranker.data.AppDatabase
 import com.shaterguy.fc2weeklyranker.data.DownloadEntity
+import com.shaterguy.fc2weeklyranker.data.DownloadStatus
 import com.shaterguy.fc2weeklyranker.data.FavoriteEntity
 import com.shaterguy.fc2weeklyranker.data.PostEntity
 import com.shaterguy.fc2weeklyranker.data.SettingsStore
@@ -95,7 +96,8 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
                     now,
                 )
             }
-        db.videoDao().replaceForPost(postId, entities)
+        val existing = db.videoDao().currentForPost(postId)
+        db.videoDao().reconcileForPost(postId, reconcileVideoRows(existing, entities))
     }
 
     suspend fun registerProbedVideo(postId: String, url: String, referer: String, ordinal: Int) {
@@ -120,17 +122,61 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
         val video = db.videoDao().byId(videoId) ?: return
         val dao = db.downloadDao()
         val previous = dao.byVideoId(videoId)
-        if (previous?.status in setOf("QUEUED", "RUNNING", "COMPLETED")) return
+        if (previous?.status in setOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.FINALIZING, DownloadStatus.COMPLETED)) return
         if (!VideoDownloadWorker.supportsFileDownload(video.url)) {
-            dao.upsert(downloadState(videoId, "FAILED", previous?.contentUri, previous?.downloadedBytes ?: 0L, previous?.totalBytes, "HLS_OFFLINE_UNSUPPORTED"))
+            dao.upsert(downloadState(videoId, DownloadStatus.FAILED, previous?.contentUri, previous?.downloadedBytes ?: 0L, previous?.totalBytes, "HLS_OFFLINE_UNSUPPORTED"))
             return
         }
-        dao.upsert(downloadState(videoId, "QUEUED", previous?.contentUri, previous?.downloadedBytes ?: 0L, previous?.totalBytes, null))
+        val canFinalize = previous?.let {
+            it.contentUri != null && it.totalBytes != null && it.totalBytes > 0L && it.downloadedBytes >= it.totalBytes
+        } == true
+        val restarting = previous?.status == DownloadStatus.STOPPED
+        dao.upsert(
+            downloadState(
+                videoId,
+                if (canFinalize) DownloadStatus.FINALIZING else DownloadStatus.QUEUED,
+                if (restarting) null else previous?.contentUri,
+                if (restarting) 0L else previous?.downloadedBytes ?: 0L,
+                if (restarting) null else previous?.totalBytes,
+                null,
+            ),
+        )
+        enqueueDownload(videoId)
+    }
+
+    suspend fun pauseDownload(videoId: String) {
+        val changed = db.downloadDao().transitionStatus(
+            videoId,
+            listOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING),
+            DownloadStatus.PAUSED,
+            null,
+            System.currentTimeMillis(),
+        )
+        if (changed > 0) WorkManager.getInstance(context).cancelUniqueWork(VideoDownloadWorker.workName(videoId))
+    }
+
+    suspend fun stopDownload(videoId: String) {
+        val dao = db.downloadDao()
+        val previous = dao.byVideoId(videoId) ?: return
+        val changed = dao.transitionStatus(
+            videoId,
+            listOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.PAUSED, DownloadStatus.FAILED),
+            DownloadStatus.STOPPED,
+            null,
+            System.currentTimeMillis(),
+        )
+        if (changed == 0) return
+        WorkManager.getInstance(context).cancelUniqueWork(VideoDownloadWorker.workName(videoId))
+        previous.contentUri?.let { value -> runCatching { context.contentResolver.delete(android.net.Uri.parse(value), null, null) } }
+        dao.upsert(downloadState(videoId, DownloadStatus.STOPPED, null, 0L, null, null))
+    }
+
+    private fun enqueueDownload(videoId: String) {
         val request = OneTimeWorkRequestBuilder<VideoDownloadWorker>()
             .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
             .setInputData(workDataOf(VideoDownloadWorker.KEY_VIDEO_ID to videoId))
             .build()
-        WorkManager.getInstance(context).enqueueUniqueWork("video-download-$videoId", ExistingWorkPolicy.KEEP, request)
+        WorkManager.getInstance(context).enqueueUniqueWork(VideoDownloadWorker.workName(videoId), ExistingWorkPolicy.REPLACE, request)
     }
 
     private fun downloadState(videoId: String, status: String, contentUri: String?, downloadedBytes: Long, totalBytes: Long?, errorCode: String?) =
@@ -149,6 +195,13 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
             val path = uri.rawPath.orEmpty().trimEnd('/')
             "$scheme://$host$path"
         }.getOrElse { url.substringBefore('?') }
+
+        internal fun reconcileVideoRows(existing: List<VideoEntity>, fresh: List<VideoEntity>): List<VideoEntity> {
+            val reconciled = linkedMapOf<String, VideoEntity>()
+            existing.filter { it.sourceKind == "DIRECT" }.forEach { reconciled[it.id] = it }
+            fresh.forEach { reconciled[it.id] = it }
+            return reconciled.values.sortedWith(compareBy<VideoEntity> { it.ordinal }.thenBy { it.discoveredAtEpochMillis })
+        }
 
         internal fun rebaseDetailUrl(originalUrl: String, baseUrl: String): String {
             val original = URI(originalUrl)

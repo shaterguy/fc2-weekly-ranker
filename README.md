@@ -5,7 +5,7 @@ Android TEST app for browsing the configured `javfc2` board in fixed seven-day w
 ## TEST channel
 
 - Branch lineage starts at `v0.1.0-dev1`.
-- Source version: `0.1.0-dev16`, `versionCode=16`. The crawler targets the live board-card, published-time, and recommendation-count contracts verified on 2026-08-31.
+- Source version: `0.1.0-dev19`, `versionCode=19`. The crawler targets the live board-card, published-time, and recommendation-count contracts verified on 2026-08-31.
 - TEST application ID: `com.shaterguy.fc2weeklyranker.dev`.
 - The configured default origin is `https://01.avsee.is`; users can replace it in Settings after a board-and-detail parsing connection check.
 - The anchor instant is persisted in DataStore and changes only when the user explicitly refreshes it.
@@ -19,9 +19,9 @@ Android TEST app for browsing the configured `javfc2` board in fixed seven-day w
 
 ## Media path
 
-The detail screen renders media only. Static `video`, `source`, media links, and `iframe` sources are parsed first. Direct sources use Media3 with the same `Referer`, user agent, and runtime WebView cookie context. Iframe-only sources use a restricted WebView player that observes HTTPS media requests and `currentSrc`; discovered direct sources are stored without persisting cookies.
+The detail screen renders media only. Static `video`, `source`, media links, and `iframe` sources are parsed first. Direct sources use Media3 with the same `Referer`, user agent, and runtime WebView cookie context. Iframe-only sources use a restricted WebView player that observes HTTPS media requests and `currentSrc`; discovered direct sources are stored without persisting cookies. A later detail refresh preserves already discovered direct media while refreshing resolver rows, and Media3 players expose full-screen viewing without recreating the playback session.
 
-Downloads are unique WorkManager jobs and write to `MediaStore.Downloads`, with HTTP Range resume when the server returns `206`.
+Downloads are unique WorkManager jobs and write to `MediaStore.Downloads`. Download state and byte progress are persisted in Room so navigation or app background/foreground transitions reattach to the current state. File downloads support pause/resume with HTTP Range when the server returns `206`, plus explicit stop that removes an unfinished MediaStore entry.
 
 ## Security boundary
 

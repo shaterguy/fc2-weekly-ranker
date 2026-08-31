@@ -14,6 +14,16 @@ import androidx.room.Transaction
 import androidx.room.Upsert
 import kotlinx.coroutines.flow.Flow
 
+object DownloadStatus {
+    const val QUEUED = "QUEUED"
+    const val RUNNING = "RUNNING"
+    const val PAUSED = "PAUSED"
+    const val STOPPED = "STOPPED"
+    const val FINALIZING = "FINALIZING"
+    const val COMPLETED = "COMPLETED"
+    const val FAILED = "FAILED"
+}
+
 @Entity(tableName = "posts", indices = [Index("snapshotKey"), Index("postedAtEpochMillis")])
 data class PostEntity(
     @PrimaryKey val id: String,
@@ -101,18 +111,21 @@ interface VideoDao {
     @Query("SELECT * FROM videos WHERE postId = :postId ORDER BY ordinal ASC, discoveredAtEpochMillis ASC")
     fun forPost(postId: String): Flow<List<VideoEntity>>
 
+    @Query("SELECT * FROM videos WHERE postId = :postId ORDER BY ordinal ASC, discoveredAtEpochMillis ASC")
+    suspend fun currentForPost(postId: String): List<VideoEntity>
+
     @Query("SELECT * FROM videos WHERE id = :id LIMIT 1")
     suspend fun byId(id: String): VideoEntity?
 
     @Upsert
     suspend fun upsert(videos: List<VideoEntity>)
 
-    @Query("DELETE FROM videos WHERE postId = :postId")
-    suspend fun deleteForPost(postId: String)
+    @Query("DELETE FROM videos WHERE postId = :postId AND sourceKind = 'IFRAME'")
+    suspend fun deleteResolversForPost(postId: String)
 
     @Transaction
-    suspend fun replaceForPost(postId: String, videos: List<VideoEntity>) {
-        deleteForPost(postId)
+    suspend fun reconcileForPost(postId: String, videos: List<VideoEntity>) {
+        deleteResolversForPost(postId)
         if (videos.isNotEmpty()) upsert(videos)
     }
 }
@@ -127,6 +140,34 @@ interface DownloadDao {
 
     @Upsert
     suspend fun upsert(entity: DownloadEntity)
+
+    @Query(
+        """UPDATE downloads
+        SET status = :toStatus, errorCode = :errorCode, updatedAtEpochMillis = :updatedAt
+        WHERE videoId = :videoId AND status IN (:fromStatuses)""",
+    )
+    suspend fun transitionStatus(
+        videoId: String,
+        fromStatuses: List<String>,
+        toStatus: String,
+        errorCode: String?,
+        updatedAt: Long,
+    ): Int
+
+    @Query(
+        """UPDATE downloads
+        SET contentUri = :contentUri, downloadedBytes = :downloadedBytes, totalBytes = :totalBytes,
+            errorCode = NULL, updatedAtEpochMillis = :updatedAt
+        WHERE videoId = :videoId AND status = :requiredStatus""",
+    )
+    suspend fun updateProgressIfStatus(
+        videoId: String,
+        requiredStatus: String,
+        contentUri: String?,
+        downloadedBytes: Long,
+        totalBytes: Long?,
+        updatedAt: Long,
+    ): Int
 }
 
 @Database(entities = [PostEntity::class, FavoriteEntity::class, VideoEntity::class, DownloadEntity::class], version = 1, exportSchema = true)

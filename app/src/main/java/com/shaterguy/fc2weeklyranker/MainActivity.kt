@@ -51,6 +51,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.shaterguy.fc2weeklyranker.data.DownloadStatus
 import com.shaterguy.fc2weeklyranker.data.PostEntity
 import com.shaterguy.fc2weeklyranker.data.VideoEntity
 import com.shaterguy.fc2weeklyranker.domain.windowFor
@@ -286,35 +287,69 @@ private fun DownloadControls(vm: MainViewModel, video: VideoEntity, index: Int) 
         !VideoDownloadWorker.supportsFileDownload(video.url) -> {
             Text("스트리밍 주소는 동영상 파일로 저장할 수 없습니다.", style = MaterialTheme.typography.bodySmall)
         }
-        download?.status == "QUEUED" -> {
-            OutlinedButton(onClick = {}, enabled = false) { Text("다운로드 대기 중") }
-            download?.errorCode?.let { Text("재시도 대기: $it", style = MaterialTheme.typography.bodySmall) }
-        }
-        download?.status == "RUNNING" -> {
-            val total = download?.totalBytes
-            if (total != null && total > 0L) {
-                LinearProgressIndicator(
-                    progress = { (download?.downloadedBytes ?: 0L).toFloat() / total.toFloat() },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            } else {
-                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-            }
-            Text(
-                "다운로드 중 ${formatBytes(download?.downloadedBytes)} / ${formatBytes(total)}",
-                style = MaterialTheme.typography.bodySmall,
-            )
-        }
-        download?.status == "COMPLETED" -> {
-            Text("다운로드 완료", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
-            Text("기기 다운로드 폴더의 FC2 Weekly Ranker에서 확인할 수 있습니다.", style = MaterialTheme.typography.bodySmall)
-        }
-        download?.status == "FAILED" -> {
-            Text("다운로드 실패: ${download?.errorCode ?: "알 수 없는 오류"}", color = MaterialTheme.colorScheme.error)
+        download?.status == DownloadStatus.QUEUED -> {
+            Text("다운로드 대기 중", style = MaterialTheme.typography.bodySmall)
+            download.errorCode?.let { Text("재시도 대기: $it", style = MaterialTheme.typography.bodySmall) }
             OutlinedButton(
+                onClick = { vm.stopDownload(video.id) },
+                modifier = Modifier.semantics { contentDescription = "영상 ${index + 1} 다운로드 정지" },
+            ) { Text("정지") }
+        }
+        download?.status == DownloadStatus.RUNNING -> {
+            DownloadProgress(download.downloadedBytes, download.totalBytes)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = { vm.pauseDownload(video.id) },
+                    modifier = Modifier.semantics { contentDescription = "영상 ${index + 1} 다운로드 일시정지" },
+                ) { Text("일시정지") }
+                OutlinedButton(
+                    onClick = { vm.stopDownload(video.id) },
+                    modifier = Modifier.semantics { contentDescription = "영상 ${index + 1} 다운로드 정지" },
+                ) { Text("정지") }
+            }
+        }
+        download?.status == DownloadStatus.PAUSED -> {
+            DownloadProgress(download.downloadedBytes, download.totalBytes, prefix = "일시정지")
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = { vm.queueDownload(video.id) },
+                    modifier = Modifier.semantics { contentDescription = "영상 ${index + 1} 다운로드 계속" },
+                ) { Text("계속 다운로드") }
+                OutlinedButton(
+                    onClick = { vm.stopDownload(video.id) },
+                    modifier = Modifier.semantics { contentDescription = "영상 ${index + 1} 다운로드 정지" },
+                ) { Text("정지") }
+            }
+        }
+        download?.status == DownloadStatus.FINALIZING -> {
+            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            Text("다운로드 파일 저장을 마무리하고 있습니다…", style = MaterialTheme.typography.bodySmall)
+        }
+        download?.status == DownloadStatus.COMPLETED -> {
+            Text("다운로드 완료", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
+            Text("기기 다운로드 폴더의 Weekly Ranker에서 확인할 수 있습니다.", style = MaterialTheme.typography.bodySmall)
+        }
+        download?.status == DownloadStatus.FAILED -> {
+            Text("다운로드 실패: ${download.errorCode ?: "알 수 없는 오류"}", color = MaterialTheme.colorScheme.error)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = { vm.queueDownload(video.id) },
+                    modifier = Modifier.semantics { contentDescription = "영상 ${index + 1} 다운로드 다시 시도" },
+                ) { Text("다시 다운로드") }
+                if (download.contentUri != null) {
+                    TextButton(
+                        onClick = { vm.stopDownload(video.id) },
+                        modifier = Modifier.semantics { contentDescription = "영상 ${index + 1} 부분 다운로드 삭제" },
+                    ) { Text("부분 파일 삭제") }
+                }
+            }
+        }
+        download?.status == DownloadStatus.STOPPED -> {
+            Text("다운로드를 정지했습니다.", style = MaterialTheme.typography.bodySmall)
+            Button(
                 onClick = { vm.queueDownload(video.id) },
-                modifier = Modifier.semantics { contentDescription = "영상 ${index + 1} 다운로드 다시 시도" },
-            ) { Text("다시 다운로드") }
+                modifier = Modifier.semantics { contentDescription = "영상 ${index + 1} 다운로드 새로 시작" },
+            ) { Text("다운로드") }
         }
         else -> {
             Button(
@@ -323,6 +358,19 @@ private fun DownloadControls(vm: MainViewModel, video: VideoEntity, index: Int) 
             ) { Text("다운로드") }
         }
     }
+}
+
+@Composable
+private fun DownloadProgress(downloadedBytes: Long, totalBytes: Long?, prefix: String = "다운로드 중") {
+    if (totalBytes != null && totalBytes > 0L) {
+        LinearProgressIndicator(
+            progress = { (downloadedBytes.toFloat() / totalBytes.toFloat()).coerceIn(0f, 1f) },
+            modifier = Modifier.fillMaxWidth(),
+        )
+    } else {
+        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+    }
+    Text("$prefix ${formatBytes(downloadedBytes)} / ${formatBytes(totalBytes)}", style = MaterialTheme.typography.bodySmall)
 }
 
 @Composable

@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">FC2 Weekly Ranker DEV</string>
+    <string name="app_name">Weekly Ranker DEV</string>
+    <color name="ic_launcher_background">#263241</color>
 </resources>

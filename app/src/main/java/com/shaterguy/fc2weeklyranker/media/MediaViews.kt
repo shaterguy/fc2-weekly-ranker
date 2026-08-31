@@ -1,8 +1,14 @@
 package com.shaterguy.fc2weeklyranker.media
 
+import android.app.Dialog
 import android.net.Uri
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.view.View
+import android.view.ViewGroup
+import android.view.WindowInsets
+import android.view.WindowInsetsController
 import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -43,12 +49,80 @@ fun NativeVideoPlayer(video: VideoEntity, modifier: Modifier = Modifier) {
             prepare()
         }
     }
-    DisposableEffect(player) { onDispose { player.release() } }
+    val dialogHolder = remember(video.id) { arrayOfNulls<Dialog>(1) }
+    val compactView = remember(video.id) {
+        PlayerView(context).apply {
+            this.player = player
+            useController = true
+        }
+    }
+
+    fun openFullscreen() {
+        if (dialogHolder[0] != null) return
+        val fullscreenView = PlayerView(context).apply {
+            useController = true
+        }
+        val dialog = Dialog(context, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
+        dialogHolder[0] = dialog
+        dialog.setContentView(
+            fullscreenView,
+            ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT),
+        )
+        fullscreenView.setFullscreenButtonClickListener { isFullscreen ->
+            if (!isFullscreen) dialog.dismiss()
+        }
+        dialog.setOnShowListener {
+            PlayerView.switchTargetView(player, compactView, fullscreenView)
+            compactView.setFullscreenButtonState(true)
+            fullscreenView.setFullscreenButtonState(true)
+            hideSystemBars(dialog)
+        }
+        dialog.setOnDismissListener {
+            if (dialogHolder[0] === dialog) dialogHolder[0] = null
+            PlayerView.switchTargetView(player, fullscreenView, compactView)
+            compactView.setFullscreenButtonState(false)
+            fullscreenView.player = null
+        }
+        dialog.show()
+    }
+
+    compactView.setFullscreenButtonClickListener { isFullscreen ->
+        if (isFullscreen) openFullscreen()
+    }
+
+    DisposableEffect(player, compactView) {
+        onDispose {
+            dialogHolder[0]?.dismiss()
+            dialogHolder[0] = null
+            compactView.player = null
+            player.release()
+        }
+    }
     AndroidView(
         modifier = modifier.fillMaxWidth().height(240.dp),
-        factory = { PlayerView(it).apply { this.player = player; useController = true } },
+        factory = { compactView },
         update = { it.player = player },
     )
+}
+
+@Suppress("DEPRECATION")
+private fun hideSystemBars(dialog: Dialog) {
+    val window = dialog.window ?: return
+    window.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        window.insetsController?.apply {
+            systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            hide(WindowInsets.Type.systemBars())
+        }
+    } else {
+        window.decorView.systemUiVisibility =
+            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+                View.SYSTEM_UI_FLAG_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+    }
 }
 
 @Composable

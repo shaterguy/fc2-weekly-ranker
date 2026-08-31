@@ -10,8 +10,11 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val repo = AppGraph.repository
@@ -48,13 +51,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
     fun saveBaseUrl(input: String) {
         viewModelScope.launch {
-            loading.value = true
-            repo.setBaseUrl(input).onSuccess { mutableMessage.value = "사이트 주소를 저장했습니다. 기준시각은 그대로 유지됩니다."; runCatching { repo.refreshPage(page.value) }.onFailure { mutableMessage.value = "주소는 저장했지만 목록 갱신에 실패했습니다: ${safeMessage(it)}" } }.onFailure { mutableMessage.value = "주소 저장 실패: ${safeMessage(it)}" }
+            withLoadingTimeout {
+                repo.setBaseUrl(input).onSuccess { mutableMessage.value = "사이트 주소를 저장했습니다. 기준시각은 그대로 유지됩니다."; runCatching { repo.refreshPage(page.value) }.onFailure { mutableMessage.value = "주소는 저장했지만 목록 갱신에 실패했습니다: ${safeMessage(it)}" } }.onFailure { mutableMessage.value = "주소 저장 실패: ${safeMessage(it)}" }
+            }
+        }
+    }
+    fun testConnection() { viewModelScope.launch { withLoadingTimeout { mutableMessage.value = repo.testCurrentBaseUrl().fold({ "게시판 연결에 성공했습니다." }, { "연결 실패: ${safeMessage(it)}" }) } } }
+    fun clearMessage() { mutableMessage.value = null }
+    private suspend fun runOperation(block: suspend () -> Unit) = withLoadingTimeout { block() }
+
+    private suspend fun withLoadingTimeout(block: suspend () -> Unit) {
+        loading.value = true
+        try {
+            withTimeout(OPERATION_TIMEOUT_MILLIS) { block() }
+        } catch (error: TimeoutCancellationException) {
+            mutableMessage.value = "작업 실패: 2분 안에 응답이 없어 중단했습니다. 연결 상태를 확인해 주세요."
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            mutableMessage.value = "작업 실패: ${safeMessage(error)}"
+        } finally {
             loading.value = false
         }
     }
-    fun testConnection() { viewModelScope.launch { loading.value = true; mutableMessage.value = repo.testCurrentBaseUrl().fold({ "게시판 연결에 성공했습니다." }, { "연결 실패: ${safeMessage(it)}" }); loading.value = false } }
-    fun clearMessage() { mutableMessage.value = null }
-    private suspend fun runOperation(block: suspend () -> Unit) { loading.value = true; runCatching { block() }.onFailure { mutableMessage.value = "작업 실패: ${safeMessage(it)}" }; loading.value = false }
+
     private fun safeMessage(error: Throwable): String = error.message?.take(100) ?: error::class.java.simpleName
+
+    companion object {
+        private const val OPERATION_TIMEOUT_MILLIS = 120_000L
+    }
 }

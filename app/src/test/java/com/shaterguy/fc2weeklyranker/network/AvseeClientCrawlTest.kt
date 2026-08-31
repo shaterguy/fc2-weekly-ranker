@@ -129,4 +129,30 @@ class AvseeClientCrawlTest {
         .message("OK")
         .body(body.toResponseBody("text/html; charset=utf-8".toMediaType()))
         .build()
+    @Test
+    fun `crawl stops when the board repeats links from the previous page`() = runBlocking {
+        var boardRequests = 0
+        var detailRequests = 0
+        val http = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val request = chain.request()
+                val id = request.url.queryParameter("wr_id")
+                val body = if (id == null) {
+                    boardRequests += 1
+                    board("501")
+                } else {
+                    detailRequests += 1
+                    "<h1>Repeated post</h1><div id='bo_v_info'>M Manager 1 100 4 2026-08-29 12:00:00</div>"
+                }
+                response(request, body)
+            }
+            .build()
+        val client = AvseeClient(http)
+        val window = windowFor(Instant.parse("2026-08-30T08:44:02Z"), 0)
+
+        assertEquals(listOf("501"), client.crawlWindow("https://example.test", window).map { it.id })
+        assertEquals(2, boardRequests)
+        assertEquals(1, detailRequests)
+    }
+
 }

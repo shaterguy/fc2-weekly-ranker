@@ -45,14 +45,17 @@ class AvseeClient(
 
     suspend fun crawlWindow(baseUrl: String, window: DateWindow): List<RemotePost> = withContext(ioDispatcher) {
         val out = LinkedHashMap<String, RemotePost>()
+        val seenLinks = HashSet<String>()
         for (page in 1..30) {
             val boardUrl = "$baseUrl$BOARD_PATH&page=$page"
             val links = parseBoardLinks(fetch(boardUrl), baseUrl)
             if (links.isEmpty()) break
+            val unseenLinks = links.filter(seenLinks::add)
+            if (unseenLinks.isEmpty()) break
             val parsedInstants = mutableListOf<Instant>()
             var parsedOnPage = 0
             var failedOnPage = 0
-            for (link in links) {
+            for (link in unseenLinks) {
                 val detail = runCatching {
                     val html = fetch(link, boardUrl)
                     val observedAt = now()

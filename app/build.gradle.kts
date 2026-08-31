@@ -12,8 +12,8 @@ android {
         applicationId = "com.shaterguy.fc2weeklyranker.dev"
         minSdk = 29
         targetSdk = 36
-        versionCode = 9
-        versionName = "0.1.0-dev9"
+        versionCode = 10
+        versionName = "0.1.0-dev10"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -74,6 +74,7 @@ dependencies {
     implementation("androidx.media3:media3-ui:1.11.0")
 
     implementation("com.squareup.okhttp3:okhttp:5.4.0")
+    implementation("com.squareup.okhttp3:okhttp-dnsoverhttps:5.4.0")
     implementation("org.jsoup:jsoup:1.23.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
 

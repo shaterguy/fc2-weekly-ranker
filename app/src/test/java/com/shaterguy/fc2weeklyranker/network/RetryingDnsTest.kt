@@ -45,4 +45,23 @@ class RetryingDnsTest {
         assertEquals(3, attempts)
         assertEquals(listOf(10L, 20L), sleeps)
     }
+
+    @Test
+    fun `non resolution failures are not retried`() {
+        var attempts = 0
+        val delegate = object : Dns {
+            override fun lookup(hostname: String): List<InetAddress> {
+                attempts += 1
+                throw SecurityException("blocked")
+            }
+        }
+        val sleeps = mutableListOf<Long>()
+        val dns = RetryingDns(delegate, listOf(10L, 20L)) { sleeps += it }
+
+        assertThrows(SecurityException::class.java) {
+            dns.lookup("example.test")
+        }
+        assertEquals(1, attempts)
+        assertEquals(emptyList<Long>(), sleeps)
+    }
 }

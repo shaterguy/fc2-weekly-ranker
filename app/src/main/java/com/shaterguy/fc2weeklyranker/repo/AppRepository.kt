@@ -1,12 +1,6 @@
 package com.shaterguy.fc2weeklyranker.repo
 
 import android.content.Context
-import androidx.work.Constraints
-import androidx.work.ExistingWorkPolicy
-import androidx.work.NetworkType
-import androidx.work.OneTimeWorkRequestBuilder
-import androidx.work.WorkManager
-import androidx.work.workDataOf
 import com.shaterguy.fc2weeklyranker.data.AppDatabase
 import com.shaterguy.fc2weeklyranker.data.DownloadEntity
 import com.shaterguy.fc2weeklyranker.data.DownloadStatus
@@ -17,6 +11,8 @@ import com.shaterguy.fc2weeklyranker.data.VideoEntity
 import com.shaterguy.fc2weeklyranker.domain.RankCandidate
 import com.shaterguy.fc2weeklyranker.domain.rank
 import com.shaterguy.fc2weeklyranker.domain.windowFor
+import com.shaterguy.fc2weeklyranker.download.DownloadScheduler
+import com.shaterguy.fc2weeklyranker.download.DownloadTransferRunner
 import com.shaterguy.fc2weeklyranker.download.VideoDownloadWorker
 import com.shaterguy.fc2weeklyranker.network.AvseeClient
 import com.shaterguy.fc2weeklyranker.network.BaseUrlPolicy
@@ -37,6 +33,7 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
 
     private val videoMutationMutex = Mutex()
     private val probeSessions = mutableMapOf<ProbeKey, ProbeSession>()
+    private val downloadScheduler = DownloadScheduler(context)
 
     fun posts(snapshotKey: String): Flow<List<PostEntity>> = db.postDao().postsForSnapshot(snapshotKey)
     fun favorites(): Flow<List<PostEntity>> = db.postDao().favorites()
@@ -152,35 +149,53 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
         val previous = dao.byVideoId(videoId)
         if (previous?.status in setOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.FINALIZING, DownloadStatus.COMPLETED)) return
         if (!VideoDownloadWorker.supportsFileDownload(video.url)) {
-            dao.upsert(downloadState(videoId, DownloadStatus.FAILED, previous?.contentUri, previous?.downloadedBytes ?: 0L, previous?.totalBytes, "HLS_OFFLINE_UNSUPPORTED"))
+            dao.upsert(
+                DownloadEntity(
+                    videoId = videoId,
+                    status = DownloadStatus.FAILED,
+                    contentUri = previous?.contentUri,
+                    downloadedBytes = previous?.downloadedBytes ?: 0L,
+                    totalBytes = previous?.totalBytes,
+                    errorCode = "HLS_OFFLINE_UNSUPPORTED",
+                    updatedAtEpochMillis = System.currentTimeMillis(),
+                    enqueueOrder = previous?.enqueueOrder ?: 0L,
+                    retryCount = previous?.retryCount ?: 0,
+                ),
+            )
             return
         }
-        val canFinalize = previous?.let {
-            it.contentUri != null && it.totalBytes != null && it.totalBytes > 0L && it.downloadedBytes >= it.totalBytes
-        } == true
-        val restarting = previous?.status == DownloadStatus.STOPPED
-        dao.upsert(
-            downloadState(
+        val state = dao.prepareQueue(videoId, System.currentTimeMillis()) ?: return
+        if (!downloadScheduler.schedule(state)) {
+            dao.transitionStatus(
                 videoId,
-                if (canFinalize) DownloadStatus.FINALIZING else DownloadStatus.QUEUED,
-                if (restarting) null else previous?.contentUri,
-                if (restarting) 0L else previous?.downloadedBytes ?: 0L,
-                if (restarting) null else previous?.totalBytes,
-                null,
-            ),
-        )
-        enqueueDownload(videoId)
+                listOf(DownloadStatus.QUEUED, DownloadStatus.FINALIZING),
+                DownloadStatus.FAILED,
+                "SCHEDULE_FAILED",
+                System.currentTimeMillis(),
+            )
+        }
+    }
+
+    suspend fun recoverDownloads() {
+        db.downloadDao().currentSchedulableDownloads().forEach { state ->
+            downloadScheduler.recover(state)
+        }
     }
 
     suspend fun pauseDownload(videoId: String) {
-        val changed = db.downloadDao().transitionStatus(
+        val dao = db.downloadDao()
+        val previous = dao.byVideoId(videoId) ?: return
+        val changed = dao.transitionStatus(
             videoId,
             listOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING),
             DownloadStatus.PAUSED,
             null,
             System.currentTimeMillis(),
         )
-        if (changed > 0) WorkManager.getInstance(context).cancelUniqueWork(VideoDownloadWorker.workName(videoId))
+        if (changed > 0) {
+            DownloadTransferRunner.cancel(videoId)
+            downloadScheduler.cancel(previous)
+        }
     }
 
     suspend fun stopDownload(videoId: String) {
@@ -194,25 +209,25 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
             System.currentTimeMillis(),
         )
         if (changed == 0) return
-        WorkManager.getInstance(context).cancelUniqueWork(VideoDownloadWorker.workName(videoId))
-        previous.contentUri?.let { value -> runCatching { context.contentResolver.delete(android.net.Uri.parse(value), null, null) } }
-        dao.upsert(downloadState(videoId, DownloadStatus.STOPPED, null, 0L, null, null))
-    }
-
-    private fun enqueueDownload(videoId: String) {
-        val request = OneTimeWorkRequestBuilder<VideoDownloadWorker>()
-            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
-            .setInputData(workDataOf(VideoDownloadWorker.KEY_VIDEO_ID to videoId))
-            .build()
-        WorkManager.getInstance(context).enqueueUniqueWork(VideoDownloadWorker.workName(videoId), ExistingWorkPolicy.REPLACE, request)
+        DownloadTransferRunner.cancel(videoId)
+        downloadScheduler.cancel(previous)
+        val stopped = dao.byVideoId(videoId) ?: previous
+        stopped.contentUri?.let { value -> runCatching { context.contentResolver.delete(android.net.Uri.parse(value), null, null) } }
+        dao.upsert(
+            stopped.copy(
+                status = DownloadStatus.STOPPED,
+                contentUri = null,
+                downloadedBytes = 0L,
+                totalBytes = null,
+                errorCode = null,
+                updatedAtEpochMillis = System.currentTimeMillis(),
+            ),
+        )
     }
 
     private fun clearProbeSessions(postId: String) {
         probeSessions.keys.removeAll { it.postId == postId }
     }
-
-    private fun downloadState(videoId: String, status: String, contentUri: String?, downloadedBytes: Long, totalBytes: Long?, errorCode: String?) =
-        DownloadEntity(videoId, status, contentUri, downloadedBytes, totalBytes, errorCode, System.currentTimeMillis())
 
     companion object {
         const val SOURCE_DIRECT = "DIRECT"

@@ -1,5 +1,6 @@
 package com.shaterguy.fc2weeklyranker.data
 
+import androidx.room.ColumnInfo
 import androidx.room.Dao
 import androidx.room.Database
 import androidx.room.Entity
@@ -12,6 +13,8 @@ import androidx.room.Query
 import androidx.room.RoomDatabase
 import androidx.room.Transaction
 import androidx.room.Upsert
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
 
 object DownloadStatus {
@@ -22,6 +25,15 @@ object DownloadStatus {
     const val FINALIZING = "FINALIZING"
     const val COMPLETED = "COMPLETED"
     const val FAILED = "FAILED"
+}
+
+internal object DownloadQueuePolicy {
+    fun enqueueOrder(previousStatus: String?, previousOrder: Long, currentMax: Long?): Long =
+        if (previousStatus == DownloadStatus.PAUSED && previousOrder > 0L) previousOrder
+        else AppDatabase.nextEnqueueOrder(currentMax)
+
+    fun retryCount(previousStatus: String?, previousRetryCount: Int): Int =
+        if (previousStatus == DownloadStatus.PAUSED) previousRetryCount else 0
 }
 
 @Entity(tableName = "posts", indices = [Index("snapshotKey"), Index("postedAtEpochMillis")])
@@ -71,6 +83,8 @@ data class DownloadEntity(
     val totalBytes: Long?,
     val errorCode: String?,
     val updatedAtEpochMillis: Long,
+    @ColumnInfo(defaultValue = "0") val enqueueOrder: Long,
+    @ColumnInfo(defaultValue = "0") val retryCount: Int,
 )
 
 data class DownloadListItem(
@@ -152,6 +166,12 @@ interface DownloadDao {
     @Query("SELECT * FROM downloads WHERE videoId = :videoId LIMIT 1")
     suspend fun byVideoId(videoId: String): DownloadEntity?
 
+    @Query("SELECT MAX(enqueueOrder) FROM downloads")
+    suspend fun maxEnqueueOrder(): Long?
+
+    @Query("SELECT * FROM downloads WHERE status IN ('QUEUED', 'RUNNING', 'FINALIZING') ORDER BY enqueueOrder ASC, videoId ASC")
+    suspend fun currentSchedulableDownloads(): List<DownloadEntity>
+
     @Query(
         """
         SELECT d.videoId AS videoId, d.status AS status, d.contentUri AS contentUri,
@@ -162,7 +182,7 @@ interface DownloadDao {
         INNER JOIN videos v ON v.id = d.videoId
         INNER JOIN posts p ON p.id = v.postId
         WHERE d.status IN ('QUEUED', 'RUNNING', 'PAUSED', 'FINALIZING')
-        ORDER BY d.updatedAtEpochMillis DESC
+        ORDER BY d.enqueueOrder ASC, d.videoId ASC
         """,
     )
     fun activeDownloads(): Flow<List<DownloadListItem>>
@@ -185,6 +205,35 @@ interface DownloadDao {
     @Upsert
     suspend fun upsert(entity: DownloadEntity)
 
+    @Transaction
+    suspend fun prepareQueue(videoId: String, now: Long): DownloadEntity? {
+        val previous = byVideoId(videoId)
+        if (previous?.status in setOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.FINALIZING, DownloadStatus.COMPLETED)) return null
+
+        val canFinalize = previous?.let {
+            it.contentUri != null && it.totalBytes != null && it.totalBytes > 0L && it.downloadedBytes >= it.totalBytes
+        } == true
+        val restarting = previous?.status == DownloadStatus.STOPPED
+        val enqueueOrder = DownloadQueuePolicy.enqueueOrder(
+            previousStatus = previous?.status,
+            previousOrder = previous?.enqueueOrder ?: 0L,
+            currentMax = maxEnqueueOrder(),
+        )
+        val state = DownloadEntity(
+            videoId = videoId,
+            status = if (canFinalize) DownloadStatus.FINALIZING else DownloadStatus.QUEUED,
+            contentUri = if (restarting) null else previous?.contentUri,
+            downloadedBytes = if (restarting) 0L else previous?.downloadedBytes ?: 0L,
+            totalBytes = if (restarting) null else previous?.totalBytes,
+            errorCode = null,
+            updatedAtEpochMillis = now,
+            enqueueOrder = enqueueOrder,
+            retryCount = DownloadQueuePolicy.retryCount(previous?.status, previous?.retryCount ?: 0),
+        )
+        upsert(state)
+        return state
+    }
+
     @Query(
         """UPDATE downloads
         SET status = :toStatus, errorCode = :errorCode, updatedAtEpochMillis = :updatedAt
@@ -196,6 +245,21 @@ interface DownloadDao {
         toStatus: String,
         errorCode: String?,
         updatedAt: Long,
+    ): Int
+
+    @Query(
+        """UPDATE downloads
+        SET status = :toStatus, errorCode = :errorCode, retryCount = retryCount + 1,
+            updatedAtEpochMillis = :updatedAt
+        WHERE videoId = :videoId AND status = :fromStatus AND retryCount < :maxRetries""",
+    )
+    suspend fun recordRetryIfStatus(
+        videoId: String,
+        fromStatus: String,
+        toStatus: String,
+        errorCode: String,
+        updatedAt: Long,
+        maxRetries: Int,
     ): Int
 
     @Query(
@@ -217,9 +281,25 @@ interface DownloadDao {
     suspend fun deleteCompletedHistory(videoId: String): Int
 }
 
-@Database(entities = [PostEntity::class, FavoriteEntity::class, VideoEntity::class, DownloadEntity::class], version = 1, exportSchema = true)
+@Database(entities = [PostEntity::class, FavoriteEntity::class, VideoEntity::class, DownloadEntity::class], version = 2, exportSchema = true)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun postDao(): PostDao
     abstract fun videoDao(): VideoDao
     abstract fun downloadDao(): DownloadDao
+
+    companion object {
+        val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE downloads ADD COLUMN enqueueOrder INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE downloads ADD COLUMN retryCount INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("UPDATE downloads SET enqueueOrder = rowid WHERE enqueueOrder = 0")
+            }
+        }
+
+        internal fun nextEnqueueOrder(currentMax: Long?): Long {
+            val max = currentMax ?: 0L
+            check(max < Long.MAX_VALUE) { "download enqueue order exhausted" }
+            return max + 1L
+        }
+    }
 }

@@ -17,6 +17,10 @@ class DownloadViewModel(application: Application) : AndroidViewModel(application
     val completedDownloads = dao.completedDownloads()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
+    init {
+        viewModelScope.launch { runCatching { repo.recoverDownloads() } }
+    }
+
     fun pause(videoId: String) {
         viewModelScope.launch { repo.pauseDownload(videoId) }
     }

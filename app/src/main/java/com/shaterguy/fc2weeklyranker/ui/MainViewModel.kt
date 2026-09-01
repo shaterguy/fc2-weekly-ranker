@@ -43,6 +43,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val visitedPostIds = repo.visitedPostIds().stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
 
     init {
+        viewModelScope.launch { runCatching { repo.recoverDownloads() } }
         viewModelScope.launch {
             val anchor = repo.ensureAnchor()
             localAnchor.value = anchor

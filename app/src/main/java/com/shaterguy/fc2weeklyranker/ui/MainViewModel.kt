@@ -9,9 +9,15 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+
+data class VideoSyncResult(
+    val refreshStartedAtEpochMillis: Long,
+    val hasActiveMedia: Boolean,
+)
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val repo = AppGraph.repository
@@ -71,7 +77,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun isFavorite(postId: String) = repo.isFavorite(postId)
     fun videos(postId: String) = repo.videos(postId)
     fun download(videoId: String) = repo.download(videoId)
-    fun loadVideos(postId: String) { viewModelScope.launch { runOperation { repo.loadVideos(postId) } } }
+    suspend fun loadVideos(postId: String): VideoSyncResult? {
+        val refreshStartedAt = System.currentTimeMillis()
+        loading.value = true
+        return try {
+            repo.loadVideos(postId)
+            val current = repo.videos(postId).first()
+            VideoSyncResult(
+                refreshStartedAtEpochMillis = refreshStartedAt,
+                hasActiveMedia = current.any {
+                    it.sourceKind == AppRepository.SOURCE_DIRECT || it.sourceKind == AppRepository.SOURCE_IFRAME
+                },
+            )
+        } catch (error: Throwable) {
+            mutableMessage.value = "작업 실패: ${safeMessage(error)}"
+            null
+        } finally {
+            loading.value = false
+        }
+    }
     fun registerProbedVideo(postId: String, url: String, referer: String, ordinal: Int) {
         viewModelScope.launch { repo.registerProbedVideo(postId, url, referer, ordinal) }
     }

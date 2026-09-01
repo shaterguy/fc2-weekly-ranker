@@ -60,6 +60,7 @@ import com.shaterguy.fc2weeklyranker.domain.windowFor
 import com.shaterguy.fc2weeklyranker.download.VideoDownloadWorker
 import com.shaterguy.fc2weeklyranker.media.NativeVideoPlayer
 import com.shaterguy.fc2weeklyranker.media.RestrictedIframePlayer
+import com.shaterguy.fc2weeklyranker.repo.AppRepository
 import com.shaterguy.fc2weeklyranker.ui.MainViewModel
 import java.time.Instant
 import java.time.ZoneId
@@ -230,13 +231,29 @@ private fun VideoDetailScreen(vm: MainViewModel, postId: String, onBack: () -> U
     val loading by vm.isLoading.collectAsState()
     val message by vm.message.collectAsState()
     val uriHandler = LocalUriHandler.current
-    val directVideos = videos.filter { it.sourceKind == "DIRECT" }
-    val resolvers = videos.filter { it.sourceKind == "IFRAME" }
+    var refreshStartedAt by remember(postId) { mutableStateOf<Long?>(null) }
+    var syncFinished by remember(postId) { mutableStateOf(false) }
+    var syncSucceeded by remember(postId) { mutableStateOf(false) }
+    var activeMediaExpected by remember(postId) { mutableStateOf(false) }
+    val directVideos = remember(videos, refreshStartedAt) { visibleDirectVideos(videos, refreshStartedAt) }
+    val resolvers = remember(videos, refreshStartedAt) { visibleDetailResolvers(videos, refreshStartedAt) }
+    val freshRowsArrived = directVideos.isNotEmpty() || resolvers.isNotEmpty()
+    val contentReady = syncFinished && syncSucceeded && (!activeMediaExpected || freshRowsArrived)
     val originalUrl = post?.url?.takeIf { it.startsWith("https://") }
 
     LaunchedEffect(postId) {
+        refreshStartedAt = null
+        syncFinished = false
+        syncSucceeded = false
+        activeMediaExpected = false
         vm.openPost(postId)
-        vm.loadVideos(postId)
+        val result = vm.loadVideos(postId)
+        if (result != null) {
+            refreshStartedAt = result.refreshStartedAtEpochMillis
+            activeMediaExpected = result.hasActiveMedia
+            syncSucceeded = true
+        }
+        syncFinished = true
     }
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
@@ -267,33 +284,56 @@ private fun VideoDetailScreen(vm: MainViewModel, postId: String, onBack: () -> U
         }
         StatusLine(loading, message, vm::clearMessage)
 
-        resolvers.forEach { resolver ->
-            RestrictedIframePlayer(
-                video = resolver,
-                onMediaDiscovered = { candidate ->
-                    vm.registerProbedVideo(postId, candidate, resolver.url, resolver.ordinal)
-                },
-                modifier = Modifier.fillMaxWidth().height(1.dp).alpha(0f),
-            )
-        }
-        if (directVideos.isEmpty() && resolvers.isNotEmpty()) {
+        if (contentReady) {
+            resolvers.forEach { resolver ->
+                RestrictedIframePlayer(
+                    video = resolver,
+                    onMediaDiscovered = { candidate ->
+                        vm.registerProbedVideo(postId, candidate, resolver.url, resolver.ordinal)
+                    },
+                    modifier = Modifier.fillMaxWidth().height(1.dp).alpha(0f),
+                )
+            }
+            if (directVideos.isEmpty() && resolvers.isNotEmpty()) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(Modifier.padding(8.dp))
+                    Text("재생 가능한 영상을 확인 중입니다…")
+                }
+            }
+            if (!loading && !activeMediaExpected) {
+                Text("영상 소스를 찾지 못했습니다. 사이트 구조 변경 여부를 설정에서 확인하세요.")
+            }
+            LazyColumn(
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                contentPadding = PaddingValues(bottom = 24.dp),
+            ) {
+                itemsIndexed(directVideos, key = { _, video -> video.id }) { index, video ->
+                    VideoCard(vm, index, video)
+                }
+            }
+        } else if (syncFinished && syncSucceeded && activeMediaExpected) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 CircularProgressIndicator(Modifier.padding(8.dp))
-                Text("재생 가능한 영상을 확인 중입니다…")
+                Text("영상 목록을 반영하는 중입니다…")
             }
-        }
-        if (!loading && directVideos.isEmpty() && resolvers.isEmpty()) {
-            Text("영상 소스를 찾지 못했습니다. 사이트 구조 변경 여부를 설정에서 확인하세요.")
-        }
-        LazyColumn(
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-            contentPadding = PaddingValues(bottom = 24.dp),
-        ) {
-            itemsIndexed(directVideos, key = { _, video -> video.id }) { index, video ->
-                VideoCard(vm, index, video)
-            }
+        } else if (syncFinished && !syncSucceeded) {
+            Text("영상 정보를 새로 불러오지 못했습니다.", color = MaterialTheme.colorScheme.error)
         }
     }
+}
+
+internal fun visibleDirectVideos(videos: List<VideoEntity>, refreshStartedAtEpochMillis: Long?): List<VideoEntity> {
+    val cutoff = refreshStartedAtEpochMillis ?: return emptyList()
+    val seen = linkedSetOf<String>()
+    return videos.asSequence()
+        .filter { it.sourceKind == AppRepository.SOURCE_DIRECT && it.discoveredAtEpochMillis >= cutoff }
+        .filter { seen.add(AppRepository.canonicalMediaKey(it.url)) }
+        .toList()
+}
+
+internal fun visibleDetailResolvers(videos: List<VideoEntity>, refreshStartedAtEpochMillis: Long?): List<VideoEntity> {
+    val cutoff = refreshStartedAtEpochMillis ?: return emptyList()
+    return videos.filter { it.sourceKind == AppRepository.SOURCE_IFRAME && it.discoveredAtEpochMillis >= cutoff }
 }
 
 @Composable

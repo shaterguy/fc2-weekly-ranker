@@ -133,9 +133,9 @@ interface PostDao {
         """
         SELECT candidate.*
         FROM posts candidate
-        INNER JOIN posts current ON current.id = :postId
-        WHERE (candidate.postedAtEpochMillis < current.postedAtEpochMillis)
-           OR (candidate.postedAtEpochMillis = current.postedAtEpochMillis AND candidate.id < current.id)
+        INNER JOIN posts current_post ON current_post.id = :postId
+        WHERE (candidate.postedAtEpochMillis < current_post.postedAtEpochMillis)
+           OR (candidate.postedAtEpochMillis = current_post.postedAtEpochMillis AND candidate.id < current_post.id)
         ORDER BY candidate.postedAtEpochMillis DESC, candidate.id DESC
         LIMIT 1
         """,
@@ -146,9 +146,9 @@ interface PostDao {
         """
         SELECT candidate.*
         FROM posts candidate
-        INNER JOIN posts current ON current.id = :postId
-        WHERE (candidate.postedAtEpochMillis > current.postedAtEpochMillis)
-           OR (candidate.postedAtEpochMillis = current.postedAtEpochMillis AND candidate.id > current.id)
+        INNER JOIN posts current_post ON current_post.id = :postId
+        WHERE (candidate.postedAtEpochMillis > current_post.postedAtEpochMillis)
+           OR (candidate.postedAtEpochMillis = current_post.postedAtEpochMillis AND candidate.id > current_post.id)
         ORDER BY candidate.postedAtEpochMillis ASC, candidate.id ASC
         LIMIT 1
         """,

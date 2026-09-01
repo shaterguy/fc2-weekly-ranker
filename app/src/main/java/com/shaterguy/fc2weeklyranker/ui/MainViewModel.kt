@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.shaterguy.fc2weeklyranker.AppGraph
 import com.shaterguy.fc2weeklyranker.repo.AppRepository
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
@@ -25,6 +26,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val localAnchor = MutableStateFlow<Long?>(null)
     private val mutableMessage = MutableStateFlow<String?>(null)
     private val loading = MutableStateFlow(false)
+    private val probeRegistrationJobs = mutableMapOf<String, MutableList<Job>>()
 
     val pageIndex = page.stateIn(viewModelScope, SharingStarted.Eagerly, 0)
     val message = mutableMessage.stateIn(viewModelScope, SharingStarted.Eagerly, null)
@@ -78,6 +80,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun videos(postId: String) = repo.videos(postId)
     fun download(videoId: String) = repo.download(videoId)
     suspend fun loadVideos(postId: String): VideoSyncResult? {
+        cancelPendingProbeRegistrations(probeRegistrationJobs.remove(postId))
         val refreshStartedAt = System.currentTimeMillis()
         loading.value = true
         return try {
@@ -97,7 +100,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
     fun registerProbedVideo(postId: String, url: String, referer: String, ordinal: Int) {
-        viewModelScope.launch { repo.registerProbedVideo(postId, url, referer, ordinal) }
+        val jobs = probeRegistrationJobs.getOrPut(postId) { mutableListOf() }
+        jobs.removeAll { it.isCompleted }
+        jobs += viewModelScope.launch { repo.registerProbedVideo(postId, url, referer, ordinal) }
     }
 
     fun queueDownload(videoId: String) { viewModelScope.launch { repo.queueDownload(videoId) } }
@@ -136,4 +141,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun safeMessage(error: Throwable): String = error.message?.take(100) ?: error::class.java.simpleName
+}
+
+internal fun cancelPendingProbeRegistrations(jobs: Collection<Job>?) {
+    jobs?.forEach { it.cancel() }
 }

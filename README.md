@@ -1,6 +1,14 @@
 # FC2 Weekly Ranker
 
-Android TEST app for browsing the configured `javfc2` board in fixed seven-day windows and ranking posts by recommendation rate.
+Android app for browsing the configured `javfc2` board in fixed seven-day windows and ranking posts by recommendation rate. The repository keeps separate STABLE and TEST install lineages from the same functional source.
+
+## STABLE channel
+
+- `v0.1.0` adopts the verified functional state of `v0.1.0-dev24`.
+- STABLE application ID: `com.shaterguy.fc2weeklyranker`.
+- STABLE version: `0.1.0`, `versionCode=24`.
+- The STABLE APK uses a signing identity separate from TEST. The first `v0.1.0` RC packaging run establishes the canonical STABLE certificate fingerprint, which is recorded with the release evidence and used as the update baseline for later stable versions.
+- Release packaging is performed only by GitHub Actions from a verified RC commit; private signing material is never committed or uploaded as an artifact.
 
 ## TEST channel
 
@@ -36,6 +44,6 @@ Downloads are unique WorkManager jobs and write to `MediaStore.Downloads`. Downl
 
 ## Remote verification
 
-GitHub Actions is the build authority. `scripts/verify.sh` is the canonical candidate/release verification entry point. Action dependencies are pinned to commit SHAs, and artifact identity includes both `github.run_id` and `github.run_attempt` so reruns cannot collide.
+GitHub Actions is the build authority. `scripts/verify.sh` is the canonical functional candidate verification entry point. `Android TEST` verifies the debug/TEST lineage, and `Android STABLE RC` packages and verifies the release/STABLE lineage from an RC commit. Action dependencies are pinned to commit SHAs, and evidence artifact identity includes both `github.run_id` and `github.run_attempt` so reruns cannot collide.
 
 The repository intentionally does not contain real media, real session material, or copied source-site content fixtures; parser tests use synthetic HTML shaped like the supported page contract.

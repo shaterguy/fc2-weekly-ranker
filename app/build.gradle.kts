@@ -9,16 +9,18 @@ android {
     compileSdk = 37
 
     defaultConfig {
-        applicationId = "com.shaterguy.fc2weeklyranker.dev"
+        applicationId = "com.shaterguy.fc2weeklyranker"
         minSdk = 29
         targetSdk = 36
         versionCode = 24
-        versionName = "0.1.0-dev24"
+        versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildTypes {
         debug {
+            applicationIdSuffix = ".dev"
+            versionNameSuffix = "-dev24"
             signingConfig = null
         }
         release {

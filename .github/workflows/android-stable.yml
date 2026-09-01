@@ -1,0 +1,128 @@
+name: Android STABLE RC
+
+on:
+  push:
+    branches:
+      - 'v*-rc*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package-stable:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Set up JDK 17
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407
+        with:
+          packages: ''
+          log-accepted-android-sdk-licenses: 'false'
+      - name: Set up Gradle 9.5
+        uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a
+        with:
+          gradle-version: '9.5.0'
+      - name: Install Android API 37
+        shell: bash
+        run: sdkmanager "platforms;android-37.0" "build-tools;37.0.0"
+      - name: Build unsigned STABLE APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle --no-daemon --stacktrace :app:assembleRelease
+          APK="$(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*-unsigned.apk' -print -quit)"
+          test -s "$APK"
+          BADGING="$("$ANDROID_HOME/build-tools/37.0.0/aapt" dump badging "$APK")"
+          grep -Fq "package: name='com.shaterguy.fc2weeklyranker' versionCode='24' versionName='0.1.0'" <<<"$BADGING"
+      - name: Sign and verify STABLE APK
+        id: sign
+        shell: bash
+        env:
+          SIGNING_PASSPHRASE: ${{ secrets.FC2_WEEKLY_RANKER_TEST_SIGNING_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${SIGNING_PASSPHRASE:-}" ]]; then
+            echo 'ERROR: repository signing seed is required for the STABLE APK.' >&2
+            exit 1
+          fi
+          [[ "$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')" == '3.12' ]]
+          python3 -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: \
+            -r tools/signing-requirements-linux-x86_64-py312.txt
+          PASS_FILE="$RUNNER_TEMP/fc2-ranker-stable-signing-pass"
+          trap 'rm -f "$PASS_FILE"' EXIT
+          umask 077
+          printf '%s' "$SIGNING_PASSPHRASE" > "$PASS_FILE"
+          BT="$ANDROID_HOME/build-tools/37.0.0"
+          UNSIGNED="$(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*-unsigned.apk' -print -quit)"
+          OUT=app/build/outputs/fc2-weekly-ranker-stable
+          mkdir -p "$OUT"
+          ALIGNED="$OUT/fc2-weekly-ranker-v0.1.0-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-aligned-unsigned.apk"
+          APK="$OUT/fc2-weekly-ranker-v0.1.0-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.apk"
+          "$BT/zipalign" -p -f 4 "$UNSIGNED" "$ALIGNED"
+          APKSIGNER="$BT/apksigner" bash tools/sign_stable.sh "$ALIGNED" "$PASS_FILE" "$APK" > "$OUT/APKSIGNER_VERIFY.txt"
+          "$BT/apksigner" verify --verbose --print-certs-pem --min-sdk-version 29 "$APK" > "$OUT/APK_CERT.txt"
+          BADGING="$("$BT/aapt" dump badging "$APK")"
+          grep -Fq "package: name='com.shaterguy.fc2weeklyranker' versionCode='24' versionName='0.1.0'" <<<"$BADGING"
+          CERT_SHA256="$(awk -F= '/^certificate_sha256=/{print $2; exit}' "$OUT/APKSIGNER_VERIFY.txt" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+          [[ "$CERT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$CERT_SHA256" != 'ff32473e516ff59ca24ada94fe22e8282ce70fd66bd94fb0975340106d981cfd' ]]
+          python3 - "$OUT/APK_CERT.txt" "$CERT_SHA256" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          from cryptography import x509
+          from cryptography.hazmat.primitives import hashes
+
+          data = Path(sys.argv[1]).read_bytes()
+          expected = sys.argv[2].lower()
+          blocks = re.findall(
+              rb"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
+              data,
+              flags=re.S,
+          )
+          if not blocks:
+              raise SystemExit("no signer certificate PEM found in independent verification")
+          fingerprints = {
+              x509.load_pem_x509_certificate(block + b"\n").fingerprint(hashes.SHA256()).hex()
+              for block in blocks
+          }
+          if expected not in fingerprints:
+              raise SystemExit("independent STABLE signer certificate fingerprint mismatch")
+          PY
+          unzip -l "$APK" | grep -Fq 'AndroidManifest.xml'
+          unzip -l "$APK" | grep -Fq 'classes.dex'
+          printf '%s\n' "$CERT_SHA256" > "$OUT/STABLE_CERT_SHA256.txt"
+          sha256sum "$APK" > "$OUT/SHA256SUMS.txt"
+          printf '%s\n' "$GITHUB_SHA" > "$OUT/SOURCE_COMMIT.txt"
+          printf '%s\n' "$APK" > "$OUT/APK_PATH.txt"
+          echo 'configured=true' >> "$GITHUB_OUTPUT"
+      - name: Upload STABLE signing evidence
+        if: steps.sign.outputs.configured == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: fc2-weekly-ranker-stable-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            app/build/outputs/fc2-weekly-ranker-stable/APKSIGNER_VERIFY.txt
+            app/build/outputs/fc2-weekly-ranker-stable/APK_CERT.txt
+            app/build/outputs/fc2-weekly-ranker-stable/STABLE_CERT_SHA256.txt
+            app/build/outputs/fc2-weekly-ranker-stable/SHA256SUMS.txt
+            app/build/outputs/fc2-weekly-ranker-stable/SOURCE_COMMIT.txt
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload direct installable STABLE APK
+        if: steps.sign.outputs.configured == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          path: app/build/outputs/fc2-weekly-ranker-stable/fc2-weekly-ranker-v0.1.0-${{ github.run_id }}-${{ github.run_attempt }}.apk
+          archive: false
+          if-no-files-found: error
+          retention-days: 14

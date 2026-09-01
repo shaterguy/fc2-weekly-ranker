@@ -43,6 +43,14 @@ class DownloadRuntimePolicyTest {
     }
 
     @Test
+    fun uidtFallbackGrace_isBoundedAndExpiresForStaleQueueRows() {
+        assertEquals(2_000L, DownloadRuntimePolicy.fallbackDelayMillis(10_000L, 10_000L))
+        assertEquals(500L, DownloadRuntimePolicy.fallbackDelayMillis(11_500L, 10_000L))
+        assertEquals(0L, DownloadRuntimePolicy.fallbackDelayMillis(12_500L, 10_000L))
+        assertEquals(2_000L, DownloadRuntimePolicy.fallbackDelayMillis(9_000L, 10_000L))
+    }
+
+    @Test
     fun schedulerOperationGate_serializesConcurrentMutations() = runTest {
         val gate = SchedulerOperationGate()
         var active = 0

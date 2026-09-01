@@ -53,11 +53,11 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
         val anchorMillis = settings.ensureAnchor()
         val anchor = Instant.ofEpochMilli(anchorMillis)
         val remote = source.crawlWindow(settings.baseUrl.first(), windowFor(anchor, pageIndex))
-        val ranked = rank(anchor, remote.map { RankCandidate(it, it.postedAt, it.recommendationCount, it.id) })
+        val ranked = rank(anchor, remote.map { RankCandidate(it, it.postedAt, it.commentCount, it.id) })
         val now = System.currentTimeMillis()
         db.postDao().upsert(ranked.map { (candidate, rate) ->
             val post = candidate.value
-            PostEntity(post.id, post.url, post.title, post.postedAt.toEpochMilli(), post.recommendationCount, rate, snapshotKey(anchorMillis, pageIndex), now)
+            PostEntity(post.id, post.url, post.title, post.postedAt.toEpochMilli(), post.commentCount, rate, snapshotKey(anchorMillis, pageIndex), now)
         })
     }
 
@@ -236,7 +236,7 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
         private const val PROBE_ORDINAL_BASE = 1_000_000
         private const val PROBE_SLOT_STRIDE = 1_000
 
-        fun snapshotKey(anchorMillis: Long, pageIndex: Int): String = "ranking-v4:$anchorMillis:$pageIndex"
+        fun snapshotKey(anchorMillis: Long, pageIndex: Int): String = "ranking-v5-comments:$anchorMillis:$pageIndex"
 
         fun stableVideoId(postId: String, url: String): String =
             MessageDigest.getInstance("SHA-256").digest("$postId|${canonicalMediaKey(url)}".toByteArray()).take(12).joinToString("") { "%02x".format(it) }

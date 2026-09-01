@@ -1,10 +1,9 @@
 package com.shaterguy.fc2weeklyranker.domain
 
-import java.time.Duration
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
-import kotlin.math.max
+import java.time.temporal.ChronoUnit
 
 private val SEOUL: ZoneId = ZoneId.of("Asia/Seoul")
 
@@ -12,7 +11,7 @@ data class DateWindow(val pageIndex: Int, val startDate: LocalDate, val endDate:
     fun contains(instant: Instant): Boolean = !instant.isBefore(startInclusive) && !instant.isAfter(upperInclusive)
 }
 
-data class RankCandidate<T>(val value: T, val postedAt: Instant, val recommendationCount: Int, val stableId: String)
+data class RankCandidate<T>(val value: T, val postedAt: Instant, val commentCount: Int, val stableId: String)
 
 fun windowFor(anchor: Instant, pageIndex: Int): DateWindow {
     require(pageIndex >= 0)
@@ -24,12 +23,18 @@ fun windowFor(anchor: Instant, pageIndex: Int): DateWindow {
     return DateWindow(pageIndex, startDate, endDate, start, upper)
 }
 
-fun dailyRate(anchor: Instant, postedAt: Instant, recommendationCount: Int): Double {
-    val elapsedSeconds = max(0L, Duration.between(postedAt, anchor).seconds)
-    val elapsedDays = max(1.0, elapsedSeconds / 86_400.0)
-    return recommendationCount.coerceAtLeast(0) / elapsedDays
+fun dailyRate(anchor: Instant, postedAt: Instant, commentCount: Int): Double {
+    val anchorDate = anchor.atZone(SEOUL).toLocalDate()
+    val postedDate = postedAt.atZone(SEOUL).toLocalDate()
+    val elapsedDays = maxOf(1L, ChronoUnit.DAYS.between(postedDate, anchorDate))
+    return commentCount.coerceAtLeast(0) / elapsedDays.toDouble()
 }
 
 fun <T> rank(anchor: Instant, candidates: List<RankCandidate<T>>): List<Pair<RankCandidate<T>, Double>> = candidates
-    .map { it to dailyRate(anchor, it.postedAt, it.recommendationCount) }
-    .sortedWith(compareByDescending<Pair<RankCandidate<T>, Double>> { it.second }.thenByDescending { it.first.recommendationCount }.thenByDescending { it.first.postedAt }.thenByDescending { it.first.stableId })
+    .map { it to dailyRate(anchor, it.postedAt, it.commentCount) }
+    .sortedWith(
+        compareByDescending<Pair<RankCandidate<T>, Double>> { it.second }
+            .thenByDescending { it.first.commentCount }
+            .thenByDescending { it.first.postedAt.atZone(SEOUL).toLocalDate() }
+            .thenByDescending { it.first.stableId },
+    )

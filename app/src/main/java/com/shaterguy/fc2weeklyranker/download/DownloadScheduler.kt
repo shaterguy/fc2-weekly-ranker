@@ -22,11 +22,13 @@ import androidx.work.workDataOf
 import com.shaterguy.fc2weeklyranker.data.DownloadEntity
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.TimeUnit
 
 internal enum class DownloadSchedulerKind { WORK_MANAGER, UIDT }
 
 internal object DownloadRuntimePolicy {
     const val MAX_CONCURRENT_TRANSFERS = 3
+    const val UIDT_FALLBACK_GRACE_MILLIS = 2_000L
 
     fun schedulerKind(sdkInt: Int): DownloadSchedulerKind =
         if (sdkInt >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) DownloadSchedulerKind.UIDT else DownloadSchedulerKind.WORK_MANAGER
@@ -34,6 +36,11 @@ internal object DownloadRuntimePolicy {
     fun jobId(state: DownloadEntity): Int {
         if (state.enqueueOrder in 1..Int.MAX_VALUE.toLong()) return state.enqueueOrder.toInt()
         return (state.videoId.hashCode() and Int.MAX_VALUE).coerceAtLeast(1)
+    }
+
+    fun fallbackDelayMillis(now: Long, queuedAt: Long): Long {
+        val elapsed = (now - queuedAt).coerceAtLeast(0L)
+        return (UIDT_FALLBACK_GRACE_MILLIS - elapsed).coerceAtLeast(0L)
     }
 }
 
@@ -97,11 +104,22 @@ internal class DownloadScheduler(private val context: Context) {
 
     suspend fun schedule(state: DownloadEntity): Boolean = operationGate.run {
         when (DownloadRuntimePolicy.schedulerKind(Build.VERSION.SDK_INT)) {
-            DownloadSchedulerKind.UIDT -> scheduleUidt(state, replaceExisting = true)
-            DownloadSchedulerKind.WORK_MANAGER -> {
-                enqueueWorker(state.videoId, ExistingWorkPolicy.REPLACE)
-                true
+            DownloadSchedulerKind.UIDT -> {
+                val uidtScheduled = scheduleUidt(state, replaceExisting = true)
+                val fallbackScheduled = enqueueWorker(
+                    videoId = state.videoId,
+                    policy = ExistingWorkPolicy.REPLACE,
+                    uniqueName = fallbackWorkName(state.videoId),
+                    delayMillis = if (uidtScheduled) DownloadRuntimePolicy.UIDT_FALLBACK_GRACE_MILLIS else 0L,
+                )
+                uidtScheduled || fallbackScheduled
             }
+            DownloadSchedulerKind.WORK_MANAGER -> enqueueWorker(
+                videoId = state.videoId,
+                policy = ExistingWorkPolicy.REPLACE,
+                uniqueName = VideoDownloadWorker.workName(state.videoId),
+                delayMillis = 0L,
+            )
         }
     }
 
@@ -110,30 +128,50 @@ internal class DownloadScheduler(private val context: Context) {
             DownloadSchedulerKind.UIDT -> {
                 val scheduler = uidtScheduler()
                 val jobId = DownloadRuntimePolicy.jobId(state)
-                scheduler.getPendingJob(jobId) != null || scheduleUidt(state, replaceExisting = false)
+                val uidtScheduled = scheduler.getPendingJob(jobId) != null || scheduleUidt(state, replaceExisting = false)
+                val fallbackScheduled = enqueueWorker(
+                    videoId = state.videoId,
+                    policy = ExistingWorkPolicy.KEEP,
+                    uniqueName = fallbackWorkName(state.videoId),
+                    delayMillis = if (uidtScheduled) {
+                        DownloadRuntimePolicy.fallbackDelayMillis(System.currentTimeMillis(), state.updatedAtEpochMillis)
+                    } else {
+                        0L
+                    },
+                )
+                uidtScheduled || fallbackScheduled
             }
-            DownloadSchedulerKind.WORK_MANAGER -> {
-                enqueueWorker(state.videoId, ExistingWorkPolicy.KEEP)
-                true
-            }
+            DownloadSchedulerKind.WORK_MANAGER -> enqueueWorker(
+                videoId = state.videoId,
+                policy = ExistingWorkPolicy.KEEP,
+                uniqueName = VideoDownloadWorker.workName(state.videoId),
+                delayMillis = 0L,
+            )
         }
     }
 
     suspend fun cancel(state: DownloadEntity) = operationGate.run {
-        when (DownloadRuntimePolicy.schedulerKind(Build.VERSION.SDK_INT)) {
-            DownloadSchedulerKind.UIDT -> uidtScheduler().cancel(DownloadRuntimePolicy.jobId(state))
-            DownloadSchedulerKind.WORK_MANAGER ->
-                WorkManager.getInstance(context).cancelUniqueWork(VideoDownloadWorker.workName(state.videoId))
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            runCatching { uidtScheduler().cancel(DownloadRuntimePolicy.jobId(state)) }
         }
+        val workManager = WorkManager.getInstance(context)
+        workManager.cancelUniqueWork(VideoDownloadWorker.workName(state.videoId))
+        workManager.cancelUniqueWork(fallbackWorkName(state.videoId))
     }
 
-    private fun enqueueWorker(videoId: String, policy: ExistingWorkPolicy) {
-        val request = OneTimeWorkRequestBuilder<VideoDownloadWorker>()
+    private fun enqueueWorker(
+        videoId: String,
+        policy: ExistingWorkPolicy,
+        uniqueName: String,
+        delayMillis: Long,
+    ): Boolean = runCatching {
+        val builder = OneTimeWorkRequestBuilder<VideoDownloadWorker>()
             .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
             .setInputData(workDataOf(VideoDownloadWorker.KEY_VIDEO_ID to videoId))
-            .build()
-        WorkManager.getInstance(context).enqueueUniqueWork(VideoDownloadWorker.workName(videoId), policy, request)
-    }
+        if (delayMillis > 0L) builder.setInitialDelay(delayMillis, TimeUnit.MILLISECONDS)
+        WorkManager.getInstance(context).enqueueUniqueWork(uniqueName, policy, builder.build())
+        true
+    }.getOrDefault(false)
 
     private fun scheduleUidt(state: DownloadEntity, replaceExisting: Boolean): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return false
@@ -159,6 +197,8 @@ internal class DownloadScheduler(private val context: Context) {
         val scheduler = context.getSystemService(JobScheduler::class.java)
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) scheduler.forNamespace(UIDT_NAMESPACE) else scheduler
     }
+
+    private fun fallbackWorkName(videoId: String): String = "video-download-fallback-$videoId"
 
     companion object {
         private const val UIDT_NAMESPACE = "video-downloads"

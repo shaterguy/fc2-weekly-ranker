@@ -136,15 +136,21 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
+      - name: Download STABLE APK artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: fc2-weekly-ranker-v0.1.0-${{ github.run_id }}-${{ github.run_attempt }}.apk
+          path: release-assets
+      - name: Download STABLE evidence artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: fc2-weekly-ranker-stable-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence
       - name: Validate release artifacts and provenance
         shell: bash
         run: |
           set -euo pipefail
           APK_ARTIFACT="fc2-weekly-ranker-v0.1.0-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.apk"
-          EVIDENCE_ARTIFACT="fc2-weekly-ranker-stable-evidence-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          mkdir -p release-assets evidence
-          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$APK_ARTIFACT" --dir release-assets
-          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$EVIDENCE_ARTIFACT" --dir evidence
           APK="release-assets/$APK_ARTIFACT"
           test -s "$APK"
           SOURCE_COMMIT="$(tr -d '[:space:]' < evidence/SOURCE_COMMIT.txt)"
@@ -176,15 +182,21 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
+      - name: Download STABLE APK artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: fc2-weekly-ranker-v0.1.0-${{ github.run_id }}-${{ github.run_attempt }}.apk
+          path: release-assets
+      - name: Download STABLE evidence artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: fc2-weekly-ranker-stable-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence
       - name: Publish v0.1.0 from verified main artifact
         shell: bash
         run: |
           set -euo pipefail
           APK_ARTIFACT="fc2-weekly-ranker-v0.1.0-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.apk"
-          EVIDENCE_ARTIFACT="fc2-weekly-ranker-stable-evidence-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          mkdir -p release-assets evidence
-          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$APK_ARTIFACT" --dir release-assets
-          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$EVIDENCE_ARTIFACT" --dir evidence
           SOURCE_COMMIT="$(tr -d '[:space:]' < evidence/SOURCE_COMMIT.txt)"
           [[ "$SOURCE_COMMIT" == "$GITHUB_SHA" ]]
           SRC_APK="release-assets/$APK_ARTIFACT"

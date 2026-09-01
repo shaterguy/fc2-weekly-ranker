@@ -20,7 +20,6 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.net.URI
 import java.net.URLDecoder
-import java.nio.charset.StandardCharsets
 
 class VideoDownloadWorker(appContext: Context, params: WorkerParameters) : CoroutineWorker(appContext, params) {
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
@@ -307,7 +306,7 @@ class VideoDownloadWorker(appContext: Context, params: WorkerParameters) : Corou
         private fun originalBasename(url: String): String? = runCatching {
             val rawName = URI(url).rawPath.orEmpty().substringAfterLast('/')
             if (rawName.isBlank()) return@runCatching null
-            URLDecoder.decode(rawName.replace("+", "%2B"), StandardCharsets.UTF_8)
+            URLDecoder.decode(rawName.replace("+", "%2B"), "UTF-8")
         }.getOrNull()?.takeIf(::isSafeBasename)
 
         private fun isSafeBasename(name: String): Boolean =

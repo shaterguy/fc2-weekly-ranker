@@ -282,38 +282,53 @@ private fun VideoDetailScreen(
                 } else {
                     Text("게시물", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(
-                        onClick = { previousPost?.id?.let(onPost) },
-                        enabled = previousPost != null,
-                        modifier = Modifier.semantics { contentDescription = "이전 게시물로 이동" },
-                    ) { Text("← 이전글") }
-                    OutlinedButton(
-                        onClick = { nextPost?.id?.let(onPost) },
-                        enabled = nextPost != null,
-                        modifier = Modifier.semantics { contentDescription = "다음 게시물로 이동" },
-                    ) { Text("다음글 →") }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    originalUrl?.let { url ->
-                        OutlinedButton(
-                            onClick = { uriHandler.openUri(url) },
-                            modifier = Modifier.semantics { contentDescription = "원본 게시물 페이지 열기" },
-                        ) { Text("원본 페이지") }
-                    }
-                    if (favorite) {
-                        Button(
-                            onClick = { vm.toggleFavorite(postId) },
-                            modifier = Modifier.semantics { contentDescription = "즐겨찾기 해제" },
-                        ) { Text("★ 즐겨찾기됨") }
-                    } else {
-                        OutlinedButton(
-                            onClick = { vm.toggleFavorite(postId) },
-                            modifier = Modifier.semantics { contentDescription = "즐겨찾기에 추가" },
-                        ) { Text("☆ 즐겨찾기") }
-                    }
-                }
             }
+        }
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            OutlinedButton(
+                onClick = { previousPost?.id?.let(onPost) },
+                enabled = previousPost != null,
+                contentPadding = PaddingValues(horizontal = 4.dp),
+                modifier = Modifier
+                    .weight(1f)
+                    .semantics { contentDescription = "이전 게시물로 이동" },
+            ) { Text("← 이전", maxLines = 1, style = MaterialTheme.typography.labelSmall) }
+            OutlinedButton(
+                onClick = { originalUrl?.let { url -> uriHandler.openUri(url) } },
+                enabled = originalUrl != null,
+                contentPadding = PaddingValues(horizontal = 4.dp),
+                modifier = Modifier
+                    .weight(1f)
+                    .semantics { contentDescription = "원본 게시물 페이지 열기" },
+            ) { Text("원본페이지", maxLines = 1, style = MaterialTheme.typography.labelSmall) }
+            if (favorite) {
+                Button(
+                    onClick = { vm.toggleFavorite(postId) },
+                    contentPadding = PaddingValues(horizontal = 4.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .semantics { contentDescription = "즐겨찾기 해제" },
+                ) { Text("즐겨찾기", maxLines = 1, style = MaterialTheme.typography.labelSmall) }
+            } else {
+                OutlinedButton(
+                    onClick = { vm.toggleFavorite(postId) },
+                    contentPadding = PaddingValues(horizontal = 4.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .semantics { contentDescription = "즐겨찾기에 추가" },
+                ) { Text("즐겨찾기", maxLines = 1, style = MaterialTheme.typography.labelSmall) }
+            }
+            OutlinedButton(
+                onClick = { nextPost?.id?.let(onPost) },
+                enabled = nextPost != null,
+                contentPadding = PaddingValues(horizontal = 4.dp),
+                modifier = Modifier
+                    .weight(1f)
+                    .semantics { contentDescription = "다음 게시물로 이동" },
+            ) { Text("다음 →", maxLines = 1, style = MaterialTheme.typography.labelSmall) }
         }
         StatusLine(loading, message, vm::clearMessage)
 

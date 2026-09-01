@@ -117,7 +117,7 @@ private fun RankerApp(vm: MainViewModel = viewModel()) {
         ) {
             composable("ranking") { RankingScreen(vm) { id -> nav.navigate("detail/${Uri.encode(id)}") } }
             composable("favorites") { FavoritesScreen(vm) { id -> nav.navigate("detail/${Uri.encode(id)}") } }
-            composable("downloads") { DownloadScreen { id -> nav.navigate("detail/${Uri.encode(id)}") } }
+            composable("downloads") { DownloadScreen(onPost = { id -> nav.navigate("detail/${Uri.encode(id)}") }) }
             composable("settings") { SettingsScreen(vm) }
             composable(
                 "detail/{postId}",

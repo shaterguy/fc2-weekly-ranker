@@ -3,19 +3,16 @@ package com.shaterguy.fc2weeklyranker.network
 import com.shaterguy.fc2weeklyranker.domain.DateWindow
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
 import java.net.URI
 import java.time.Duration
 import java.time.Instant
+import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.ZoneId
 import java.util.Collections
@@ -24,9 +21,12 @@ import java.util.LinkedHashMap
 private const val BOARD_PATH = "/bbs/board.php?bo_table=javfc2&sop=and&sst=wr_datetime&sod=desc"
 private const val UA = "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 Chrome/151 Mobile Safari/537.36"
 private val SEOUL = ZoneId.of("Asia/Seoul")
+private val COUNT_TOKEN = Regex("(?<![A-Za-z0-9])(?:\\d{1,3}(?:,\\d{3})+|\\d+)(?![A-Za-z0-9])")
 
 data class RemoteMedia(val url: String, val referer: String, val kind: String, val ordinal: Int)
 data class RemotePost(val id: String, val url: String, val title: String, val postedAt: Instant, val recommendationCount: Int, val media: List<RemoteMedia>)
+data class RemoteRankPost(val id: String, val url: String, val title: String, val postedAt: Instant, val commentCount: Int)
+internal data class BoardRow(val id: String, val url: String, val title: String, val commentCount: Int)
 
 class AvseeClient(
     private val http: OkHttpClient,
@@ -43,69 +43,40 @@ class AvseeClient(
     suspend fun testConnection(baseUrl: String): Result<Unit> = withContext(ioDispatcher) {
         runCatching {
             val boardUrl = "$baseUrl$BOARD_PATH"
-            val links = parseBoardLinks(fetch(boardUrl), baseUrl)
-            check(links.isNotEmpty()) { "게시물 링크를 찾을 수 없습니다." }
-            val detailUrl = links.first()
-            parseDetail(fetch(detailUrl, boardUrl), detailUrl, Instant.now(), includeMedia = false)
+            val rows = parseBoardRows(fetch(boardUrl), baseUrl)
+            check(rows.isNotEmpty()) { "게시물 목록을 찾을 수 없습니다." }
+            val first = rows.first()
+            parsePostedDate(fetch(first.url, boardUrl), first.url, Instant.now())
             Unit
         }
     }
 
-    suspend fun crawlWindow(baseUrl: String, window: DateWindow): List<RemotePost> = withContext(ioDispatcher) {
-        val out = LinkedHashMap<String, RemotePost>()
-        val detailLimiter = Semaphore(MAX_PARALLEL_DETAIL_REQUESTS)
-        var prefetchedBoard: Pair<Int, Result<List<String>>>? = null
+    suspend fun crawlWindow(baseUrl: String, window: DateWindow): List<RemoteRankPost> = withContext(ioDispatcher) {
+        val out = LinkedHashMap<String, RemoteRankPost>()
+        val dateCache = mutableMapOf<String, LocalDate>()
         for (page in 1..MAX_CRAWL_PAGES) {
             val boardUrl = "$baseUrl$BOARD_PATH&page=$page"
-            val prefetched = prefetchedBoard?.takeIf { it.first == page }
-            prefetchedBoard = null
-            val links = prefetched?.second?.getOrThrow()
-                ?: parseBoardLinks(fetchForCrawl(boardUrl), baseUrl)
-            if (links.isEmpty()) break
-            var parsedOnPage = 0
-            var failedOnPage = 0
-            var olderOnPage = 0
-            val pageResult = coroutineScope {
-                val detailDeferreds = links.map { link ->
-                    async {
-                        runCatching {
-                            detailLimiter.withPermit {
-                                parseDetail(
-                                    fetchForCrawl(link, boardUrl),
-                                    link,
-                                    window.upperInclusive,
-                                    includeMedia = false,
-                                )
-                            }
-                        }
-                    }
+            val rows = parseBoardRows(fetchForCrawl(boardUrl), baseUrl)
+            if (rows.isEmpty()) break
+
+            val dates = resolveBoardDates(rows, boardUrl, window.upperInclusive, dateCache)
+            rows.forEachIndexed { index, row ->
+                val date = dates[index]
+                if (!date.isBefore(window.startDate) && !date.isAfter(window.endDate)) {
+                    out.putIfAbsent(
+                        row.id,
+                        RemoteRankPost(
+                            id = row.id,
+                            url = row.url,
+                            title = row.title,
+                            postedAt = date.atStartOfDay(SEOUL).toInstant(),
+                            commentCount = row.commentCount,
+                        ),
+                    )
                 }
-                val nextBoardDeferred = if (page < MAX_CRAWL_PAGES) {
-                    async {
-                        val nextPage = page + 1
-                        val nextBoardUrl = "$baseUrl$BOARD_PATH&page=$nextPage"
-                        nextPage to runCatching {
-                            parseBoardLinks(fetchForCrawl(nextBoardUrl), baseUrl)
-                        }
-                    }
-                } else {
-                    null
-                }
-                detailDeferreds.awaitAll() to nextBoardDeferred?.await()
             }
-            prefetchedBoard = pageResult.second
-            for (result in pageResult.first) {
-                val detail = result.onFailure {
-                    failedOnPage += 1
-                }.getOrNull() ?: continue
-                parsedOnPage += 1
-                if (detail.postedAt.isBefore(window.startInclusive)) olderOnPage += 1
-                if (window.contains(detail.postedAt)) out.putIfAbsent(detail.id, detail)
-            }
-            check(parsedOnPage > 0 || failedOnPage == 0) {
-                "게시물 상세 파싱에 모두 실패했습니다. 사이트 형식이 변경되었는지 확인해 주세요. (page=$page, failed=$failedOnPage)"
-            }
-            if (failedOnPage == 0 && parsedOnPage > 0 && olderOnPage == parsedOnPage) break
+
+            if (dates.last().isBefore(window.startDate)) break
         }
         out.values.toList()
     }
@@ -125,6 +96,21 @@ class AvseeClient(
             .distinct()
     }
 
+    internal fun parseBoardRows(html: String, baseUrl: String): List<BoardRow> {
+        val doc = Jsoup.parse(html, baseUrl)
+        val rows = LinkedHashMap<String, BoardRow>()
+        doc.select("#fboardlist .list-item").forEach { item ->
+            val link = item.selectFirst("h2 a[href*='bo_table=javfc2'][href*='wr_id=']") ?: return@forEach
+            val url = link.absUrl("href").takeIf(String::isNotBlank) ?: return@forEach
+            val id = queryParam(url, "wr_id")?.takeIf(String::isNotBlank) ?: return@forEach
+            val title = link.text().trim().takeIf(String::isNotBlank) ?: "게시물 $id"
+            val commentCount = parseBoardCommentCount(item, title)
+                ?: error("게시판 댓글수를 찾을 수 없습니다. 사이트 목록 형식이 변경되었는지 확인해 주세요. (post=$id)")
+            rows.putIfAbsent(id, BoardRow(id, url, title, commentCount))
+        }
+        return rows.values.toList()
+    }
+
     internal fun parseDetail(
         html: String,
         detailUrl: String,
@@ -139,6 +125,114 @@ class AvseeClient(
         val postedAt = parsePostedAt(doc, referenceInstant) ?: error("게시시각을 찾을 수 없습니다.")
         val media = if (includeMedia) parseMedia(doc, detailUrl) else emptyList()
         return RemotePost(id, detailUrl, title, postedAt, parseRecommendation(doc), media)
+    }
+
+    private suspend fun resolveBoardDates(
+        rows: List<BoardRow>,
+        boardUrl: String,
+        referenceInstant: Instant,
+        dateCache: MutableMap<String, LocalDate>,
+    ): List<LocalDate> {
+        require(rows.isNotEmpty())
+        val resolved = arrayOfNulls<LocalDate>(rows.size)
+
+        suspend fun probe(index: Int): LocalDate {
+            resolved[index]?.let { return it }
+            val row = rows[index]
+            dateCache[row.url]?.let { cached ->
+                resolved[index] = cached
+                return cached
+            }
+            val parsed = runCatching {
+                parsePostedDate(fetchForCrawl(row.url, boardUrl), row.url, referenceInstant)
+            }.getOrElse { cause ->
+                throw IllegalStateException("게시일자 경계 판정 실패: ${row.id}", cause)
+            }
+            dateCache[row.url] = parsed
+            resolved[index] = parsed
+            return parsed
+        }
+
+        suspend fun resolveSequential(start: Int, end: Int) {
+            for (index in start..end) probe(index)
+            for (index in start until end) {
+                val current = resolved[index] ?: error("게시일자 판정 누락: ${rows[index].id}")
+                val next = resolved[index + 1] ?: error("게시일자 판정 누락: ${rows[index + 1].id}")
+                check(!current.isBefore(next)) {
+                    "게시판 작성일 내림차순 전제가 깨졌습니다. 안전을 위해 날짜 자동 분류를 중단합니다. (${rows[index].id} -> ${rows[index + 1].id})"
+                }
+            }
+        }
+
+        suspend fun resolveSegment(start: Int, end: Int) {
+            if (start == end) {
+                probe(start)
+                return
+            }
+            try {
+                val startDate = probe(start)
+                val endDate = probe(end)
+                if (startDate.isBefore(endDate)) {
+                    resolveSequential(start, end)
+                    return
+                }
+                if (startDate == endDate) {
+                    for (index in start..end) resolved[index] = startDate
+                    return
+                }
+                if (end - start == 1) return
+
+                val mid = (start + end) / 2
+                val midDate = probe(mid)
+                if (startDate.isBefore(midDate) || midDate.isBefore(endDate)) {
+                    resolveSequential(start, end)
+                    return
+                }
+                resolveSegment(start, mid)
+                resolveSegment(mid, end)
+            } catch (_: IllegalStateException) {
+                resolveSequential(start, end)
+            }
+        }
+
+        resolveSegment(0, rows.lastIndex)
+        val result = resolved.mapIndexed { index, value ->
+            value ?: error("게시일자 판정 누락: ${rows[index].id}")
+        }
+        for (index in 0 until result.lastIndex) {
+            check(!result[index].isBefore(result[index + 1])) {
+                "게시판 작성일 내림차순 전제가 깨졌습니다. 안전을 위해 날짜 자동 분류를 중단합니다."
+            }
+        }
+        return result
+    }
+
+    private fun parseBoardCommentCount(row: Element, title: String): Int? {
+        row.select(".fa-comment, [class*=comment], [class*=cmt]").forEach { marker ->
+            val texts = buildList {
+                marker.text().takeIf(String::isNotBlank)?.let(::add)
+                marker.nextElementSibling()?.text()?.takeIf(String::isNotBlank)?.let(::add)
+                marker.parent()?.takeIf { it != row }?.text()?.takeIf(String::isNotBlank)?.let(::add)
+            }
+            texts.firstNotNullOfOrNull(::parseCountToken)?.let { return it }
+        }
+
+        val rowText = row.text()
+        val titleIndex = rowText.indexOf(title)
+        val trailing = if (titleIndex >= 0) rowText.substring(titleIndex + title.length) else rowText
+        val metrics = COUNT_TOKEN.findAll(trailing)
+            .mapNotNull { match -> match.value.replace(",", "").toIntOrNull() }
+            .toList()
+        return metrics.firstOrNull()?.takeIf { metrics.size >= 2 }
+    }
+
+    private fun parseCountToken(text: String): Int? =
+        COUNT_TOKEN.find(text)?.value?.replace(",", "")?.toIntOrNull()
+
+    private fun parsePostedDate(html: String, detailUrl: String, referenceInstant: Instant): LocalDate {
+        val doc = Jsoup.parse(html, detailUrl)
+        return parsePostedAt(doc, referenceInstant)?.atZone(SEOUL)?.toLocalDate()
+            ?: error("게시시각을 찾을 수 없습니다.")
     }
 
     private fun parsePostedAt(doc: Document, referenceInstant: Instant): Instant? {
@@ -286,7 +380,6 @@ class AvseeClient(
     companion object {
         const val USER_AGENT: String = UA
         private const val MAX_CRAWL_PAGES = 30
-        private const val MAX_PARALLEL_DETAIL_REQUESTS = 8
         private const val MAX_CRAWL_CACHE_ENTRIES = 256
     }
 }

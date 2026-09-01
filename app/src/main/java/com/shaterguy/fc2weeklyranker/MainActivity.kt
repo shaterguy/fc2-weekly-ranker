@@ -146,7 +146,7 @@ private fun RankingScreen(vm: MainViewModel, onPost: (String) -> Unit) {
     val window = remember(anchor, page) { windowFor(Instant.ofEpochMilli(anchor), page) }
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         Spacer(Modifier.height(12.dp))
-        Text("7일 추천 랭킹", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        Text("7일 댓글 랭킹", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         Text("기준 ${formatDateTime(anchor)}")
         Text("${window.startDate} ∼ ${window.endDate}", style = MaterialTheme.typography.bodyLarge)
         Row(
@@ -191,6 +191,7 @@ private fun FavoritesScreen(vm: MainViewModel, onPost: (String) -> Unit) {
                     visited = visited.contains(post.id),
                     favorite = true,
                     showRank = false,
+                    showMetrics = false,
                 )
             }
         }
@@ -452,6 +453,7 @@ private fun PostCard(
     visited: Boolean,
     favorite: Boolean,
     showRank: Boolean = true,
+    showMetrics: Boolean = true,
 ) {
     Card(
         Modifier
@@ -490,7 +492,9 @@ private fun PostCard(
                         fontWeight = FontWeight.SemiBold,
                     )
                 }
-                Text("추천 ${post.recommendationCount} · 일평균 ${"%.2f".format(post.dailyRate)}")
+                if (showMetrics) {
+                    Text("댓글 ${post.recommendationCount} · 일평균 ${"%.2f".format(post.dailyRate)}")
+                }
                 Text(formatDate(post.postedAtEpochMillis), style = MaterialTheme.typography.bodySmall)
             }
         }
@@ -520,6 +524,6 @@ private fun formatBytes(value: Long?): String {
 
 private val SEOUL = ZoneId.of("Asia/Seoul")
 private val DATE_TIME = DateTimeFormatter.ofPattern("yyyy.MM.dd HH:mm:ss")
-private val DATE = DateTimeFormatter.ofPattern("yyyy.MM.dd HH:mm")
+private val DATE = DateTimeFormatter.ofPattern("yyyy.MM.dd")
 private fun formatDateTime(epochMillis: Long): String = Instant.ofEpochMilli(epochMillis).atZone(SEOUL).format(DATE_TIME)
 private fun formatDate(epochMillis: Long): String = Instant.ofEpochMilli(epochMillis).atZone(SEOUL).format(DATE)

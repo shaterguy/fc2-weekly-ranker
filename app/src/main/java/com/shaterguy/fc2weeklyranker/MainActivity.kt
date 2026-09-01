@@ -37,6 +37,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -102,9 +103,11 @@ private fun RankerApp(vm: MainViewModel = viewModel()) {
     val showBottom = destinations.any { it.route == route }
     val rankingPosts by vm.posts.collectAsState()
     val rankingPostIds = remember(rankingPosts) { rankingPosts.map { it.id } }
-    var detailPostIds by remember { mutableStateOf<List<String>>(emptyList()) }
-    val openDetail: (String) -> Unit = { id ->
-        detailPostIds = rankingPostIds
+    var detailPostIds by rememberSaveable { mutableStateOf(arrayListOf<String>()) }
+    var detailListRoute by rememberSaveable { mutableStateOf("ranking") }
+    val openDetail: (String, String, List<String>) -> Unit = { id, listRoute, postIds ->
+        detailPostIds = ArrayList(postIds)
+        detailListRoute = listRoute
         nav.navigate("detail/${Uri.encode(id)}")
     }
     Scaffold(
@@ -134,9 +137,15 @@ private fun RankerApp(vm: MainViewModel = viewModel()) {
             predictivePopEnterTransition = { EnterTransition.None },
             predictivePopExitTransition = { ExitTransition.None },
         ) {
-            composable("ranking") { RankingScreen(vm, openDetail) }
-            composable("favorites") { FavoritesScreen(vm, openDetail) }
-            composable("downloads") { DownloadScreen(onPost = openDetail) }
+            composable("ranking") {
+                RankingScreen(vm) { id -> openDetail(id, "ranking", rankingPostIds) }
+            }
+            composable("favorites") {
+                FavoritesScreen(vm) { id -> openDetail(id, "favorites", emptyList()) }
+            }
+            composable("downloads") {
+                DownloadScreen(onPost = { id -> openDetail(id, "downloads", emptyList()) })
+            }
             composable("settings") { SettingsScreen(vm) }
             composable(
                 "detail/{postId}",
@@ -146,7 +155,11 @@ private fun RankerApp(vm: MainViewModel = viewModel()) {
                     vm = vm,
                     postId = entry.arguments?.getString("postId").orEmpty(),
                     navigationPostIds = detailPostIds,
-                    onList = { nav.popBackStack("ranking", inclusive = false) },
+                    onList = {
+                        if (!nav.popBackStack(detailListRoute, inclusive = false)) {
+                            nav.navigate(detailListRoute) { launchSingleTop = true }
+                        }
+                    },
                     onPost = { id -> nav.navigate("detail/${Uri.encode(id)}") },
                 )
             }
@@ -259,6 +272,8 @@ private fun VideoDetailScreen(
     val videos by remember(postId) { vm.videos(postId) }.collectAsState(initial = emptyList())
     val post by remember(postId) { vm.post(postId) }.collectAsState(initial = null)
     val favorite by remember(postId) { vm.isFavorite(postId) }.collectAsState(initial = false)
+    val previousPost by remember(postId) { vm.previousPost(postId) }.collectAsState(initial = null)
+    val nextPost by remember(postId) { vm.nextPost(postId) }.collectAsState(initial = null)
     val loading by vm.isLoading.collectAsState()
     val message by vm.message.collectAsState()
     val uriHandler = LocalUriHandler.current
@@ -266,7 +281,13 @@ private fun VideoDetailScreen(
     var syncFinished by remember(postId) { mutableStateOf(false) }
     var syncSucceeded by remember(postId) { mutableStateOf(false) }
     var activeMediaExpected by remember(postId) { mutableStateOf(false) }
-    val neighbors = remember(postId, navigationPostIds) { detailPostNeighbors(navigationPostIds, postId) }
+    val neighbors = remember(postId, navigationPostIds, previousPost?.id, nextPost?.id) {
+        if (navigationPostIds.isNotEmpty()) {
+            detailPostNeighbors(navigationPostIds, postId)
+        } else {
+            DetailPostNeighbors(previousPost?.id, nextPost?.id)
+        }
+    }
     val directVideos = remember(videos, refreshStartedAt) { visibleDirectVideos(videos, refreshStartedAt) }
     val resolvers = remember(videos, refreshStartedAt) { visibleDetailResolvers(videos, refreshStartedAt) }
     val freshRowsArrived = directVideos.isNotEmpty() || resolvers.isNotEmpty()

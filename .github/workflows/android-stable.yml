@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - 'v*-rc*'
+      - main
   workflow_dispatch:
 
 permissions:
@@ -103,7 +104,6 @@ jobs:
           printf '%s\n' "$CERT_SHA256" > "$OUT/STABLE_CERT_SHA256.txt"
           sha256sum "$APK" > "$OUT/SHA256SUMS.txt"
           printf '%s\n' "$GITHUB_SHA" > "$OUT/SOURCE_COMMIT.txt"
-          printf '%s\n' "$APK" > "$OUT/APK_PATH.txt"
           echo 'configured=true' >> "$GITHUB_OUTPUT"
       - name: Upload STABLE signing evidence
         if: steps.sign.outputs.configured == 'true'
@@ -126,3 +126,107 @@ jobs:
           archive: false
           if-no-files-found: error
           retention-days: 14
+
+  release-preflight:
+    needs: package-stable
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Validate release artifacts and provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK_ARTIFACT="fc2-weekly-ranker-v0.1.0-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.apk"
+          EVIDENCE_ARTIFACT="fc2-weekly-ranker-stable-evidence-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p release-assets evidence
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$APK_ARTIFACT" --dir release-assets
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$EVIDENCE_ARTIFACT" --dir evidence
+          APK="release-assets/$APK_ARTIFACT"
+          test -s "$APK"
+          SOURCE_COMMIT="$(tr -d '[:space:]' < evidence/SOURCE_COMMIT.txt)"
+          [[ "$SOURCE_COMMIT" == "$GITHUB_SHA" ]]
+          EXPECTED_SHA256="$(awk '{print $1; exit}' evidence/SHA256SUMS.txt | tr '[:upper:]' '[:lower:]')"
+          ACTUAL_SHA256="$(sha256sum "$APK" | awk '{print $1}' | tr '[:upper:]' '[:lower:]')"
+          [[ "$EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$ACTUAL_SHA256" == "$EXPECTED_SHA256" ]]
+          CERT_SHA256="$(tr -d '[:space:]' < evidence/STABLE_CERT_SHA256.txt | tr '[:upper:]' '[:lower:]')"
+          [[ "$CERT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$CERT_SHA256" != 'ff32473e516ff59ca24ada94fe22e8282ce70fd66bd94fb0975340106d981cfd' ]]
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/v0.1.0" >/dev/null 2>&1; then
+            echo 'ERROR: GitHub Release v0.1.0 already exists.' >&2
+            exit 1
+          fi
+          echo "release_preflight_source=$SOURCE_COMMIT"
+          echo "release_preflight_apk_sha256=$ACTUAL_SHA256"
+          echo "release_preflight_cert_sha256=$CERT_SHA256"
+
+  publish-release:
+    needs:
+      - package-stable
+      - release-preflight
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Publish v0.1.0 from verified main artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK_ARTIFACT="fc2-weekly-ranker-v0.1.0-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.apk"
+          EVIDENCE_ARTIFACT="fc2-weekly-ranker-stable-evidence-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p release-assets evidence
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$APK_ARTIFACT" --dir release-assets
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$EVIDENCE_ARTIFACT" --dir evidence
+          SOURCE_COMMIT="$(tr -d '[:space:]' < evidence/SOURCE_COMMIT.txt)"
+          [[ "$SOURCE_COMMIT" == "$GITHUB_SHA" ]]
+          SRC_APK="release-assets/$APK_ARTIFACT"
+          test -s "$SRC_APK"
+          APK="release-assets/fc2-weekly-ranker-v0.1.0.apk"
+          cp "$SRC_APK" "$APK"
+          EXPECTED_SHA256="$(awk '{print $1; exit}' evidence/SHA256SUMS.txt | tr '[:upper:]' '[:lower:]')"
+          ACTUAL_SHA256="$(sha256sum "$APK" | awk '{print $1}' | tr '[:upper:]' '[:lower:]')"
+          [[ "$ACTUAL_SHA256" == "$EXPECTED_SHA256" ]]
+          printf '%s  %s\n' "$ACTUAL_SHA256" "$(basename "$APK")" > release-assets/SHA256SUMS.txt
+          CERT_SHA256="$(tr -d '[:space:]' < evidence/STABLE_CERT_SHA256.txt | tr '[:upper:]' '[:lower:]')"
+          [[ "$CERT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$CERT_SHA256" != 'ff32473e516ff59ca24ada94fe22e8282ce70fd66bd94fb0975340106d981cfd' ]]
+          if TAG_SHA="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v0.1.0" --jq '.object.sha' 2>/dev/null)"; then
+            [[ "$TAG_SHA" == "$GITHUB_SHA" ]] || { echo 'ERROR: existing v0.1.0 tag points elsewhere.' >&2; exit 1; }
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref='refs/tags/v0.1.0' -f sha="$GITHUB_SHA" >/dev/null
+          fi
+          cat > release-assets/RELEASE_NOTES.md <<EOF
+          FC2 Weekly Ranker v0.1.0
+
+          - Functional baseline: v0.1.0-dev24 (c4f1ec5029f1dab3ef7c3a6dfbb3095a2f65ae71)
+          - Stable release commit: $GITHUB_SHA
+          - Package: com.shaterguy.fc2weeklyranker
+          - versionCode: 24
+          - versionName: 0.1.0
+          - STABLE signing certificate SHA-256: $CERT_SHA256
+          - APK SHA-256: $ACTUAL_SHA256
+          - Verification run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          EOF
+          if gh release view v0.1.0 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo 'ERROR: GitHub Release v0.1.0 already exists.' >&2
+            exit 1
+          fi
+          gh release create v0.1.0 \
+            "$APK#FC2 Weekly Ranker v0.1.0 APK" \
+            "release-assets/SHA256SUMS.txt#SHA-256 checksums" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --draft \
+            --title 'v0.1.0' \
+            --notes-file release-assets/RELEASE_NOTES.md
+          RELEASE_ID="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/v0.1.0" --jq '.id')"
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" -F draft=false -f make_latest=true >/dev/null
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/v0.1.0" --jq '{tag_name, draft, prerelease, html_url, assets: [.assets[] | {name, size, digest}]}'

@@ -27,6 +27,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val mutableMessage = MutableStateFlow<String?>(null)
     private val loading = MutableStateFlow(false)
     private val probeRegistrationJobs = mutableMapOf<String, MutableList<Job>>()
+    private val pagePrefetch = PagePrefetchCoordinator(viewModelScope, repo::ensurePage)
 
     val pageIndex = page.stateIn(viewModelScope, SharingStarted.Eagerly, 0)
     val message = mutableMessage.stateIn(viewModelScope, SharingStarted.Eagerly, null)
@@ -45,25 +46,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val anchor = repo.ensureAnchor()
             localAnchor.value = anchor
-            runOperation { repo.ensurePage(0) }
+            if (loadPage(0)) pagePrefetch.start(1)
         }
     }
 
     fun olderPage() {
-        page.value += 1
-        viewModelScope.launch { runOperation { repo.ensurePage(page.value) } }
+        val target = page.value + 1
+        page.value = target
+        viewModelScope.launch {
+            if (loadPage(target)) pagePrefetch.start(target + 1)
+        }
     }
 
     fun newerPage() {
         if (page.value == 0) return
-        page.value -= 1
-        viewModelScope.launch { runOperation { repo.ensurePage(page.value) } }
+        val target = page.value - 1
+        page.value = target
+        viewModelScope.launch {
+            if (loadPage(target)) pagePrefetch.start(target + 1)
+        }
     }
 
     fun refreshAnchor() {
         viewModelScope.launch {
+            pagePrefetch.cancel()
             page.value = 0
-            runOperation { localAnchor.value = repo.manualRefresh() }
+            val success = runOperation { localAnchor.value = repo.manualRefresh() }
+            if (success) pagePrefetch.start(1)
         }
     }
 
@@ -111,13 +120,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun saveBaseUrl(input: String) {
         viewModelScope.launch {
+            pagePrefetch.cancel()
             loading.value = true
+            var refreshed = false
             repo.setBaseUrl(input).onSuccess {
                 mutableMessage.value = "사이트 주소를 저장했습니다. 기준시각은 그대로 유지됩니다."
                 runCatching { repo.refreshPage(page.value) }
+                    .onSuccess { refreshed = true }
                     .onFailure { mutableMessage.value = "주소는 저장했지만 목록 갱신에 실패했습니다: ${safeMessage(it)}" }
             }.onFailure { mutableMessage.value = "주소 저장 실패: ${safeMessage(it)}" }
             loading.value = false
+            if (refreshed) pagePrefetch.start(page.value + 1)
         }
     }
 
@@ -134,10 +147,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearMessage() { mutableMessage.value = null }
 
-    private suspend fun runOperation(block: suspend () -> Unit) {
+    private suspend fun loadPage(pageIndex: Int): Boolean {
         loading.value = true
-        runCatching { block() }.onFailure { mutableMessage.value = "작업 실패: ${safeMessage(it)}" }
+        val prefetched = pagePrefetch.consume(pageIndex)
+        val result = if (prefetched) Result.success(Unit) else runCatching { repo.ensurePage(pageIndex) }
+        result.onFailure { mutableMessage.value = "작업 실패: ${safeMessage(it)}" }
         loading.value = false
+        return result.isSuccess
+    }
+
+    private suspend fun runOperation(block: suspend () -> Unit): Boolean {
+        loading.value = true
+        val result = runCatching { block() }
+        result.onFailure { mutableMessage.value = "작업 실패: ${safeMessage(it)}" }
+        loading.value = false
+        return result.isSuccess
     }
 
     private fun safeMessage(error: Throwable): String = error.message?.take(100) ?: error::class.java.simpleName

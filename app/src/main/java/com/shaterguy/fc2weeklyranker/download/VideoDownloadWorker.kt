@@ -19,6 +19,8 @@ import okhttp3.Request
 import java.io.FileOutputStream
 import java.io.IOException
 import java.net.URI
+import java.net.URLDecoder
+import java.nio.charset.StandardCharsets
 
 class VideoDownloadWorker(appContext: Context, params: WorkerParameters) : CoroutineWorker(appContext, params) {
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
@@ -67,8 +69,8 @@ class VideoDownloadWorker(appContext: Context, params: WorkerParameters) : Corou
         if (uri == null) {
             if (isStopped || dao.byVideoId(videoId)?.status != DownloadStatus.RUNNING) return@withContext Result.success()
             val values = ContentValues().apply {
-                put(MediaStore.MediaColumns.DISPLAY_NAME, fileName(video.postId, video.ordinal, video.url))
-                put(MediaStore.MediaColumns.MIME_TYPE, mimeType(video.url))
+                put(MediaStore.MediaColumns.DISPLAY_NAME, outputFileName(video.postId, video.ordinal, video.url))
+                put(MediaStore.MediaColumns.MIME_TYPE, mediaMimeType(video.url))
                 put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Weekly Ranker")
                 put(MediaStore.MediaColumns.IS_PENDING, 1)
             }
@@ -280,17 +282,6 @@ class VideoDownloadWorker(appContext: Context, params: WorkerParameters) : Corou
         }
     }
 
-    private fun fileName(postId: String, ordinal: Int, url: String): String {
-        val ext = runCatching { URI(url).path.substringAfterLast('.', "mp4").lowercase() }
-            .getOrDefault("mp4")
-            .takeIf { it.matches(Regex("[a-z0-9]{2,5}")) }
-            ?: "mp4"
-        return "weekly_ranker_${postId.replace(Regex("[^A-Za-z0-9_-]"), "_").take(48)}_${ordinal + 1}.$ext"
-    }
-
-    private fun mimeType(url: String): String =
-        if (url.substringBefore('?').lowercase().endsWith(".webm")) "video/webm" else "video/mp4"
-
     companion object {
         const val KEY_VIDEO_ID = "video_id"
         private const val PROGRESS_STEP_BYTES = 262_144L
@@ -300,5 +291,28 @@ class VideoDownloadWorker(appContext: Context, params: WorkerParameters) : Corou
 
         fun supportsFileDownload(url: String): Boolean =
             !runCatching { URI(url).path.orEmpty().lowercase().endsWith(".m3u8") }.getOrDefault(false)
+
+        fun outputFileName(postId: String, ordinal: Int, url: String): String {
+            originalBasename(url)?.let { return it }
+            val ext = runCatching { URI(url).path.substringAfterLast('.', "mp4").lowercase() }
+                .getOrDefault("mp4")
+                .takeIf { it.matches(Regex("[a-z0-9]{2,5}")) }
+                ?: "mp4"
+            return "weekly_ranker_${postId.replace(Regex("[^A-Za-z0-9_-]"), "_").take(48)}_${ordinal + 1}.$ext"
+        }
+
+        fun mediaMimeType(url: String): String =
+            if (url.substringBefore('?').lowercase().endsWith(".webm")) "video/webm" else "video/mp4"
+
+        private fun originalBasename(url: String): String? = runCatching {
+            val rawName = URI(url).rawPath.orEmpty().substringAfterLast('/')
+            if (rawName.isBlank()) return@runCatching null
+            URLDecoder.decode(rawName.replace("+", "%2B"), StandardCharsets.UTF_8)
+        }.getOrNull()?.takeIf(::isSafeBasename)
+
+        private fun isSafeBasename(name: String): Boolean =
+            name.isNotBlank() &&
+                name != "." && name != ".." && name.length <= 240 &&
+                name.none { it == '/' || it == '\\' || it.code < 32 || it.code == 127 }
     }
 }

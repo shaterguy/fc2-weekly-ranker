@@ -46,7 +46,7 @@ class AvseeClient(
             val links = parseBoardLinks(fetch(boardUrl), baseUrl)
             check(links.isNotEmpty()) { "게시물 링크를 찾을 수 없습니다." }
             val detailUrl = links.first()
-            parseDetail(fetch(detailUrl, boardUrl), detailUrl, Instant.now())
+            parseDetail(fetch(detailUrl, boardUrl), detailUrl, Instant.now(), includeMedia = false)
             Unit
         }
     }
@@ -70,7 +70,12 @@ class AvseeClient(
                     async {
                         runCatching {
                             detailLimiter.withPermit {
-                                parseDetail(fetchForCrawl(link, boardUrl), link, window.upperInclusive)
+                                parseDetail(
+                                    fetchForCrawl(link, boardUrl),
+                                    link,
+                                    window.upperInclusive,
+                                    includeMedia = false,
+                                )
                             }
                         }
                     }
@@ -110,7 +115,7 @@ class AvseeClient(
     }
 
     suspend fun loadDetail(url: String): RemotePost = withContext(ioDispatcher) {
-        parseDetail(fetch(url), url, Instant.now())
+        parseDetail(fetch(url), url, Instant.now(), includeMedia = true)
     }
 
     internal fun parseBoardLinks(html: String, baseUrl: String): List<String> {
@@ -124,6 +129,7 @@ class AvseeClient(
         html: String,
         detailUrl: String,
         referenceInstant: Instant = Instant.now(),
+        includeMedia: Boolean = true,
     ): RemotePost {
         val doc = Jsoup.parse(html, detailUrl)
         val id = queryParam(detailUrl, "wr_id") ?: detailUrl.substringAfterLast('=').take(80)
@@ -131,7 +137,8 @@ class AvseeClient(
             .firstNotNullOfOrNull { selector -> doc.selectFirst(selector)?.text()?.trim()?.takeIf(String::isNotBlank) }
             ?: "게시물 $id"
         val postedAt = parsePostedAt(doc, referenceInstant) ?: error("게시시각을 찾을 수 없습니다.")
-        return RemotePost(id, detailUrl, title, postedAt, parseRecommendation(doc), parseMedia(doc, detailUrl))
+        val media = if (includeMedia) parseMedia(doc, detailUrl) else emptyList()
+        return RemotePost(id, detailUrl, title, postedAt, parseRecommendation(doc), media)
     }
 
     private fun parsePostedAt(doc: Document, referenceInstant: Instant): Instant? {

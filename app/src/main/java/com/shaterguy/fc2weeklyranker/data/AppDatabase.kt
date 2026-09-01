@@ -73,6 +73,20 @@ data class DownloadEntity(
     val updatedAtEpochMillis: Long,
 )
 
+data class DownloadListItem(
+    val videoId: String,
+    val status: String,
+    val contentUri: String?,
+    val downloadedBytes: Long,
+    val totalBytes: Long?,
+    val errorCode: String?,
+    val updatedAtEpochMillis: Long,
+    val videoUrl: String,
+    val videoOrdinal: Int,
+    val postId: String,
+    val postUrl: String,
+)
+
 @Dao
 interface PostDao {
     @Query("SELECT * FROM posts WHERE snapshotKey = :snapshotKey ORDER BY dailyRate DESC, recommendationCount DESC, postedAtEpochMillis DESC, id DESC")
@@ -138,6 +152,36 @@ interface DownloadDao {
     @Query("SELECT * FROM downloads WHERE videoId = :videoId LIMIT 1")
     suspend fun byVideoId(videoId: String): DownloadEntity?
 
+    @Query(
+        """
+        SELECT d.videoId AS videoId, d.status AS status, d.contentUri AS contentUri,
+               d.downloadedBytes AS downloadedBytes, d.totalBytes AS totalBytes,
+               d.errorCode AS errorCode, d.updatedAtEpochMillis AS updatedAtEpochMillis,
+               v.url AS videoUrl, v.ordinal AS videoOrdinal, v.postId AS postId, p.url AS postUrl
+        FROM downloads d
+        INNER JOIN videos v ON v.id = d.videoId
+        INNER JOIN posts p ON p.id = v.postId
+        WHERE d.status IN ('QUEUED', 'RUNNING', 'PAUSED', 'FINALIZING')
+        ORDER BY d.updatedAtEpochMillis DESC
+        """,
+    )
+    fun activeDownloads(): Flow<List<DownloadListItem>>
+
+    @Query(
+        """
+        SELECT d.videoId AS videoId, d.status AS status, d.contentUri AS contentUri,
+               d.downloadedBytes AS downloadedBytes, d.totalBytes AS totalBytes,
+               d.errorCode AS errorCode, d.updatedAtEpochMillis AS updatedAtEpochMillis,
+               v.url AS videoUrl, v.ordinal AS videoOrdinal, v.postId AS postId, p.url AS postUrl
+        FROM downloads d
+        INNER JOIN videos v ON v.id = d.videoId
+        INNER JOIN posts p ON p.id = v.postId
+        WHERE d.status = 'COMPLETED'
+        ORDER BY d.updatedAtEpochMillis DESC
+        """,
+    )
+    fun completedDownloads(): Flow<List<DownloadListItem>>
+
     @Upsert
     suspend fun upsert(entity: DownloadEntity)
 
@@ -168,6 +212,9 @@ interface DownloadDao {
         totalBytes: Long?,
         updatedAt: Long,
     ): Int
+
+    @Query("DELETE FROM downloads WHERE videoId = :videoId AND status = 'COMPLETED'")
+    suspend fun deleteCompletedHistory(videoId: String): Int
 }
 
 @Database(entities = [PostEntity::class, FavoriteEntity::class, VideoEntity::class, DownloadEntity::class], version = 1, exportSchema = true)

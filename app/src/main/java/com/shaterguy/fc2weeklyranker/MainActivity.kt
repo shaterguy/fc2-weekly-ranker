@@ -61,6 +61,7 @@ import com.shaterguy.fc2weeklyranker.download.VideoDownloadWorker
 import com.shaterguy.fc2weeklyranker.media.NativeVideoPlayer
 import com.shaterguy.fc2weeklyranker.media.RestrictedIframePlayer
 import com.shaterguy.fc2weeklyranker.repo.AppRepository
+import com.shaterguy.fc2weeklyranker.ui.DownloadScreen
 import com.shaterguy.fc2weeklyranker.ui.MainViewModel
 import java.time.Instant
 import java.time.ZoneId
@@ -77,6 +78,7 @@ private data class TopDestination(val route: String, val label: String, val glyp
 private val destinations = listOf(
     TopDestination("ranking", "랭킹", "▦"),
     TopDestination("favorites", "즐겨찾기", "♥"),
+    TopDestination("downloads", "다운로드", "↓"),
     TopDestination("settings", "설정", "⚙"),
 )
 
@@ -115,6 +117,7 @@ private fun RankerApp(vm: MainViewModel = viewModel()) {
         ) {
             composable("ranking") { RankingScreen(vm) { id -> nav.navigate("detail/${Uri.encode(id)}") } }
             composable("favorites") { FavoritesScreen(vm) { id -> nav.navigate("detail/${Uri.encode(id)}") } }
+            composable("downloads") { DownloadScreen { id -> nav.navigate("detail/${Uri.encode(id)}") } }
             composable("settings") { SettingsScreen(vm) }
             composable(
                 "detail/{postId}",

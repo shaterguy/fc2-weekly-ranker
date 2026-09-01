@@ -32,6 +32,14 @@ class AvseeClient(
     private val http: OkHttpClient,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
+    private data class CrawlBoardPage(
+        val number: Int,
+        val url: String,
+        val rows: List<BoardRow>,
+        val firstDate: LocalDate?,
+        val lastDate: LocalDate?,
+    )
+
     private val crawlHtmlCache = Collections.synchronizedMap(
         object : LinkedHashMap<String, String>(MAX_CRAWL_CACHE_ENTRIES, 0.75f, true) {
             override fun removeEldestEntry(
@@ -51,16 +59,103 @@ class AvseeClient(
         }
     }
 
-    suspend fun crawlWindow(baseUrl: String, window: DateWindow): List<RemoteRankPost> = withContext(ioDispatcher) {
+    suspend fun crawlWindow(
+        baseUrl: String,
+        window: DateWindow,
+        knownDates: Map<String, LocalDate> = emptyMap(),
+    ): List<RemoteRankPost> = withContext(ioDispatcher) {
         val out = LinkedHashMap<String, RemoteRankPost>()
-        val dateCache = mutableMapOf<String, LocalDate>()
-        for (page in 1..MAX_CRAWL_PAGES) {
+        val dateCache = knownDates.toMutableMap()
+        val pageCache = mutableMapOf<Int, CrawlBoardPage>()
+        var boardRequestCount = 0
+
+        suspend fun loadPage(page: Int): CrawlBoardPage {
+            require(page in 1..MAX_BOARD_PAGE) { "게시판 페이지가 안전 범위를 벗어났습니다: $page" }
+            pageCache[page]?.let { return it }
+            check(boardRequestCount < MAX_CRAWL_BOARD_REQUESTS) {
+                "게시판 탐색 요청이 안전 상한을 초과했습니다. 원문 정렬 상태를 확인해 주세요."
+            }
+            boardRequestCount += 1
             val boardUrl = "$baseUrl$BOARD_PATH&page=$page"
             val rows = parseBoardRows(fetchForCrawl(boardUrl), baseUrl)
-            if (rows.isEmpty()) break
+            val snapshot = if (rows.isEmpty()) {
+                CrawlBoardPage(page, boardUrl, rows, null, null)
+            } else {
+                val firstDate = resolveBoardRowDate(rows.first(), boardUrl, window.upperInclusive, dateCache)
+                val lastDate = if (rows.size == 1) firstDate else resolveBoardRowDate(rows.last(), boardUrl, window.upperInclusive, dateCache)
+                check(!firstDate.isBefore(lastDate)) {
+                    "게시판 작성일 내림차순 전제가 깨졌습니다. 안전을 위해 날짜 자동 분류를 중단합니다."
+                }
+                CrawlBoardPage(page, boardUrl, rows, firstDate, lastDate)
+            }
+            pageCache[page] = snapshot
+            return snapshot
+        }
 
-            val dates = resolveBoardDates(rows, boardUrl, window.upperInclusive, dateCache)
-            rows.forEachIndexed { index, row ->
+        suspend fun lastNonEmptyPage(lowNonEmpty: Int, highEmpty: Int): Int {
+            var low = lowNonEmpty + 1
+            var high = highEmpty - 1
+            var result = lowNonEmpty
+            while (low <= high) {
+                val mid = low + (high - low) / 2
+                if (loadPage(mid).rows.isEmpty()) {
+                    high = mid - 1
+                } else {
+                    result = mid
+                    low = mid + 1
+                }
+            }
+            return result
+        }
+
+        val firstPage = loadPage(1)
+        if (firstPage.rows.isEmpty()) return@withContext emptyList()
+
+        var startPage = 1
+        if (firstPage.lastDate!!.isAfter(window.endDate)) {
+            var low = 1
+            var high = 2
+            while (true) {
+                val probe = loadPage(high)
+                if (probe.rows.isEmpty()) {
+                    val tailPage = lastNonEmptyPage(low, high)
+                    val tail = loadPage(tailPage)
+                    if (tail.lastDate!!.isAfter(window.endDate)) return@withContext emptyList()
+                    high = tailPage
+                    break
+                }
+                if (!probe.lastDate!!.isAfter(window.endDate)) break
+                low = high
+                check(high < MAX_BOARD_PAGE) { "게시판 과거 탐색이 페이지 안전 상한에 도달했습니다." }
+                high = (high * 2).coerceAtMost(MAX_BOARD_PAGE)
+            }
+
+            var left = low + 1
+            var right = high
+            while (left < right) {
+                val mid = left + (right - left) / 2
+                val probe = loadPage(mid)
+                check(probe.rows.isNotEmpty()) { "게시판 페이지 연속성이 깨졌습니다: $mid" }
+                if (!probe.lastDate!!.isAfter(window.endDate)) right = mid else left = mid + 1
+            }
+            startPage = left
+        }
+
+        var page = startPage
+        var previousLastDate: LocalDate? = null
+        while (page <= MAX_BOARD_PAGE) {
+            val snapshot = loadPage(page)
+            if (snapshot.rows.isEmpty()) break
+            val firstDate = snapshot.firstDate ?: break
+            previousLastDate?.let { previous ->
+                check(!previous.isBefore(firstDate)) {
+                    "게시판 페이지 간 작성일 내림차순 전제가 깨졌습니다. 안전을 위해 크롤링을 중단합니다."
+                }
+            }
+            if (firstDate.isBefore(window.startDate)) break
+
+            val dates = resolveBoardDates(snapshot.rows, snapshot.url, window.upperInclusive, dateCache)
+            snapshot.rows.forEachIndexed { index, row ->
                 val date = dates[index]
                 if (!date.isBefore(window.startDate) && !date.isAfter(window.endDate)) {
                     out.putIfAbsent(
@@ -76,7 +171,10 @@ class AvseeClient(
                 }
             }
 
+            previousLastDate = dates.last()
             if (dates.last().isBefore(window.startDate)) break
+            check(page < MAX_BOARD_PAGE) { "게시판 목표 구간 수집이 페이지 안전 상한에 도달했습니다." }
+            page += 1
         }
         out.values.toList()
     }
@@ -127,6 +225,22 @@ class AvseeClient(
         return RemotePost(id, detailUrl, title, postedAt, parseRecommendation(doc), media)
     }
 
+    private suspend fun resolveBoardRowDate(
+        row: BoardRow,
+        boardUrl: String,
+        referenceInstant: Instant,
+        dateCache: MutableMap<String, LocalDate>,
+    ): LocalDate {
+        dateCache[row.id]?.let { return it }
+        val parsed = runCatching {
+            parsePostedDate(fetchForCrawl(row.url, boardUrl), row.url, referenceInstant)
+        }.getOrElse { cause ->
+            throw IllegalStateException("게시일자 경계 판정 실패: ${row.id}", cause)
+        }
+        dateCache[row.id] = parsed
+        return parsed
+    }
+
     private suspend fun resolveBoardDates(
         rows: List<BoardRow>,
         boardUrl: String,
@@ -138,17 +252,7 @@ class AvseeClient(
 
         suspend fun probe(index: Int): LocalDate {
             resolved[index]?.let { return it }
-            val row = rows[index]
-            dateCache[row.url]?.let { cached ->
-                resolved[index] = cached
-                return cached
-            }
-            val parsed = runCatching {
-                parsePostedDate(fetchForCrawl(row.url, boardUrl), row.url, referenceInstant)
-            }.getOrElse { cause ->
-                throw IllegalStateException("게시일자 경계 판정 실패: ${row.id}", cause)
-            }
-            dateCache[row.url] = parsed
+            val parsed = resolveBoardRowDate(rows[index], boardUrl, referenceInstant, dateCache)
             resolved[index] = parsed
             return parsed
         }
@@ -379,7 +483,8 @@ class AvseeClient(
 
     companion object {
         const val USER_AGENT: String = UA
-        private const val MAX_CRAWL_PAGES = 30
+        private const val MAX_BOARD_PAGE = 1_000_000
+        private const val MAX_CRAWL_BOARD_REQUESTS = 2_048
         private const val MAX_CRAWL_CACHE_ENTRIES = 256
     }
 }

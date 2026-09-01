@@ -7,6 +7,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
 private val Context.settingsDataStore by preferencesDataStore(name = "ranker_settings")
@@ -31,6 +32,16 @@ class SettingsStore(context: Context, private val clockMillis: () -> Long = { Sy
 
     suspend fun setBaseUrl(normalizedBaseUrl: String) { dataStore.edit { it[BASE_URL] = normalizedBaseUrl } }
 
+    suspend fun isRankingWindowCovered(key: String): Boolean =
+        dataStore.data.first()[RANKING_COVERED_WINDOWS].orEmpty().contains(key)
+
+    suspend fun markRankingWindowCovered(key: String) {
+        if (key.isBlank()) return
+        dataStore.edit { prefs ->
+            prefs[RANKING_COVERED_WINDOWS] = prefs[RANKING_COVERED_WINDOWS].orEmpty() + key
+        }
+    }
+
     suspend fun markPostVisited(postId: String) {
         if (postId.isBlank()) return
         dataStore.edit { prefs -> prefs[VISITED_POST_IDS] = prefs[VISITED_POST_IDS].orEmpty() + postId }
@@ -41,5 +52,6 @@ class SettingsStore(context: Context, private val clockMillis: () -> Long = { Sy
         private val ANCHOR = longPreferencesKey("anchor_epoch_millis")
         private val BASE_URL = stringPreferencesKey("base_url")
         private val VISITED_POST_IDS = stringSetPreferencesKey("visited_post_ids")
+        private val RANKING_COVERED_WINDOWS = stringSetPreferencesKey("ranking_covered_windows_v1")
     }
 }

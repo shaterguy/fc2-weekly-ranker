@@ -18,11 +18,13 @@ import com.shaterguy.fc2weeklyranker.network.AvseeClient
 import com.shaterguy.fc2weeklyranker.network.BaseUrlPolicy
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.net.URI
 import java.security.MessageDigest
 import java.time.Instant
+import java.time.ZoneId
 
 class AppRepository(private val context: Context, private val db: AppDatabase, val settings: SettingsStore, private val source: AvseeClient) {
     private data class ProbeKey(val postId: String, val resolverOrdinal: Int)
@@ -35,7 +37,25 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
     private val probeSessions = mutableMapOf<ProbeKey, ProbeSession>()
     private val downloadScheduler = DownloadScheduler(context)
 
-    fun posts(snapshotKey: String): Flow<List<PostEntity>> = db.postDao().postsForSnapshot(snapshotKey)
+    fun posts(anchorMillis: Long, pageIndex: Int): Flow<List<PostEntity>> {
+        val anchor = Instant.ofEpochMilli(anchorMillis)
+        val window = windowFor(anchor, pageIndex)
+        return db.postDao().postsForWindow(window.startInclusive.toEpochMilli(), window.upperInclusive.toEpochMilli())
+            .map { stored ->
+                rank(
+                    anchor,
+                    stored.map { post ->
+                        RankCandidate(
+                            value = post,
+                            postedAt = Instant.ofEpochMilli(post.postedAtEpochMillis),
+                            commentCount = post.recommendationCount,
+                            stableId = post.id,
+                        )
+                    },
+                ).map { (candidate, rate) -> candidate.value.copy(dailyRate = rate) }
+            }
+    }
+
     fun favorites(): Flow<List<PostEntity>> = db.postDao().favorites()
     fun post(postId: String): Flow<PostEntity?> = db.postDao().observeById(postId)
     fun isFavorite(postId: String): Flow<Boolean> = db.postDao().observeFavorite(postId)
@@ -45,26 +65,48 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
     suspend fun ensureAnchor(): Long = settings.ensureAnchor()
 
     suspend fun ensurePage(pageIndex: Int) {
-        val anchor = settings.ensureAnchor()
-        if (db.postDao().snapshotCount(snapshotKey(anchor, pageIndex)) == 0) refreshPage(pageIndex)
+        val anchorMillis = settings.ensureAnchor()
+        val baseUrl = settings.baseUrl.first()
+        if (!settings.isRankingWindowCovered(coverageKey(baseUrl, anchorMillis, pageIndex))) {
+            refreshPage(pageIndex)
+        }
     }
 
-    suspend fun refreshPage(pageIndex: Int) {
+    suspend fun refreshPage(pageIndex: Int, force: Boolean = false) {
         val anchorMillis = settings.ensureAnchor()
         val anchor = Instant.ofEpochMilli(anchorMillis)
-        val remote = source.crawlWindow(settings.baseUrl.first(), windowFor(anchor, pageIndex))
+        val baseUrl = settings.baseUrl.first()
+        val coverageKey = coverageKey(baseUrl, anchorMillis, pageIndex)
+        if (!force && settings.isRankingWindowCovered(coverageKey)) return
+
+        val knownDates = db.postDao().knownPostDates().associate { known ->
+            known.id to Instant.ofEpochMilli(known.postedAtEpochMillis).atZone(SEOUL).toLocalDate()
+        }
+        val remote = source.crawlWindow(baseUrl, windowFor(anchor, pageIndex), knownDates)
         val ranked = rank(anchor, remote.map { RankCandidate(it, it.postedAt, it.commentCount, it.id) })
         val now = System.currentTimeMillis()
-        db.postDao().upsert(ranked.map { (candidate, rate) ->
-            val post = candidate.value
-            PostEntity(post.id, post.url, post.title, post.postedAt.toEpochMilli(), post.commentCount, rate, snapshotKey(anchorMillis, pageIndex), now)
-        })
+        if (ranked.isNotEmpty()) {
+            db.postDao().upsert(ranked.map { (candidate, rate) ->
+                val post = candidate.value
+                PostEntity(
+                    post.id,
+                    post.url,
+                    post.title,
+                    post.postedAt.toEpochMilli(),
+                    post.commentCount,
+                    rate,
+                    snapshotKey(anchorMillis, pageIndex),
+                    now,
+                )
+            })
+        }
+        settings.markRankingWindowCovered(coverageKey)
     }
 
     suspend fun manualRefresh(): Long {
         source.clearCrawlCache()
         val anchor = settings.refreshAnchor()
-        refreshPage(0)
+        refreshPage(0, force = true)
         return anchor
     }
 
@@ -233,10 +275,16 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
         const val SOURCE_DIRECT = "DIRECT"
         const val SOURCE_IFRAME = "IFRAME"
         const val SOURCE_HISTORICAL = "HISTORICAL"
+        private val SEOUL = ZoneId.of("Asia/Seoul")
         private const val PROBE_ORDINAL_BASE = 1_000_000
         private const val PROBE_SLOT_STRIDE = 1_000
 
         fun snapshotKey(anchorMillis: Long, pageIndex: Int): String = "ranking-v5-comments:$anchorMillis:$pageIndex"
+
+        internal fun coverageKey(baseUrl: String, anchorMillis: Long, pageIndex: Int): String {
+            val window = windowFor(Instant.ofEpochMilli(anchorMillis), pageIndex)
+            return "ranking-window-v1:$baseUrl:${window.startDate}:${window.endDate}"
+        }
 
         fun stableVideoId(postId: String, url: String): String =
             MessageDigest.getInstance("SHA-256").digest("$postId|${canonicalMediaKey(url)}".toByteArray()).take(12).joinToString("") { "%02x".format(it) }

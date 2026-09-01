@@ -1,6 +1,6 @@
 # FC2 Weekly Ranker
 
-Android app for browsing the configured `javfc2` board in fixed seven-day windows and ranking posts by recommendation rate. The repository keeps separate STABLE and TEST install lineages from the same functional source.
+Android app for browsing the configured `javfc2` board in fixed seven-day windows and ranking posts by comment rate. The repository keeps separate STABLE and TEST install lineages from the same functional source.
 
 ## STABLE channel
 
@@ -12,20 +12,23 @@ Android app for browsing the configured `javfc2` board in fixed seven-day window
 
 ## TEST channel
 
-- Historical TEST lineage starts at `v0.1.0-dev1`; the current development target is `v0.2.0-dev1`.
-- Source version: `0.2.0-dev1`, `versionCode=25`.
+- Historical TEST lineage starts at `v0.1.0-dev1`; the current development target is `v0.2.0-dev4`.
+- Source version: `0.2.0-dev4`, `versionCode=28`.
 - TEST application ID: `com.shaterguy.fc2weeklyranker.dev`.
 - The configured default origin is `https://01.avsee.is`; users can replace it in Settings after a board-and-detail parsing connection check.
 - The anchor instant is persisted in DataStore and changes only when the user explicitly refreshes it.
 - Page `n` covers `anchorDate-(7n+6)` through `anchorDate-7n` in `Asia/Seoul`.
 - Exact `itemprop=datePublished` KST timestamps are preferred; yearless fallback timestamps such as `MM.dd HH:mm` are resolved relative to the ranking window in `Asia/Seoul`.
-- Ranking rate is `recommendations / max(1 day, exact elapsed time)`.
-- If every detail on a board page fails parsing, the crawl reports a source-format failure instead of silently returning an empty ranking.
-- Only cards inside `#fboardlist .list-item` are crawled, excluding sidebar recommendations and unrelated new-post widgets. The board is requested in descending posting-time order and crawling stops only after every successfully parsed card on a page is older than the target window.
-- Board and detail HTML already fetched during the current app session is reused across adjacent seven-day pages; up to eight detail requests run concurrently, and the next board page is prefetched while the current page details are being parsed. Manual anchor refresh clears this crawl cache.
-- Ranking-only detail parsing skips media discovery because ranking needs only ID, title, posting time, and recommendation count. Full media discovery remains on the detail-screen path.
-- After a foreground seven-day page is available, the app prefetches exactly one adjacent older seven-day page into Room. A completed prefetch is consumed by `이전 7일` without another foreground crawl; failures fall back to the normal foreground load.
-- Recommendation counts are read from the live `#wr_good` contract, with prior explicit-label and metadata fallbacks retained.
+- Ranking rate is `comments / max(1 day, elapsed calendar days)`.
+- Ranking post ID, URL, title, posting date, and latest observed comment count are retained in Room as a persistent local catalog. Ranking lists query this catalog by posting-date range instead of an anchor-specific snapshot key, so cached posts remain immediately visible after an anchor refresh and are locally re-ranked for the new anchor.
+- Successfully crawled seven-day windows are retained in DataStore, including genuine zero-post windows. Revisiting a covered window uses the local catalog without another crawl; explicit anchor refresh still performs a live page-zero sync.
+- Live sync passes persisted post dates into the crawler. Existing IDs therefore reuse their known posting dates while board-list comment counts are refreshed; only newly discovered IDs need detail-page date resolution.
+- Historical first-load lookup no longer has a fixed 30-page reach. When the target window is older than page 1, the crawler uses exponential page probing followed by binary search to locate the first overlapping board page, then reads only the pages that overlap the requested seven-day interval. Safety limits fail loudly rather than silently returning a truncated history.
+- If every detail needed for a new date boundary fails parsing, the crawl reports a source-format failure instead of silently returning an empty ranking.
+- Only cards inside `#fboardlist .list-item` are crawled, excluding sidebar recommendations and unrelated new-post widgets. The board is requested in descending posting-time order and date-order violations abort automatic classification.
+- Board and detail HTML already fetched during the current app session is reused while a crawl is in progress. Manual anchor refresh clears this transient HTML cache only; Room/DataStore ranking metadata remains intact.
+- Ranking-only detail parsing skips media discovery because ranking needs only ID, title, posting date, and comment count. Full media discovery remains on the detail-screen path.
+- After a foreground seven-day page is available, the app prefetches exactly one adjacent older seven-day page. A completed persistent-window prefetch is consumed by `이전 7일` without another foreground crawl; failures fall back to the normal foreground load.
 - Navigation Compose page transitions are disabled at the app level; the app does not override Android's system animation scale.
 - Ranking cards show a passive `★ 즐겨찾기` marker when the post is currently saved; the marker does not add a separate favorite action to the ranking list.
 

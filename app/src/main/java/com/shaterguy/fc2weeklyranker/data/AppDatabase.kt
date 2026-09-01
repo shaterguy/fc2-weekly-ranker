@@ -48,6 +48,11 @@ data class PostEntity(
     val fetchedAtEpochMillis: Long,
 )
 
+data class KnownPostDate(
+    val id: String,
+    val postedAtEpochMillis: Long,
+)
+
 @Entity(
     tableName = "favorites",
     foreignKeys = [ForeignKey(entity = PostEntity::class, parentColumns = ["id"], childColumns = ["postId"], onDelete = ForeignKey.CASCADE)],
@@ -105,6 +110,12 @@ data class DownloadListItem(
 interface PostDao {
     @Query("SELECT * FROM posts WHERE snapshotKey = :snapshotKey ORDER BY dailyRate DESC, recommendationCount DESC, postedAtEpochMillis DESC, id DESC")
     fun postsForSnapshot(snapshotKey: String): Flow<List<PostEntity>>
+
+    @Query("SELECT * FROM posts WHERE postedAtEpochMillis >= :startInclusiveEpochMillis AND postedAtEpochMillis <= :upperInclusiveEpochMillis")
+    fun postsForWindow(startInclusiveEpochMillis: Long, upperInclusiveEpochMillis: Long): Flow<List<PostEntity>>
+
+    @Query("SELECT id, postedAtEpochMillis FROM posts")
+    suspend fun knownPostDates(): List<KnownPostDate>
 
     @Query("SELECT COUNT(*) FROM posts WHERE snapshotKey = :snapshotKey")
     suspend fun snapshotCount(snapshotKey: String): Int

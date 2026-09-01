@@ -36,8 +36,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val anchorEpochMillis = combine(repo.settings.anchorEpochMillis, localAnchor) { stored, local -> local ?: stored }
         .filterNotNull()
         .stateIn(viewModelScope, SharingStarted.Eagerly, System.currentTimeMillis())
-    val posts = combine(anchorEpochMillis, page) { anchor, index -> AppRepository.snapshotKey(anchor, index) }
-        .flatMapLatest(repo::posts)
+    val posts = combine(anchorEpochMillis, page) { anchor, index -> anchor to index }
+        .flatMapLatest { (anchor, index) -> repo.posts(anchor, index) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val favorites = repo.favorites().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val visitedPostIds = repo.visitedPostIds().stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())

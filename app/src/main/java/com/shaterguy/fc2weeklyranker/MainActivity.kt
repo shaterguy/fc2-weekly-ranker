@@ -82,12 +82,31 @@ private val destinations = listOf(
     TopDestination("settings", "설정", "⚙"),
 )
 
+internal data class DetailPostNeighbors(val previousId: String?, val nextId: String?)
+
+internal fun detailPostNeighbors(postIds: List<String>, currentPostId: String): DetailPostNeighbors {
+    val currentIndex = postIds.indexOf(currentPostId)
+    if (currentIndex < 0 || postIds.size <= 1) return DetailPostNeighbors(null, null)
+    val lastIndex = postIds.lastIndex
+    return DetailPostNeighbors(
+        previousId = postIds[if (currentIndex == 0) lastIndex else currentIndex - 1],
+        nextId = postIds[if (currentIndex == lastIndex) 0 else currentIndex + 1],
+    )
+}
+
 @Composable
 private fun RankerApp(vm: MainViewModel = viewModel()) {
     val nav = rememberNavController()
     val backStack by nav.currentBackStackEntryAsState()
     val route = backStack?.destination?.route.orEmpty()
     val showBottom = destinations.any { it.route == route }
+    val rankingPosts by vm.posts.collectAsState()
+    val rankingPostIds = remember(rankingPosts) { rankingPosts.map { it.id } }
+    var detailPostIds by remember { mutableStateOf<List<String>>(emptyList()) }
+    val openDetail: (String) -> Unit = { id ->
+        detailPostIds = rankingPostIds
+        nav.navigate("detail/${Uri.encode(id)}")
+    }
     Scaffold(
         bottomBar = {
             if (showBottom) {
@@ -115,9 +134,9 @@ private fun RankerApp(vm: MainViewModel = viewModel()) {
             predictivePopEnterTransition = { EnterTransition.None },
             predictivePopExitTransition = { ExitTransition.None },
         ) {
-            composable("ranking") { RankingScreen(vm) { id -> nav.navigate("detail/${Uri.encode(id)}") } }
-            composable("favorites") { FavoritesScreen(vm) { id -> nav.navigate("detail/${Uri.encode(id)}") } }
-            composable("downloads") { DownloadScreen(onPost = { id -> nav.navigate("detail/${Uri.encode(id)}") }) }
+            composable("ranking") { RankingScreen(vm, openDetail) }
+            composable("favorites") { FavoritesScreen(vm, openDetail) }
+            composable("downloads") { DownloadScreen(onPost = openDetail) }
             composable("settings") { SettingsScreen(vm) }
             composable(
                 "detail/{postId}",
@@ -126,7 +145,8 @@ private fun RankerApp(vm: MainViewModel = viewModel()) {
                 VideoDetailScreen(
                     vm = vm,
                     postId = entry.arguments?.getString("postId").orEmpty(),
-                    onBack = { nav.popBackStack() },
+                    navigationPostIds = detailPostIds,
+                    onList = { nav.popBackStack("ranking", inclusive = false) },
                     onPost = { id -> nav.navigate("detail/${Uri.encode(id)}") },
                 )
             }
@@ -232,13 +252,12 @@ private fun SettingsScreen(vm: MainViewModel) {
 private fun VideoDetailScreen(
     vm: MainViewModel,
     postId: String,
-    onBack: () -> Unit,
+    navigationPostIds: List<String>,
+    onList: () -> Unit,
     onPost: (String) -> Unit,
 ) {
     val videos by remember(postId) { vm.videos(postId) }.collectAsState(initial = emptyList())
     val post by remember(postId) { vm.post(postId) }.collectAsState(initial = null)
-    val previousPost by remember(postId) { vm.previousPost(postId) }.collectAsState(initial = null)
-    val nextPost by remember(postId) { vm.nextPost(postId) }.collectAsState(initial = null)
     val favorite by remember(postId) { vm.isFavorite(postId) }.collectAsState(initial = false)
     val loading by vm.isLoading.collectAsState()
     val message by vm.message.collectAsState()
@@ -247,6 +266,7 @@ private fun VideoDetailScreen(
     var syncFinished by remember(postId) { mutableStateOf(false) }
     var syncSucceeded by remember(postId) { mutableStateOf(false) }
     var activeMediaExpected by remember(postId) { mutableStateOf(false) }
+    val neighbors = remember(postId, navigationPostIds) { detailPostNeighbors(navigationPostIds, postId) }
     val directVideos = remember(videos, refreshStartedAt) { visibleDirectVideos(videos, refreshStartedAt) }
     val resolvers = remember(videos, refreshStartedAt) { visibleDetailResolvers(videos, refreshStartedAt) }
     val freshRowsArrived = directVideos.isNotEmpty() || resolvers.isNotEmpty()
@@ -270,7 +290,7 @@ private fun VideoDetailScreen(
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
-            TextButton(onClick = onBack) { Text("← 뒤로") }
+            TextButton(onClick = onList) { Text("목록") }
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 val currentPost = post
                 if (currentPost != null) {
@@ -289,8 +309,8 @@ private fun VideoDetailScreen(
             horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             OutlinedButton(
-                onClick = { previousPost?.id?.let(onPost) },
-                enabled = previousPost != null,
+                onClick = { neighbors.previousId?.let(onPost) },
+                enabled = neighbors.previousId != null,
                 contentPadding = PaddingValues(horizontal = 4.dp),
                 modifier = Modifier
                     .weight(1f)
@@ -322,8 +342,8 @@ private fun VideoDetailScreen(
                 ) { Text("즐겨찾기", maxLines = 1, style = MaterialTheme.typography.labelSmall) }
             }
             OutlinedButton(
-                onClick = { nextPost?.id?.let(onPost) },
-                enabled = nextPost != null,
+                onClick = { neighbors.nextId?.let(onPost) },
+                enabled = neighbors.nextId != null,
                 contentPadding = PaddingValues(horizontal = 4.dp),
                 modifier = Modifier
                     .weight(1f)

@@ -5,6 +5,7 @@ on:
     branches:
       - 'v*-rc*'
       - main
+      - 'v0.1.0-release-recovery'
   workflow_dispatch:
 
 permissions:
@@ -12,6 +13,7 @@ permissions:
 
 jobs:
   package-stable:
+    if: github.ref != 'refs/heads/v0.1.0-release-recovery'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -129,6 +131,7 @@ jobs:
 
   release-preflight:
     needs: package-stable
+    if: github.ref != 'refs/heads/v0.1.0-release-recovery'
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -163,7 +166,7 @@ jobs:
           [[ "$CERT_SHA256" =~ ^[0-9a-f]{64}$ ]]
           [[ "$CERT_SHA256" != 'ff32473e516ff59ca24ada94fe22e8282ce70fd66bd94fb0975340106d981cfd' ]]
           if gh api "repos/$GITHUB_REPOSITORY/releases/tags/v0.1.0" >/dev/null 2>&1; then
-            echo 'ERROR: GitHub Release v0.1.0 already exists.' >&2
+            echo 'ERROR: published GitHub Release v0.1.0 already exists.' >&2
             exit 1
           fi
           echo "release_preflight_source=$SOURCE_COMMIT"
@@ -228,7 +231,7 @@ jobs:
           - Verification run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
           EOF
           if gh release view v0.1.0 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo 'ERROR: GitHub Release v0.1.0 already exists.' >&2
+            echo 'ERROR: published GitHub Release v0.1.0 already exists.' >&2
             exit 1
           fi
           gh release create v0.1.0 \
@@ -239,6 +242,79 @@ jobs:
             --draft \
             --title 'v0.1.0' \
             --notes-file release-assets/RELEASE_NOTES.md
-          RELEASE_ID="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/v0.1.0" --jq '.id')"
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$RUNNER_TEMP/releases.json"
+          RELEASE_ID="$(jq -r '[.[] | select(.tag_name == "v0.1.0" and .draft == true)] | if length == 1 then .[0].id else empty end' "$RUNNER_TEMP/releases.json")"
+          [[ "$RELEASE_ID" =~ ^[0-9]+$ ]] || { echo 'ERROR: expected exactly one v0.1.0 draft release.' >&2; exit 1; }
           gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" -F draft=false -f make_latest=true >/dev/null
           gh api "repos/$GITHUB_REPOSITORY/releases/tags/v0.1.0" --jq '{tag_name, draft, prerelease, html_url, assets: [.assets[] | {name, size, digest}]}'
+
+  recover-draft-release:
+    if: github.ref == 'refs/heads/v0.1.0-release-recovery'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Validate and publish existing v0.1.0 draft
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED_SOURCE='1cbf74af51e76a9d80d03af34a30a8b0896b5215'
+          EXPECTED_RELEASE_ID='380184210'
+          EXPECTED_APK_DIGEST='sha256:b217287fb3ee796debd662c30c930e9c3b316031fbe1484870b80408b9654c82'
+          EXPECTED_APK_SIZE='34102379'
+          EXPECTED_SUMS_DIGEST='sha256:fb162904e93ec10c23ca47de3a2e298cfb38a278add74a455e4156f534f8e3ab'
+          EXPECTED_SUMS_SIZE='95'
+
+          MAIN_SHA="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
+          TAG_SHA="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v0.1.0" --jq '.object.sha')"
+          [[ "$MAIN_SHA" == "$EXPECTED_SOURCE" ]]
+          [[ "$TAG_SHA" == "$EXPECTED_SOURCE" ]]
+
+          RELEASES_JSON="$RUNNER_TEMP/releases.json"
+          DRAFT_JSON="$RUNNER_TEMP/v0.1.0-draft.json"
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$RELEASES_JSON"
+          DRAFT_COUNT="$(jq '[.[] | select(.tag_name == "v0.1.0" and .draft == true)] | length' "$RELEASES_JSON")"
+          [[ "$DRAFT_COUNT" == '1' ]] || { echo "ERROR: expected exactly one v0.1.0 draft release, found $DRAFT_COUNT." >&2; exit 1; }
+          jq '[.[] | select(.tag_name == "v0.1.0" and .draft == true)] | .[0]' "$RELEASES_JSON" > "$DRAFT_JSON"
+
+          RELEASE_ID="$(jq -r '.id' "$DRAFT_JSON")"
+          [[ "$RELEASE_ID" == "$EXPECTED_RELEASE_ID" ]]
+          jq -e --arg source "$EXPECTED_SOURCE" '
+            .tag_name == "v0.1.0" and
+            .target_commitish == "main" and
+            .name == "v0.1.0" and
+            .draft == true and
+            .prerelease == false and
+            (.body | contains("Stable release commit: " + $source))
+          ' "$DRAFT_JSON" >/dev/null
+
+          APK_COUNT="$(jq --arg digest "$EXPECTED_APK_DIGEST" --argjson size "$EXPECTED_APK_SIZE" '[.assets[] | select(.name == "fc2-weekly-ranker-v0.1.0.apk" and .size == $size and .digest == $digest and .state == "uploaded")] | length' "$DRAFT_JSON")"
+          SUMS_COUNT="$(jq --arg digest "$EXPECTED_SUMS_DIGEST" --argjson size "$EXPECTED_SUMS_SIZE" '[.assets[] | select(.name == "SHA256SUMS.txt" and .size == $size and .digest == $digest and .state == "uploaded")] | length' "$DRAFT_JSON")"
+          [[ "$APK_COUNT" == '1' ]]
+          [[ "$SUMS_COUNT" == '1' ]]
+          [[ "$(jq '.assets | length' "$DRAFT_JSON")" == '2' ]]
+
+          PUBLISHED_JSON="$RUNNER_TEMP/v0.1.0-published.json"
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" -F draft=false -f make_latest=true > "$PUBLISHED_JSON"
+          jq -e --argjson id "$EXPECTED_RELEASE_ID" --arg digest "$EXPECTED_APK_DIGEST" --argjson size "$EXPECTED_APK_SIZE" '
+            .id == $id and
+            .tag_name == "v0.1.0" and
+            .draft == false and
+            .prerelease == false and
+            ([.assets[] | select(.name == "fc2-weekly-ranker-v0.1.0.apk" and .size == $size and .digest == $digest and (.browser_download_url | contains("/releases/download/v0.1.0/")))] | length == 1)
+          ' "$PUBLISHED_JSON" >/dev/null
+
+          BY_TAG_JSON="$RUNNER_TEMP/v0.1.0-by-tag.json"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/v0.1.0" > "$BY_TAG_JSON"
+          jq -e --argjson id "$EXPECTED_RELEASE_ID" --arg source "$EXPECTED_SOURCE" --arg digest "$EXPECTED_APK_DIGEST" --argjson size "$EXPECTED_APK_SIZE" '
+            .id == $id and
+            .tag_name == "v0.1.0" and
+            .draft == false and
+            .prerelease == false and
+            (.body | contains("Stable release commit: " + $source)) and
+            ([.assets[] | select(.name == "fc2-weekly-ranker-v0.1.0.apk" and .size == $size and .digest == $digest)] | length == 1) and
+            ([.assets[] | select(.name == "SHA256SUMS.txt")] | length == 1)
+          ' "$BY_TAG_JSON" >/dev/null
+          jq '{id, tag_name, draft, prerelease, html_url, published_at, assets: [.assets[] | {name, size, digest, browser_download_url}]}' "$BY_TAG_JSON"

@@ -34,6 +34,9 @@ internal object DownloadQueuePolicy {
 
     fun retryCount(previousStatus: String?, previousRetryCount: Int): Int =
         if (previousStatus == DownloadStatus.PAUSED) previousRetryCount else 0
+
+    fun restartsFromBeginning(previousStatus: String?): Boolean =
+        previousStatus == DownloadStatus.STOPPED || previousStatus == DownloadStatus.COMPLETED
 }
 
 @Entity(tableName = "posts", indices = [Index("snapshotKey"), Index("postedAtEpochMillis")])
@@ -125,6 +128,32 @@ interface PostDao {
 
     @Query("SELECT * FROM posts WHERE id = :id LIMIT 1")
     fun observeById(id: String): Flow<PostEntity?>
+
+    @Query(
+        """
+        SELECT candidate.*
+        FROM posts candidate
+        INNER JOIN posts current ON current.id = :postId
+        WHERE (candidate.postedAtEpochMillis < current.postedAtEpochMillis)
+           OR (candidate.postedAtEpochMillis = current.postedAtEpochMillis AND candidate.id < current.id)
+        ORDER BY candidate.postedAtEpochMillis DESC, candidate.id DESC
+        LIMIT 1
+        """,
+    )
+    fun observePrevious(postId: String): Flow<PostEntity?>
+
+    @Query(
+        """
+        SELECT candidate.*
+        FROM posts candidate
+        INNER JOIN posts current ON current.id = :postId
+        WHERE (candidate.postedAtEpochMillis > current.postedAtEpochMillis)
+           OR (candidate.postedAtEpochMillis = current.postedAtEpochMillis AND candidate.id > current.id)
+        ORDER BY candidate.postedAtEpochMillis ASC, candidate.id ASC
+        LIMIT 1
+        """,
+    )
+    fun observeNext(postId: String): Flow<PostEntity?>
 
     @Query("SELECT p.* FROM posts p INNER JOIN favorites f ON p.id = f.postId ORDER BY f.createdAtEpochMillis DESC")
     fun favorites(): Flow<List<PostEntity>>
@@ -219,12 +248,12 @@ interface DownloadDao {
     @Transaction
     suspend fun prepareQueue(videoId: String, now: Long): DownloadEntity? {
         val previous = byVideoId(videoId)
-        if (previous?.status in setOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.FINALIZING, DownloadStatus.COMPLETED)) return null
+        if (previous?.status in setOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.FINALIZING)) return null
 
-        val canFinalize = previous?.let {
+        val restarting = DownloadQueuePolicy.restartsFromBeginning(previous?.status)
+        val canFinalize = !restarting && previous?.let {
             it.contentUri != null && it.totalBytes != null && it.totalBytes > 0L && it.downloadedBytes >= it.totalBytes
         } == true
-        val restarting = previous?.status == DownloadStatus.STOPPED
         val enqueueOrder = DownloadQueuePolicy.enqueueOrder(
             previousStatus = previous?.status,
             previousOrder = previous?.enqueueOrder ?: 0L,

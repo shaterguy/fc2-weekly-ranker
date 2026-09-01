@@ -30,11 +30,16 @@ class DownloadRuntimePolicyTest {
     fun queuePolicy_preservesPauseResumeButRestartsGetNewOrder() {
         assertEquals(7L, DownloadQueuePolicy.enqueueOrder(DownloadStatus.PAUSED, 7L, 41L))
         assertEquals(2, DownloadQueuePolicy.retryCount(DownloadStatus.PAUSED, 2))
+        assertEquals(false, DownloadQueuePolicy.restartsFromBeginning(DownloadStatus.PAUSED))
 
         assertEquals(42L, DownloadQueuePolicy.enqueueOrder(DownloadStatus.STOPPED, 7L, 41L))
         assertEquals(42L, DownloadQueuePolicy.enqueueOrder(DownloadStatus.FAILED, 7L, 41L))
+        assertEquals(42L, DownloadQueuePolicy.enqueueOrder(DownloadStatus.COMPLETED, 7L, 41L))
         assertEquals(0, DownloadQueuePolicy.retryCount(DownloadStatus.STOPPED, 2))
         assertEquals(0, DownloadQueuePolicy.retryCount(DownloadStatus.FAILED, 2))
+        assertEquals(0, DownloadQueuePolicy.retryCount(DownloadStatus.COMPLETED, 2))
+        assertEquals(true, DownloadQueuePolicy.restartsFromBeginning(DownloadStatus.STOPPED))
+        assertEquals(true, DownloadQueuePolicy.restartsFromBeginning(DownloadStatus.COMPLETED))
     }
 
     @Test

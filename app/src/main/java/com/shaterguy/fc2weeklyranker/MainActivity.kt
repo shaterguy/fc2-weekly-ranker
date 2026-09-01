@@ -124,9 +124,10 @@ private fun RankerApp(vm: MainViewModel = viewModel()) {
                 arguments = listOf(navArgument("postId") { type = NavType.StringType }),
             ) { entry ->
                 VideoDetailScreen(
-                    vm,
-                    entry.arguments?.getString("postId").orEmpty(),
+                    vm = vm,
+                    postId = entry.arguments?.getString("postId").orEmpty(),
                     onBack = { nav.popBackStack() },
+                    onPost = { id -> nav.navigate("detail/${Uri.encode(id)}") },
                 )
             }
         }
@@ -228,9 +229,16 @@ private fun SettingsScreen(vm: MainViewModel) {
 }
 
 @Composable
-private fun VideoDetailScreen(vm: MainViewModel, postId: String, onBack: () -> Unit) {
+private fun VideoDetailScreen(
+    vm: MainViewModel,
+    postId: String,
+    onBack: () -> Unit,
+    onPost: (String) -> Unit,
+) {
     val videos by remember(postId) { vm.videos(postId) }.collectAsState(initial = emptyList())
     val post by remember(postId) { vm.post(postId) }.collectAsState(initial = null)
+    val previousPost by remember(postId) { vm.previousPost(postId) }.collectAsState(initial = null)
+    val nextPost by remember(postId) { vm.nextPost(postId) }.collectAsState(initial = null)
     val favorite by remember(postId) { vm.isFavorite(postId) }.collectAsState(initial = false)
     val loading by vm.isLoading.collectAsState()
     val message by vm.message.collectAsState()
@@ -263,8 +271,29 @@ private fun VideoDetailScreen(vm: MainViewModel, postId: String, onBack: () -> U
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
             TextButton(onClick = onBack) { Text("← 뒤로") }
-            Column(Modifier.weight(1f)) {
-                Text("영상", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                val currentPost = post
+                if (currentPost != null) {
+                    Text(currentPost.title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                    Text(
+                        "${formatDate(currentPost.postedAtEpochMillis)} · 댓글 ${currentPost.recommendationCount} · 일평균 ${"%.2f".format(currentPost.dailyRate)}",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                } else {
+                    Text("게시물", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = { previousPost?.id?.let(onPost) },
+                        enabled = previousPost != null,
+                        modifier = Modifier.semantics { contentDescription = "이전 게시물로 이동" },
+                    ) { Text("← 이전글") }
+                    OutlinedButton(
+                        onClick = { nextPost?.id?.let(onPost) },
+                        enabled = nextPost != null,
+                        modifier = Modifier.semantics { contentDescription = "다음 게시물로 이동" },
+                    ) { Text("다음글 →") }
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     originalUrl?.let { url ->
                         OutlinedButton(
@@ -398,8 +427,17 @@ private fun DownloadControls(vm: MainViewModel, video: VideoEntity, index: Int) 
             Text("다운로드 파일 저장을 마무리하고 있습니다…", style = MaterialTheme.typography.bodySmall)
         }
         state?.status == DownloadStatus.COMPLETED -> {
-            Text("다운로드 완료", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
-            Text("기기 다운로드 폴더의 Weekly Ranker에서 확인할 수 있습니다.", style = MaterialTheme.typography.bodySmall)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Button(
+                    onClick = { vm.queueDownload(video.id) },
+                    modifier = Modifier.semantics { contentDescription = "영상 ${index + 1} 다운로드" },
+                ) { Text("다운로드") }
+                Text(
+                    "다운로드 기록 ${formatDateTime(state.updatedAtEpochMillis)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
         }
         state?.status == DownloadStatus.FAILED -> {
             Text("다운로드 실패: ${state.errorCode ?: "알 수 없는 오류"}", color = MaterialTheme.colorScheme.error)

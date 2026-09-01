@@ -58,6 +58,8 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
 
     fun favorites(): Flow<List<PostEntity>> = db.postDao().favorites()
     fun post(postId: String): Flow<PostEntity?> = db.postDao().observeById(postId)
+    fun previousPost(postId: String): Flow<PostEntity?> = db.postDao().observePrevious(postId)
+    fun nextPost(postId: String): Flow<PostEntity?> = db.postDao().observeNext(postId)
     fun isFavorite(postId: String): Flow<Boolean> = db.postDao().observeFavorite(postId)
     fun videos(postId: String): Flow<List<VideoEntity>> = db.videoDao().forPost(postId)
     fun download(videoId: String): Flow<DownloadEntity?> = db.downloadDao().observe(videoId)
@@ -189,7 +191,7 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
         val video = db.videoDao().byId(videoId) ?: return
         val dao = db.downloadDao()
         val previous = dao.byVideoId(videoId)
-        if (previous?.status in setOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.FINALIZING, DownloadStatus.COMPLETED)) return
+        if (previous?.status in setOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.FINALIZING)) return
         if (!VideoDownloadWorker.supportsFileDownload(video.url)) {
             dao.upsert(
                 DownloadEntity(

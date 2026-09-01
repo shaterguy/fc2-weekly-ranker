@@ -86,6 +86,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun post(postId: String) = repo.post(postId)
+    fun previousPost(postId: String) = repo.previousPost(postId)
+    fun nextPost(postId: String) = repo.nextPost(postId)
     fun isFavorite(postId: String) = repo.isFavorite(postId)
     fun videos(postId: String) = repo.videos(postId)
     fun download(videoId: String) = repo.download(videoId)

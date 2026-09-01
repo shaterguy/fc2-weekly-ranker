@@ -36,6 +36,7 @@ import org.json.JSONObject
 import java.net.URI
 
 private const val MEDIA_PROBE_SCRIPT = "(function(){var videos=Array.from(document.querySelectorAll('video')).map(function(v){var s=v.querySelector('source[src]');return v.currentSrc||v.src||(s?(s.currentSrc||s.src):'');}).filter(Boolean);if(videos.length){return JSON.stringify(videos);}return JSON.stringify(Array.from(document.querySelectorAll('source[src]')).map(function(s){return s.currentSrc||s.src||'';}).filter(Boolean));})()"
+private val MEDIA_PROBE_DELAYS_MS = longArrayOf(0L, 250L, 750L, 1_500L, 3_000L, 6_000L, 10_000L)
 
 @OptIn(UnstableApi::class)
 @Composable
@@ -131,13 +132,14 @@ fun RestrictedIframePlayer(video: VideoEntity, onMediaDiscovered: (String) -> Un
     val context = LocalContext.current
     val handler = remember(video.id) { Handler(Looper.getMainLooper()) }
     val iframeHost = remember(video.url) { runCatching { URI(video.url).host.lowercase() }.getOrNull() }
-    val latestNetworkCandidate = remember(video.id) { arrayOfNulls<String>(1) }
-    val visualRequestId = remember(video.id) { longArrayOf(0L) }
+    val networkCandidates = remember(video.id) { linkedMapOf<String, String>() }
+    val publishedCandidateKeys = remember(video.id) { linkedSetOf<String>() }
+    val probeWindowStarted = remember(video.id) { booleanArrayOf(false) }
     val released = remember(video.id) { booleanArrayOf(false) }
 
     fun publish(candidates: List<String>) {
         if (released[0]) return
-        normalizeMediaCandidates(candidates).forEach(onMediaDiscovered)
+        collectNewMediaCandidates(publishedCandidateKeys, candidates).forEach(onMediaDiscovered)
     }
 
     fun probeDom(view: WebView) {
@@ -145,25 +147,21 @@ fun RestrictedIframePlayer(video: VideoEntity, onMediaDiscovered: (String) -> Un
         view.evaluateJavascript(MEDIA_PROBE_SCRIPT) { raw ->
             if (released[0]) return@evaluateJavascript
             val domCandidates = decodeMediaCandidates(raw)
-            if (domCandidates.isNotEmpty()) {
-                publish(domCandidates)
-            } else {
-                latestNetworkCandidate[0]?.let { publish(listOf(it)) }
-            }
+            publish(domCandidates + networkCandidates.values)
         }
     }
 
-    fun probeAfterVisualState(view: WebView) {
-        if (released[0]) return
-        val requestId = visualRequestId[0]++
-        view.postVisualStateCallback(
-            requestId,
-            object : WebView.VisualStateCallback() {
-                override fun onComplete(requestId: Long) {
+    fun scheduleProbeWindow(view: WebView) {
+        if (released[0] || probeWindowStarted[0]) return
+        probeWindowStarted[0] = true
+        MEDIA_PROBE_DELAYS_MS.forEach { delayMillis ->
+            handler.postDelayed(
+                {
                     if (!released[0]) probeDom(view)
-                }
-            },
-        )
+                },
+                delayMillis,
+            )
+        }
     }
 
     val webView = remember(video.id) {
@@ -191,15 +189,16 @@ fun RestrictedIframePlayer(video: VideoEntity, onMediaDiscovered: (String) -> Un
                     if (request.url.scheme == "https" && looksLikeMedia(candidate)) {
                         handler.post {
                             if (released[0]) return@post
-                            latestNetworkCandidate[0] = candidate
-                            probeAfterVisualState(view)
+                            networkCandidates[canonicalMediaKey(candidate)] = candidate
+                            publish(networkCandidates.values.toList())
+                            scheduleProbeWindow(view)
                         }
                     }
                     return null
                 }
 
                 override fun onPageFinished(view: WebView, url: String) {
-                    probeAfterVisualState(view)
+                    scheduleProbeWindow(view)
                 }
             }
             loadUrl(video.url, mapOf("Referer" to video.referer))
@@ -228,6 +227,9 @@ internal fun decodeMediaCandidates(raw: String?): List<String> = runCatching {
         }
     }
 }.getOrDefault(emptyList())
+
+internal fun collectNewMediaCandidates(publishedKeys: MutableSet<String>, urls: List<String>): List<String> =
+    normalizeMediaCandidates(urls).filter { publishedKeys.add(canonicalMediaKey(it)) }
 
 internal fun normalizeMediaCandidates(urls: List<String>): List<String> {
     val seen = linkedSetOf<String>()

@@ -1,6 +1,7 @@
 package com.shaterguy.fc2weeklyranker.repo
 
 import com.shaterguy.fc2weeklyranker.data.VideoEntity
+import com.shaterguy.fc2weeklyranker.media.collectNewMediaCandidates
 import com.shaterguy.fc2weeklyranker.media.normalizeMediaCandidates
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -120,6 +121,79 @@ class VideoReconcileTest {
         assertEquals(firstIds, secondActive.map { it.id })
         assertTrue(secondActive[0].url.contains("second-session"))
         assertTrue(secondActive[1].url.contains("second-session"))
+    }
+
+    @Test
+    fun delayedSecondCandidateAddsStableSecondSlotWithoutDuplicatingFirst() {
+        val referer = "https://embed.example/player"
+        val firstUrl = "https://cdn.example/media/a.mp4?token=1"
+        val secondUrl = "https://cdn.example/media/b.mp4?token=1"
+        var state = emptyList<VideoEntity>()
+
+        val firstUpdate = AppRepository.reconcileProbeRows(
+            existing = state,
+            preferredLegacyIds = emptySet(),
+            postId = "post",
+            referer = referer,
+            resolverOrdinal = 4,
+            candidates = listOf(firstUrl),
+            now = 100L,
+        )
+        state = applyUpdates(state, firstUpdate)
+        val firstId = state.single { it.sourceKind == "DIRECT" }.id
+
+        val secondUpdate = AppRepository.reconcileProbeRows(
+            existing = state,
+            preferredLegacyIds = emptySet(),
+            postId = "post",
+            referer = referer,
+            resolverOrdinal = 4,
+            candidates = listOf(firstUrl, secondUrl),
+            now = 200L,
+        )
+        state = applyUpdates(state, secondUpdate)
+        val active = state.filter { it.sourceKind == "DIRECT" }
+
+        assertEquals(2, active.size)
+        assertEquals(firstId, active[0].id)
+        assertEquals(2, active.map { it.id }.toSet().size)
+        assertTrue(active.any { it.url.contains("/b.mp4") })
+    }
+
+    @Test
+    fun mediaProbePublishesOnlyNewCandidatesAcrossDelayedSnapshots() {
+        val publishedKeys = linkedSetOf<String>()
+        val first = collectNewMediaCandidates(
+            publishedKeys,
+            listOf("https://cdn.example/a.mp4?token=first"),
+        )
+        val second = collectNewMediaCandidates(
+            publishedKeys,
+            listOf(
+                "https://cdn.example/a.mp4?token=second",
+                "https://cdn.example/b.mp4?token=first",
+            ),
+        )
+
+        assertEquals(1, first.size)
+        assertTrue(first.single().contains("a.mp4"))
+        assertEquals(1, second.size)
+        assertTrue(second.single().contains("b.mp4"))
+    }
+
+    @Test
+    fun mediaSourceIdentityPreservesIframeQueriesButDedupesDirectTokens() {
+        val directA = AppRepository.mediaSourceKey("DIRECT", "https://cdn.example/video.mp4?token=1")
+        val directB = AppRepository.mediaSourceKey("DIRECT", "https://cdn.example/video.mp4?token=2")
+        val iframeA = AppRepository.mediaSourceKey("IFRAME", "https://embed.example/player?video=one")
+        val iframeB = AppRepository.mediaSourceKey("IFRAME", "https://embed.example/player?video=two")
+
+        assertEquals(directA, directB)
+        assertFalse(iframeA == iframeB)
+        assertFalse(
+            AppRepository.stableResolverId("post", "https://embed.example/player?video=one") ==
+                AppRepository.stableResolverId("post", "https://embed.example/player?video=two"),
+        )
     }
 
     @Test

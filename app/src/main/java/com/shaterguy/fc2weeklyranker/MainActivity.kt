@@ -132,11 +132,13 @@ private fun RankerApp(vm: MainViewModel = viewModel()) {
 @Composable
 private fun RankingScreen(vm: MainViewModel, onPost: (String) -> Unit) {
     val posts by vm.posts.collectAsState()
+    val favoritePosts by vm.favorites.collectAsState()
     val visited by vm.visitedPostIds.collectAsState()
     val anchor by vm.anchorEpochMillis.collectAsState()
     val page by vm.pageIndex.collectAsState()
     val loading by vm.isLoading.collectAsState()
     val message by vm.message.collectAsState()
+    val favoriteIds = remember(favoritePosts) { favoritePosts.mapTo(hashSetOf()) { it.id } }
     val window = remember(anchor, page) { windowFor(Instant.ofEpochMilli(anchor), page) }
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         Spacer(Modifier.height(12.dp))
@@ -156,7 +158,13 @@ private fun RankingScreen(vm: MainViewModel, onPost: (String) -> Unit) {
         if (!loading && posts.isEmpty()) Text("이 기간에 표시할 게시물이 없습니다.", Modifier.padding(vertical = 24.dp))
         LazyColumn(contentPadding = PaddingValues(bottom = 20.dp)) {
             itemsIndexed(posts, key = { _, post -> post.id }) { index, post ->
-                PostCard(index + 1, post, onPost, visited.contains(post.id))
+                PostCard(
+                    rank = index + 1,
+                    post = post,
+                    onPost = onPost,
+                    visited = visited.contains(post.id),
+                    favorite = post.id in favoriteIds,
+                )
             }
         }
     }
@@ -172,7 +180,14 @@ private fun FavoritesScreen(vm: MainViewModel, onPost: (String) -> Unit) {
         if (posts.isEmpty()) Text("저장한 게시물이 없습니다.")
         LazyColumn {
             itemsIndexed(posts, key = { _, post -> post.id }) { index, post ->
-                PostCard(index + 1, post, onPost, visited.contains(post.id), showRank = false)
+                PostCard(
+                    rank = index + 1,
+                    post = post,
+                    onPost = onPost,
+                    visited = visited.contains(post.id),
+                    favorite = true,
+                    showRank = false,
+                )
             }
         }
     }
@@ -387,14 +402,26 @@ private fun DownloadProgress(downloadedBytes: Long, totalBytes: Long?, prefix: S
 }
 
 @Composable
-private fun PostCard(rank: Int, post: PostEntity, onPost: (String) -> Unit, visited: Boolean, showRank: Boolean = true) {
+private fun PostCard(
+    rank: Int,
+    post: PostEntity,
+    onPost: (String) -> Unit,
+    visited: Boolean,
+    favorite: Boolean,
+    showRank: Boolean = true,
+) {
     Card(
         Modifier
             .fillMaxWidth()
             .padding(vertical = 5.dp)
             .clickable { onPost(post.id) }
             .semantics {
-                contentDescription = if (visited) "방문한 게시물: ${post.title}" else "게시물: ${post.title}"
+                contentDescription = when {
+                    favorite && visited -> "즐겨찾기한 방문한 게시물: ${post.title}"
+                    favorite -> "즐겨찾기한 게시물: ${post.title}"
+                    visited -> "방문한 게시물: ${post.title}"
+                    else -> "게시물: ${post.title}"
+                }
             },
     ) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -412,6 +439,14 @@ private fun PostCard(rank: Int, post: PostEntity, onPost: (String) -> Unit, visi
                     fontWeight = FontWeight.SemiBold,
                     color = if (visited) MaterialTheme.colorScheme.outline else MaterialTheme.colorScheme.onSurface,
                 )
+                if (favorite) {
+                    Text(
+                        "★ 즐겨찾기",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
                 Text("추천 ${post.recommendationCount} · 일평균 ${"%.2f".format(post.dailyRate)}")
                 Text(formatDate(post.postedAtEpochMillis), style = MaterialTheme.typography.bodySmall)
             }

@@ -95,10 +95,11 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
         val seenMedia = linkedSetOf<String>()
         val entities = detail.media
             .filter { it.url.startsWith("https://") }
-            .filter { seenMedia.add(canonicalMediaKey(it.url)) }
+            .filter { seenMedia.add(mediaSourceKey(it.kind, it.url)) }
             .map { media ->
+                val id = if (media.kind == SOURCE_IFRAME) stableResolverId(postId, media.url) else stableVideoId(postId, media.url)
                 VideoEntity(
-                    stableVideoId(postId, media.url),
+                    id,
                     postId,
                     media.url,
                     media.referer,
@@ -225,8 +226,14 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
         fun stableVideoId(postId: String, url: String): String =
             MessageDigest.getInstance("SHA-256").digest("$postId|${canonicalMediaKey(url)}".toByteArray()).take(12).joinToString("") { "%02x".format(it) }
 
+        fun stableResolverId(postId: String, url: String): String =
+            MessageDigest.getInstance("SHA-256").digest("$postId|resolver|${resolverMediaKey(url)}".toByteArray()).take(12).joinToString("") { "%02x".format(it) }
+
         fun stableProbedVideoId(postId: String, resolverOrdinal: Int, slot: Int): String =
             MessageDigest.getInstance("SHA-256").digest("$postId|probe|$resolverOrdinal|$slot".toByteArray()).take(12).joinToString("") { "%02x".format(it) }
+
+        internal fun mediaSourceKey(kind: String, url: String): String =
+            if (kind == SOURCE_IFRAME) "$SOURCE_IFRAME|${resolverMediaKey(url)}" else canonicalMediaKey(url)
 
         fun canonicalMediaKey(url: String): String = runCatching {
             val uri = URI(url)
@@ -235,6 +242,15 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
             val path = uri.rawPath.orEmpty().trimEnd('/')
             "$scheme://$host$path"
         }.getOrElse { url.substringBefore('?') }
+
+        private fun resolverMediaKey(url: String): String = runCatching {
+            val uri = URI(url)
+            val scheme = uri.scheme?.lowercase() ?: "https"
+            val host = uri.host?.lowercase().orEmpty()
+            val path = uri.rawPath.orEmpty().trimEnd('/')
+            val query = uri.rawQuery?.let { "?$it" }.orEmpty()
+            "$scheme://$host$path$query"
+        }.getOrElse { url.substringBefore('#') }
 
         internal fun reconcileVideoRows(
             existing: List<VideoEntity>,

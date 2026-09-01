@@ -5,7 +5,7 @@ Android TEST app for browsing the configured `javfc2` board in fixed seven-day w
 ## TEST channel
 
 - Branch lineage starts at `v0.1.0-dev1`.
-- Source version: `0.1.0-dev21`, `versionCode=21`. The crawler preserves the live board-card, published-time, and recommendation-count contracts verified on 2026-08-31 while reducing crawl latency through wider bounded detail concurrency and next-board-page prefetch.
+- Source version: `0.1.0-dev22`, `versionCode=22`. The crawler preserves the live board-card, published-time, recommendation-count, bounded-concurrency, and next-page-prefetch behavior from dev21 while media discovery now accumulates delayed DOM/network candidates and ranking cards passively identify saved favorites.
 - TEST application ID: `com.shaterguy.fc2weeklyranker.dev`.
 - The configured default origin is `https://01.avsee.is`; users can replace it in Settings after a board-and-detail parsing connection check.
 - The anchor instant is persisted in DataStore and changes only when the user explicitly refreshes it.
@@ -17,10 +17,11 @@ Android TEST app for browsing the configured `javfc2` board in fixed seven-day w
 - Board and detail HTML already fetched during the current app session is reused across adjacent seven-day pages; up to eight detail requests run concurrently, and the next board page is prefetched while the current page details are being parsed. Manual anchor refresh clears this crawl cache.
 - Recommendation counts are read from the live `#wr_good` contract, with prior explicit-label and metadata fallbacks retained.
 - Navigation Compose page transitions are disabled at the app level; the app does not override Android's system animation scale.
+- Ranking cards show a passive `★ 즐겨찾기` marker when the post is currently saved; the marker does not add a separate favorite action to the ranking list.
 
 ## Media path
 
-The detail screen renders media only. Static `video`, `source`, media links, and `iframe` sources are parsed first. Direct sources use Media3 with the same `Referer`, user agent, and runtime WebView cookie context. Iframe-only sources use a restricted WebView player that observes HTTPS media requests and DOM media sources without persisting cookies. WebView media probing is repeated after visual-state callbacks triggered by page completion and media requests, so dynamically created multiple video elements can be discovered during the first detail visit. Resolved iframe media are assigned stable resolver-slot identities instead of transient media-URL identities; stale dev19 probe rows are hidden rather than deleted so repeated detail visits do not accumulate duplicate cards or cascade-delete download state. Media3 players expose full-screen viewing without recreating the playback session.
+The detail screen renders media only. Static `video`, `source`, media links, and `iframe` sources are parsed first. Direct sources use Media3 with the same `Referer`, user agent, and runtime WebView cookie context. Iframe-only sources use a restricted WebView player that accumulates all observed HTTPS media requests and performs a bounded series of delayed DOM probes during the first detail visit, so a second video that becomes ready after the first probe can still be discovered. Query variants of the same resolved media path remain deduplicated, while distinct iframe resolver URLs retain their query identity before resolution. Resolved iframe media keep stable resolver-slot identities; stale probe rows are hidden rather than deleted so repeated detail visits do not accumulate duplicate cards or cascade-delete download state. Media3 players expose full-screen viewing without recreating the playback session.
 
 Downloads are unique WorkManager jobs and write to `MediaStore.Downloads`. Download state and byte progress are persisted in Room so navigation or app background/foreground transitions reattach to the current state. File downloads support pause/resume with HTTP Range when the server returns `206`, plus explicit stop that removes an unfinished MediaStore entry.
 

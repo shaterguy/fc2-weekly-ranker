@@ -38,11 +38,12 @@ import kotlinx.coroutines.withContext
 
 @Composable
 fun DownloadScreen(
-    onPost: (String) -> Unit,
+    onPost: (String, List<String>) -> Unit,
     vm: DownloadViewModel = viewModel(),
 ) {
     val active by vm.activeDownloads.collectAsState()
     val history by vm.completedDownloads.collectAsState()
+    val historyPostIds = remember(history) { history.map { it.postId }.distinct() }
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -61,7 +62,7 @@ fun DownloadScreen(
             Text("다운로드 내역", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         }
         items(history, key = { it.videoId }) { item ->
-            CompletedDownloadCard(item, vm, onPost)
+            CompletedDownloadCard(item, vm) { postId -> onPost(postId, historyPostIds) }
         }
     }
 }

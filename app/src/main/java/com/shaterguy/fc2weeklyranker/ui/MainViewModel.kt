@@ -167,6 +167,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val refreshStartedAt = System.currentTimeMillis()
         loading.value = true
         return try {
+            mutableSearchResults.value.firstOrNull { it.id == postId }?.let { ensureSearchPost(it) }
             repo.loadVideos(postId)
             val current = repo.videos(postId).first()
             VideoSyncResult(

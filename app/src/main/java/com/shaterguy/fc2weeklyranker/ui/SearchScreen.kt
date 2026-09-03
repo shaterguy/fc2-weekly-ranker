@@ -20,22 +20,27 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.shaterguy.fc2weeklyranker.network.RemoteSearchPost
 
 @Composable
-fun SearchScreen(vm: MainViewModel) {
+fun SearchScreen(
+    vm: MainViewModel,
+    onPost: (RemoteSearchPost, List<String>) -> Unit,
+) {
     val results by vm.searchResults.collectAsState()
     val loading by vm.isSearchLoading.collectAsState()
     val message by vm.searchMessage.collectAsState()
-    val uriHandler = LocalUriHandler.current
+    val openingPostId by vm.searchOpeningPostId.collectAsState()
+    val resultIds = remember(results) { results.map { it.id } }
     var query by rememberSaveable { mutableStateOf("") }
     var hasSearched by rememberSaveable { mutableStateOf(false) }
 
@@ -90,12 +95,15 @@ fun SearchScreen(vm: MainViewModel) {
                 Card(
                     Modifier
                         .fillMaxWidth()
-                        .clickable { uriHandler.openUri(post.url) }
+                        .clickable(enabled = openingPostId == null) { onPost(post, resultIds) }
                         .semantics { contentDescription = "검색 결과 게시물: ${post.title}" },
                 ) {
                     Column(Modifier.padding(12.dp)) {
                         Text(post.title, fontWeight = FontWeight.SemiBold)
-                        Text("원본 게시물 열기", style = MaterialTheme.typography.bodySmall)
+                        Text(
+                            if (openingPostId == post.id) "게시물을 여는 중…" else "앱에서 게시물 보기",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
                     }
                 }
             }

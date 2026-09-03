@@ -64,6 +64,7 @@ import com.shaterguy.fc2weeklyranker.media.RestrictedIframePlayer
 import com.shaterguy.fc2weeklyranker.repo.AppRepository
 import com.shaterguy.fc2weeklyranker.ui.DownloadScreen
 import com.shaterguy.fc2weeklyranker.ui.MainViewModel
+import com.shaterguy.fc2weeklyranker.ui.SEARCH_SNAPSHOT_KEY
 import com.shaterguy.fc2weeklyranker.ui.SearchScreen
 import java.time.Instant
 import java.time.ZoneId
@@ -105,6 +106,8 @@ private fun RankerApp(vm: MainViewModel = viewModel()) {
     val showBottom = destinations.any { it.route == route }
     val rankingPosts by vm.posts.collectAsState()
     val rankingPostIds = remember(rankingPosts) { rankingPosts.map { it.id } }
+    val favoritePosts by vm.favorites.collectAsState()
+    val favoritePostIds = remember(favoritePosts) { favoritePosts.map { it.id } }
     var detailPostIds by rememberSaveable { mutableStateOf(arrayListOf<String>()) }
     var detailListRoute by rememberSaveable { mutableStateOf("ranking") }
     val openDetail: (String, String, List<String>) -> Unit = { id, listRoute, postIds ->
@@ -142,12 +145,16 @@ private fun RankerApp(vm: MainViewModel = viewModel()) {
             composable("ranking") {
                 RankingScreen(vm) { id -> openDetail(id, "ranking", rankingPostIds) }
             }
-            composable("search") { SearchScreen(vm) }
+            composable("search") {
+                SearchScreen(vm) { post, postIds ->
+                    vm.openSearchPost(post) { id -> openDetail(id, "search", postIds) }
+                }
+            }
             composable("favorites") {
-                FavoritesScreen(vm) { id -> openDetail(id, "favorites", emptyList()) }
+                FavoritesScreen(vm) { id -> openDetail(id, "favorites", favoritePostIds) }
             }
             composable("downloads") {
-                DownloadScreen(onPost = { id -> openDetail(id, "downloads", emptyList()) })
+                DownloadScreen(onPost = { id, postIds -> openDetail(id, "downloads", postIds) })
             }
             composable("settings") { SettingsScreen(vm) }
             composable(
@@ -319,10 +326,17 @@ private fun VideoDetailScreen(
                 val currentPost = post
                 if (currentPost != null) {
                     Text(currentPost.title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                    Text(
-                        "${formatDate(currentPost.postedAtEpochMillis)} · 댓글 ${currentPost.recommendationCount} · 일평균 ${"%.2f".format(currentPost.dailyRate)}",
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
+                    if (currentPost.snapshotKey == SEARCH_SNAPSHOT_KEY) {
+                        Text(
+                            formatDate(currentPost.postedAtEpochMillis),
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    } else {
+                        Text(
+                            "${formatDate(currentPost.postedAtEpochMillis)} · 댓글 ${currentPost.recommendationCount} · 일평균 ${"%.2f".format(currentPost.dailyRate)}",
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
                 } else {
                     Text("게시물", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
                 }

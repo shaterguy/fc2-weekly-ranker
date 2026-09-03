@@ -3,7 +3,10 @@ package com.shaterguy.fc2weeklyranker.ui
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.room.withTransaction
 import com.shaterguy.fc2weeklyranker.AppGraph
+import com.shaterguy.fc2weeklyranker.data.PostEntity
+import com.shaterguy.fc2weeklyranker.network.RemotePost
 import com.shaterguy.fc2weeklyranker.network.RemoteSearchPost
 import com.shaterguy.fc2weeklyranker.repo.AppRepository
 import kotlinx.coroutines.CancellationException
@@ -14,8 +17,11 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+
+internal const val SEARCH_SNAPSHOT_KEY = "search-cache-v1"
 
 data class VideoSyncResult(
     val refreshStartedAtEpochMillis: Long,
@@ -32,6 +38,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val mutableSearchResults = MutableStateFlow<List<RemoteSearchPost>>(emptyList())
     private val mutableSearchMessage = MutableStateFlow<String?>(null)
     private val searchLoading = MutableStateFlow(false)
+    private val mutableSearchOpeningPostId = MutableStateFlow<String?>(null)
     private var searchJob: Job? = null
     private var searchGeneration = 0L
     private val probeRegistrationJobs = mutableMapOf<String, MutableList<Job>>()
@@ -43,12 +50,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val searchResults = mutableSearchResults.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
     val searchMessage = mutableSearchMessage.stateIn(viewModelScope, SharingStarted.Eagerly, null)
     val isSearchLoading = searchLoading.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    val searchOpeningPostId = mutableSearchOpeningPostId.stateIn(viewModelScope, SharingStarted.Eagerly, null)
     val baseUrl = repo.settings.baseUrl.stateIn(viewModelScope, SharingStarted.Eagerly, "https://01.avsee.is")
     val anchorEpochMillis = combine(repo.settings.anchorEpochMillis, localAnchor) { stored, local -> local ?: stored }
         .filterNotNull()
         .stateIn(viewModelScope, SharingStarted.Eagerly, System.currentTimeMillis())
     val posts = combine(anchorEpochMillis, page) { anchor, index -> anchor to index }
         .flatMapLatest { (anchor, index) -> repo.posts(anchor, index) }
+        .map(::rankingVisiblePosts)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val favorites = repo.favorites().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val visitedPostIds = repo.visitedPostIds().stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
@@ -115,6 +124,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             } finally {
                 if (generation == searchGeneration) searchLoading.value = false
+            }
+        }
+    }
+
+    fun openSearchPost(post: RemoteSearchPost, onReady: (String) -> Unit) {
+        if (mutableSearchOpeningPostId.value != null) return
+        val generation = searchGeneration
+        mutableSearchOpeningPostId.value = post.id
+        viewModelScope.launch {
+            try {
+                ensureSearchPost(post)
+                if (generation == searchGeneration) onReady(post.id)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (generation == searchGeneration) {
+                    mutableSearchMessage.value = "게시물 열기 실패: ${safeMessage(error)}"
+                }
+            } finally {
+                if (mutableSearchOpeningPostId.value == post.id) mutableSearchOpeningPostId.value = null
             }
         }
     }
@@ -193,6 +222,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun clearMessage() { mutableMessage.value = null }
     fun clearSearchMessage() { mutableSearchMessage.value = null }
 
+    private suspend fun ensureSearchPost(post: RemoteSearchPost) {
+        val dao = AppGraph.database.postDao()
+        if (dao.byId(post.id) != null) return
+
+        val detail = searchSource.loadDetail(post.url)
+        check(detail.id == post.id) { "검색 게시물 식별자가 일치하지 않습니다." }
+        val candidate = searchPostEntity(detail, System.currentTimeMillis())
+        AppGraph.database.withTransaction {
+            if (dao.byId(post.id) == null) dao.upsert(listOf(candidate))
+        }
+    }
+
     private suspend fun loadPage(pageIndex: Int): Boolean {
         loading.value = true
         val prefetched = pagePrefetch.consume(pageIndex)
@@ -212,6 +253,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun safeMessage(error: Throwable): String = error.message?.take(100) ?: error::class.java.simpleName
 }
+
+internal fun searchPostEntity(detail: RemotePost, fetchedAtEpochMillis: Long): PostEntity = PostEntity(
+    id = detail.id,
+    url = detail.url,
+    title = detail.title,
+    postedAtEpochMillis = detail.postedAt.toEpochMilli(),
+    recommendationCount = 0,
+    dailyRate = 0.0,
+    snapshotKey = SEARCH_SNAPSHOT_KEY,
+    fetchedAtEpochMillis = fetchedAtEpochMillis,
+)
+
+internal fun rankingVisiblePosts(posts: List<PostEntity>): List<PostEntity> =
+    posts.filterNot { it.snapshotKey == SEARCH_SNAPSHOT_KEY }
 
 internal fun cancelPendingProbeRegistrations(jobs: Collection<Job>?) {
     jobs?.forEach { it.cancel() }

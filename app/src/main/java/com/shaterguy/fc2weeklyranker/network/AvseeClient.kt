@@ -14,7 +14,6 @@ import org.jsoup.nodes.Element
 import java.net.URI
 import java.net.URLDecoder
 import java.net.URLEncoder
-import java.nio.charset.StandardCharsets
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalDate
@@ -209,7 +208,7 @@ class AvseeClient(
 
     internal fun buildSearchUrl(baseUrl: String, query: String, page: Int): String {
         require(page >= 1)
-        val encoded = URLEncoder.encode(query.trim(), StandardCharsets.UTF_8).replace("+", "%20")
+        val encoded = URLEncoder.encode(query.trim(), "UTF-8").replace("+", "%20")
         return "$baseUrl$SEARCH_PATH?sfl=wr_subject%7C%7Cwr_content&stx=$encoded&sop=and&gr_id=&srows=10&onetable=&page=$page"
     }
 
@@ -542,7 +541,7 @@ class AvseeClient(
         listOf("sfl", "stx", "sop", "gr_id", "srows", "onetable").map { key -> decodedQueryParam(url, key).orEmpty() }
 
     private fun decodedQueryParam(url: String, key: String): String? =
-        queryParam(url, key)?.let { value -> runCatching { URLDecoder.decode(value, StandardCharsets.UTF_8) }.getOrDefault(value) }
+        queryParam(url, key)?.let { value -> runCatching { URLDecoder.decode(value, "UTF-8") }.getOrDefault(value) }
 
     private fun queryParam(url: String, key: String): String? = runCatching {
         URI(url).rawQuery.orEmpty().split('&')

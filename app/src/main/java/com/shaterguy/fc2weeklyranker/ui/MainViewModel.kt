@@ -4,7 +4,9 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.shaterguy.fc2weeklyranker.AppGraph
+import com.shaterguy.fc2weeklyranker.network.RemoteSearchPost
 import com.shaterguy.fc2weeklyranker.repo.AppRepository
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -22,16 +24,25 @@ data class VideoSyncResult(
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val repo = AppGraph.repository
+    private val searchSource = AppGraph.sourceClient
     private val page = MutableStateFlow(0)
     private val localAnchor = MutableStateFlow<Long?>(null)
     private val mutableMessage = MutableStateFlow<String?>(null)
     private val loading = MutableStateFlow(false)
+    private val mutableSearchResults = MutableStateFlow<List<RemoteSearchPost>>(emptyList())
+    private val mutableSearchMessage = MutableStateFlow<String?>(null)
+    private val searchLoading = MutableStateFlow(false)
+    private var searchJob: Job? = null
+    private var searchGeneration = 0L
     private val probeRegistrationJobs = mutableMapOf<String, MutableList<Job>>()
     private val pagePrefetch = PagePrefetchCoordinator(viewModelScope, repo::ensurePage)
 
     val pageIndex = page.stateIn(viewModelScope, SharingStarted.Eagerly, 0)
     val message = mutableMessage.stateIn(viewModelScope, SharingStarted.Eagerly, null)
     val isLoading = loading.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    val searchResults = mutableSearchResults.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    val searchMessage = mutableSearchMessage.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+    val isSearchLoading = searchLoading.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     val baseUrl = repo.settings.baseUrl.stateIn(viewModelScope, SharingStarted.Eagerly, "https://01.avsee.is")
     val anchorEpochMillis = combine(repo.settings.anchorEpochMillis, localAnchor) { stored, local -> local ?: stored }
         .filterNotNull()
@@ -74,6 +85,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             page.value = 0
             val success = runOperation { localAnchor.value = repo.manualRefresh() }
             if (success) pagePrefetch.start(1)
+        }
+    }
+
+    fun searchPosts(query: String) {
+        val term = query.trim()
+        val generation = ++searchGeneration
+        searchJob?.cancel()
+        mutableSearchMessage.value = null
+        if (term.isEmpty()) {
+            mutableSearchResults.value = emptyList()
+            searchLoading.value = false
+            return
+        }
+        searchJob = viewModelScope.launch {
+            searchLoading.value = true
+            try {
+                val result = searchSource.searchPosts(repo.settings.baseUrl.first(), term)
+                if (generation == searchGeneration) {
+                    mutableSearchResults.value = result
+                    mutableSearchMessage.value = if (result.isEmpty()) "검색 결과가 없습니다." else null
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (generation == searchGeneration) {
+                    mutableSearchResults.value = emptyList()
+                    mutableSearchMessage.value = "검색 실패: ${safeMessage(error)}"
+                }
+            } finally {
+                if (generation == searchGeneration) searchLoading.value = false
+            }
         }
     }
 
@@ -149,6 +191,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun clearMessage() { mutableMessage.value = null }
+    fun clearSearchMessage() { mutableSearchMessage.value = null }
 
     private suspend fun loadPage(pageIndex: Int): Boolean {
         loading.value = true

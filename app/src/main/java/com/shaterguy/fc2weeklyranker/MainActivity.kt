@@ -64,6 +64,7 @@ import com.shaterguy.fc2weeklyranker.media.RestrictedIframePlayer
 import com.shaterguy.fc2weeklyranker.repo.AppRepository
 import com.shaterguy.fc2weeklyranker.ui.DownloadScreen
 import com.shaterguy.fc2weeklyranker.ui.MainViewModel
+import com.shaterguy.fc2weeklyranker.ui.SearchScreen
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -78,6 +79,7 @@ class MainActivity : ComponentActivity() {
 private data class TopDestination(val route: String, val label: String, val glyph: String)
 private val destinations = listOf(
     TopDestination("ranking", "랭킹", "▦"),
+    TopDestination("search", "검색", "⌕"),
     TopDestination("favorites", "즐겨찾기", "♥"),
     TopDestination("downloads", "다운로드", "↓"),
     TopDestination("settings", "설정", "⚙"),
@@ -140,6 +142,7 @@ private fun RankerApp(vm: MainViewModel = viewModel()) {
             composable("ranking") {
                 RankingScreen(vm) { id -> openDetail(id, "ranking", rankingPostIds) }
             }
+            composable("search") { SearchScreen(vm) }
             composable("favorites") {
                 FavoritesScreen(vm) { id -> openDetail(id, "favorites", emptyList()) }
             }

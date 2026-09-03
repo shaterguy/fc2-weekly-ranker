@@ -1,0 +1,104 @@
+package com.shaterguy.fc2weeklyranker.ui
+
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+
+@Composable
+fun SearchScreen(vm: MainViewModel) {
+    val results by vm.searchResults.collectAsState()
+    val loading by vm.isSearchLoading.collectAsState()
+    val message by vm.searchMessage.collectAsState()
+    val uriHandler = LocalUriHandler.current
+    var query by rememberSaveable { mutableStateOf("") }
+    var hasSearched by rememberSaveable { mutableStateOf(false) }
+
+    Column(
+        Modifier.fillMaxSize().padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Text("FC2 검색", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        Text(
+            "사이트 통합검색 전체 결과에서 FC2 게시물만 모아 중복을 제거합니다.",
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                label = { Text("검색어") },
+                singleLine = true,
+                modifier = Modifier.weight(1f),
+            )
+            Button(
+                onClick = {
+                    hasSearched = true
+                    vm.searchPosts(query)
+                },
+                enabled = query.isNotBlank() && !loading,
+            ) { Text("검색") }
+        }
+
+        if (loading) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(Modifier.padding(8.dp))
+                Text("검색 결과의 모든 페이지를 확인하는 중…")
+            }
+        }
+        if (message != null) {
+            TextButton(onClick = vm::clearSearchMessage) { Text(message!!) }
+        }
+        if (!loading && hasSearched && message == null && results.isEmpty()) {
+            Text("검색 결과가 없습니다.")
+        }
+        if (!loading && results.isNotEmpty()) {
+            Text("FC2 게시물 ${results.size}건", fontWeight = FontWeight.SemiBold)
+        }
+
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            items(results, key = { it.id }) { post ->
+                Card(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable { uriHandler.openUri(post.url) }
+                        .semantics { contentDescription = "검색 결과 게시물: ${post.title}" },
+                ) {
+                    Column(Modifier.padding(12.dp)) {
+                        Text(post.title, fontWeight = FontWeight.SemiBold)
+                        Text("원본 게시물 열기", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+        }
+    }
+}

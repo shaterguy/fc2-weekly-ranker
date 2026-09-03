@@ -3,6 +3,8 @@ package com.shaterguy.fc2weeklyranker.network
 import com.shaterguy.fc2weeklyranker.domain.DateWindow
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -10,6 +12,9 @@ import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URI
+import java.net.URLDecoder
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalDate
@@ -19,6 +24,7 @@ import java.util.Collections
 import java.util.LinkedHashMap
 
 private const val BOARD_PATH = "/bbs/board.php?bo_table=javfc2&sop=and&sst=wr_datetime&sod=desc"
+private const val SEARCH_PATH = "/bbs/search.php"
 private const val UA = "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 Chrome/151 Mobile Safari/537.36"
 private val SEOUL = ZoneId.of("Asia/Seoul")
 private val COUNT_TOKEN = Regex("(?<![A-Za-z0-9])(?:\\d{1,3}(?:,\\d{3})+|\\d+)(?![A-Za-z0-9])")
@@ -26,7 +32,9 @@ private val COUNT_TOKEN = Regex("(?<![A-Za-z0-9])(?:\\d{1,3}(?:,\\d{3})+|\\d+)(?
 data class RemoteMedia(val url: String, val referer: String, val kind: String, val ordinal: Int)
 data class RemotePost(val id: String, val url: String, val title: String, val postedAt: Instant, val recommendationCount: Int, val media: List<RemoteMedia>)
 data class RemoteRankPost(val id: String, val url: String, val title: String, val postedAt: Instant, val commentCount: Int)
+data class RemoteSearchPost(val id: String, val url: String, val title: String)
 internal data class BoardRow(val id: String, val url: String, val title: String, val commentCount: Int)
+internal data class SearchPage(val posts: List<RemoteSearchPost>, val totalPages: Int)
 
 class AvseeClient(
     private val http: OkHttpClient,
@@ -177,6 +185,61 @@ class AvseeClient(
             page += 1
         }
         out.values.toList()
+    }
+
+    suspend fun searchPosts(baseUrl: String, query: String): List<RemoteSearchPost> = withContext(ioDispatcher) {
+        val term = query.trim()
+        require(term.isNotEmpty()) { "검색어를 입력해 주세요." }
+
+        val firstUrl = buildSearchUrl(baseUrl, term, 1)
+        val first = parseSearchPage(fetch(firstUrl), firstUrl)
+        val out = LinkedHashMap<String, RemoteSearchPost>()
+        first.posts.forEach { post -> out.putIfAbsent(post.id, post) }
+
+        var page = 2
+        while (page <= first.totalPages) {
+            currentCoroutineContext().ensureActive()
+            val pageUrl = buildSearchUrl(baseUrl, term, page)
+            val parsed = parseSearchPage(fetch(pageUrl, firstUrl), pageUrl)
+            parsed.posts.forEach { post -> out.putIfAbsent(post.id, post) }
+            page += 1
+        }
+        out.values.toList()
+    }
+
+    internal fun buildSearchUrl(baseUrl: String, query: String, page: Int): String {
+        require(page >= 1)
+        val encoded = URLEncoder.encode(query.trim(), StandardCharsets.UTF_8).replace("+", "%20")
+        return "$baseUrl$SEARCH_PATH?sfl=wr_subject%7C%7Cwr_content&stx=$encoded&sop=and&gr_id=&srows=10&onetable=&page=$page"
+    }
+
+    internal fun parseSearchPage(html: String, pageUrl: String): SearchPage {
+        val doc = Jsoup.parse(html, pageUrl)
+        val posts = LinkedHashMap<String, RemoteSearchPost>()
+        doc.select("#at-main .search-media .media").forEach { row ->
+            val link = row.selectFirst(".media-heading a[href*='bo_table=javfc2'][href*='wr_id=']") ?: return@forEach
+            val url = link.absUrl("href").takeIf(String::isNotBlank) ?: return@forEach
+            if (decodedQueryParam(url, "bo_table") != "javfc2") return@forEach
+            val id = decodedQueryParam(url, "wr_id")?.takeIf(String::isNotBlank) ?: return@forEach
+            val title = link.text().trim().takeIf(String::isNotBlank) ?: "게시물 $id"
+            posts.putIfAbsent(id, RemoteSearchPost(id, url.substringBefore('#'), title))
+        }
+
+        val currentPage = decodedQueryParam(pageUrl, "page")?.toIntOrNull()?.coerceAtLeast(1) ?: 1
+        val signature = searchSignature(pageUrl)
+        val totalPages = doc.select("a[href]")
+            .mapNotNull { link ->
+                val url = link.absUrl("href").takeIf(String::isNotBlank) ?: return@mapNotNull null
+                val uri = runCatching { URI(url) }.getOrNull() ?: return@mapNotNull null
+                if (!uri.path.orEmpty().endsWith(SEARCH_PATH)) return@mapNotNull null
+                if (searchSignature(url) != signature) return@mapNotNull null
+                decodedQueryParam(url, "page")?.toIntOrNull()
+            }
+            .maxOrNull()
+            ?.coerceAtLeast(currentPage)
+            ?: currentPage
+        check(totalPages <= MAX_SEARCH_PAGE) { "검색 페이지 수가 안전 범위를 벗어났습니다: $totalPages" }
+        return SearchPage(posts.values.toList(), totalPages)
     }
 
     internal fun clearCrawlCache() {
@@ -475,6 +538,12 @@ class AvseeClient(
         }
     }
 
+    private fun searchSignature(url: String): List<String> =
+        listOf("sfl", "stx", "sop", "gr_id", "srows", "onetable").map { key -> decodedQueryParam(url, key).orEmpty() }
+
+    private fun decodedQueryParam(url: String, key: String): String? =
+        queryParam(url, key)?.let { value -> runCatching { URLDecoder.decode(value, StandardCharsets.UTF_8) }.getOrDefault(value) }
+
     private fun queryParam(url: String, key: String): String? = runCatching {
         URI(url).rawQuery.orEmpty().split('&')
             .mapNotNull { item -> item.split('=', limit = 2).takeIf { it.size == 2 } }
@@ -484,6 +553,7 @@ class AvseeClient(
     companion object {
         const val USER_AGENT: String = UA
         private const val MAX_BOARD_PAGE = 1_000_000
+        private const val MAX_SEARCH_PAGE = 1_000_000
         private const val MAX_CRAWL_BOARD_REQUESTS = 2_048
         private const val MAX_CRAWL_CACHE_ENTRIES = 256
     }

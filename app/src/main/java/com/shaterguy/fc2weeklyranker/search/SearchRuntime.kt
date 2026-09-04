@@ -197,7 +197,7 @@ internal object SearchRunner {
         var page = session.nextPage.coerceAtLeast(1)
         var totalPages = session.totalPages.coerceAtLeast(0)
 
-        return try {
+        try {
             while (true) {
                 currentCoroutineContext().ensureActive()
                 val parsed = client.searchPage(request.baseUrl, request.query, page)
@@ -225,15 +225,14 @@ internal object SearchRunner {
             throw error
         } catch (error: Throwable) {
             if (isTransientNetworkError(error)) {
-                SearchRunResult.RETRY
-            } else {
-                dao.fail(
-                    request.token,
-                    error.message?.take(160) ?: error::class.java.simpleName,
-                    System.currentTimeMillis(),
-                )
-                SearchRunResult.FAILED
+                return SearchRunResult.RETRY
             }
+            dao.fail(
+                request.token,
+                error.message?.take(160) ?: error::class.java.simpleName,
+                System.currentTimeMillis(),
+            )
+            return SearchRunResult.FAILED
         }
     }
 }

@@ -83,8 +83,28 @@ internal data class SearchScheduleResult(
 internal enum class SearchSchedulerKind { WORK_MANAGER, UIDT }
 
 internal object SearchRuntimePolicy {
+    private const val MAX_TOTAL_PAGES = 500
+    private val MAX_RUNTIME_NANOS = TimeUnit.MINUTES.toNanos(10)
+
     fun schedulerKind(sdkInt: Int): SearchSchedulerKind =
         if (sdkInt >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) SearchSchedulerKind.UIDT else SearchSchedulerKind.WORK_MANAGER
+
+    fun validateTotalPages(totalPages: Int) {
+        check(totalPages <= MAX_TOTAL_PAGES) {
+            "검색 범위가 너무 큽니다: ${totalPages}페이지. 검색어를 더 구체적으로 입력해 주세요."
+        }
+    }
+
+    fun ensureWithinRuntime(startedAtNanos: Long, nowNanos: Long) {
+        check(nowNanos - startedAtNanos < MAX_RUNTIME_NANOS) {
+            "검색 시간이 10분을 초과했습니다. 검색어를 더 구체적으로 입력한 뒤 다시 시도해 주세요."
+        }
+    }
+}
+
+internal object SearchRecoveryPolicy {
+    fun shouldInterrupt(status: String, schedulerActive: Boolean?): Boolean =
+        status == SearchStatus.RUNNING && schedulerActive == false
 }
 
 internal class SearchScheduler(private val context: Context) {
@@ -110,6 +130,38 @@ internal class SearchScheduler(private val context: Context) {
         }
     }
 
+    @SuppressLint("NewApi")
+    fun cancel(token: String) {
+        val workManager = WorkManager.getInstance(context)
+        workManager.cancelAllWorkByTag(workTag(token))
+        workManager.cancelUniqueWork(WORK_NAME)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            runCatching {
+                val scheduler = uidtScheduler()
+                if (scheduler.getPendingJob(JOB_ID)?.extras?.getString(SearchRequest.KEY_TOKEN) == token) {
+                    scheduler.cancel(JOB_ID)
+                }
+            }
+        }
+    }
+
+    @SuppressLint("NewApi")
+    suspend fun isActive(token: String): Boolean? = withContext(Dispatchers.IO) {
+        when (SearchRuntimePolicy.schedulerKind(Build.VERSION.SDK_INT)) {
+            SearchSchedulerKind.WORK_MANAGER -> runCatching {
+                WorkManager.getInstance(context)
+                    .getWorkInfosByTag(workTag(token))
+                    .get()
+                    .any { !it.state.isFinished }
+            }.getOrNull()
+            SearchSchedulerKind.UIDT -> runCatching {
+                uidtScheduler().getPendingJob(JOB_ID)
+                    ?.extras
+                    ?.getString(SearchRequest.KEY_TOKEN) == token
+            }.getOrNull()
+        }
+    }
+
     private fun scheduleWorker(request: SearchRequest): Boolean = runCatching {
         val work = OneTimeWorkRequestBuilder<SearchWorker>()
             .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
@@ -120,6 +172,7 @@ internal class SearchScheduler(private val context: Context) {
                     SearchRequest.KEY_BASE_URL to request.baseUrl,
                 ),
             )
+            .addTag(workTag(request.token))
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 10L, TimeUnit.SECONDS)
             .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
             .build()
@@ -149,6 +202,9 @@ internal class SearchScheduler(private val context: Context) {
         private const val JOB_ID = 0x53454152
         private const val UIDT_NAMESPACE = "search"
         private const val WORK_NAME = "fc2-background-search"
+        private const val WORK_TAG_PREFIX = "fc2-search-token:"
+
+        internal fun workTag(token: String): String = "$WORK_TAG_PREFIX$token"
     }
 }
 
@@ -187,20 +243,23 @@ internal object SearchNotifications {
     const val notificationId: Int = NOTIFICATION_ID
 }
 
-internal enum class SearchRunResult { COMPLETED, RETRY, FAILED, STALE }
+internal enum class SearchRunResult { COMPLETED, FAILED, STALE }
 
 internal object SearchRunner {
     suspend fun run(request: SearchRequest, network: Network? = null): SearchRunResult {
         val dao = AppGraph.searchDatabase.searchDao()
         var session = dao.prepareSession(request)
         val client = BackgroundSearchClient(AppGraph.httpClient, AppGraph.sourceClient, network)
+        val startedAtNanos = System.nanoTime()
         var page = session.nextPage.coerceAtLeast(1)
         var totalPages = session.totalPages.coerceAtLeast(0)
 
         try {
             while (true) {
                 currentCoroutineContext().ensureActive()
+                SearchRuntimePolicy.ensureWithinRuntime(startedAtNanos, System.nanoTime())
                 val parsed = client.searchPage(request.baseUrl, request.query, page)
+                SearchRuntimePolicy.validateTotalPages(parsed.totalPages)
                 totalPages = maxOf(totalPages, parsed.totalPages, page)
                 val stored = dao.storePage(
                     token = request.token,
@@ -224,14 +283,12 @@ internal object SearchRunner {
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
-            if (isTransientNetworkError(error)) {
-                return SearchRunResult.RETRY
+            val message = if (isTransientNetworkError(error)) {
+                "네트워크 연결이 불안정해 검색을 종료했습니다. 다시 시도해 주세요."
+            } else {
+                error.message?.take(160) ?: error::class.java.simpleName
             }
-            dao.fail(
-                request.token,
-                error.message?.take(160) ?: error::class.java.simpleName,
-                System.currentTimeMillis(),
-            )
+            dao.fail(request.token, message, System.currentTimeMillis())
             return SearchRunResult.FAILED
         }
     }
@@ -292,7 +349,6 @@ internal class SearchWorker(
         }
         return when (SearchRunner.run(request)) {
             SearchRunResult.COMPLETED, SearchRunResult.STALE -> Result.success()
-            SearchRunResult.RETRY -> Result.retry()
             SearchRunResult.FAILED -> Result.failure()
         }
     }
@@ -348,12 +404,12 @@ class SearchJobService : JobService() {
         currentJob?.cancel()
         val generation = executionGate.begin(request.token)
         val task = scope.launch(start = CoroutineStart.LAZY) {
-            val result = SearchRunner.run(request, params.network)
+            SearchRunner.run(request, params.network)
             withContext(Dispatchers.Main.immediate) {
                 if (executionGate.isCurrent(request.token, generation)) {
                     currentJob = null
                     executionGate.invalidate()
-                    jobFinished(params, result == SearchRunResult.RETRY)
+                    jobFinished(params, false)
                 }
             }
         }

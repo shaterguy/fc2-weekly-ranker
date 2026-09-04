@@ -17,6 +17,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -38,11 +39,20 @@ fun SearchScreen(
 ) {
     val results by vm.searchResults.collectAsState()
     val loading by vm.isSearchLoading.collectAsState()
+    val cancelling by vm.isSearchCancelling.collectAsState()
+    val progress by vm.searchProgress.collectAsState()
     val message by vm.searchMessage.collectAsState()
     val openingPostId by vm.searchOpeningPostId.collectAsState()
     val resultIds = remember(results) { results.map { it.id } }
     var query by rememberSaveable { mutableStateOf("") }
     var hasSearched by rememberSaveable { mutableStateOf(false) }
+
+    LaunchedEffect(progress?.query) {
+        progress?.query?.let { restored ->
+            if (query.isBlank() || loading) query = restored
+            hasSearched = true
+        }
+    }
 
     Column(
         Modifier.fillMaxSize().padding(16.dp),
@@ -70,14 +80,32 @@ fun SearchScreen(
                     hasSearched = true
                     vm.searchPosts(query)
                 },
-                enabled = query.isNotBlank() && !loading,
+                enabled = query.isNotBlank() && !loading && !cancelling,
             ) { Text("검색") }
         }
 
         if (loading) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
                 CircularProgressIndicator(Modifier.padding(8.dp))
-                Text("검색 결과의 모든 페이지를 확인하는 중…")
+                Column(Modifier.weight(1f)) {
+                    Text("검색 중: ${progress?.query ?: query}")
+                    val current = progress
+                    if (current != null && current.totalPages > 0) {
+                        Text(
+                            "${current.completedPages.coerceAtMost(current.totalPages)} / ${current.totalPages}페이지 확인",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    } else {
+                        Text("검색 범위를 확인하는 중…", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+                TextButton(onClick = vm::cancelSearch, enabled = !cancelling) {
+                    Text(if (cancelling) "중지 중…" else "중지")
+                }
             }
         }
         if (message != null) {

@@ -12,6 +12,7 @@ import org.junit.Assert.fail
 import org.junit.Test
 import java.net.SocketException
 import java.security.cert.CertificateException
+import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLException
 
 class SearchRuntimeTest {
@@ -20,6 +21,39 @@ class SearchRuntimeTest {
         assertEquals(SearchSchedulerKind.WORK_MANAGER, SearchRuntimePolicy.schedulerKind(33))
         assertEquals(SearchSchedulerKind.UIDT, SearchRuntimePolicy.schedulerKind(34))
         assertEquals(SearchSchedulerKind.UIDT, SearchRuntimePolicy.schedulerKind(36))
+    }
+
+    @Test
+    fun `large global searches and excessive runtime fail explicitly`() {
+        SearchRuntimePolicy.validateTotalPages(500)
+        try {
+            SearchRuntimePolicy.validateTotalPages(501)
+            fail("expected global page bound failure")
+        } catch (actual: IllegalStateException) {
+            assertTrue(actual.message.orEmpty().contains("검색 범위가 너무 큽니다"))
+        }
+
+        SearchRuntimePolicy.ensureWithinRuntime(0L, TimeUnit.MINUTES.toNanos(9))
+        try {
+            SearchRuntimePolicy.ensureWithinRuntime(0L, TimeUnit.MINUTES.toNanos(10))
+            fail("expected runtime bound failure")
+        } catch (actual: IllegalStateException) {
+            assertTrue(actual.message.orEmpty().contains("10분"))
+        }
+    }
+
+    @Test
+    fun `stale running session is interrupted only when scheduler absence is confirmed`() {
+        assertTrue(SearchRecoveryPolicy.shouldInterrupt(SearchStatus.RUNNING, false))
+        assertFalse(SearchRecoveryPolicy.shouldInterrupt(SearchStatus.RUNNING, true))
+        assertFalse(SearchRecoveryPolicy.shouldInterrupt(SearchStatus.RUNNING, null))
+        assertFalse(SearchRecoveryPolicy.shouldInterrupt(SearchStatus.COMPLETED, false))
+    }
+
+    @Test
+    fun `work manager search tags are token specific`() {
+        assertEquals("fc2-search-token:alpha", SearchScheduler.workTag("alpha"))
+        assertEquals("fc2-search-token:beta", SearchScheduler.workTag("beta"))
     }
 
     @Test

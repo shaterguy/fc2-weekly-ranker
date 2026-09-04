@@ -10,6 +10,7 @@ import com.shaterguy.fc2weeklyranker.network.RemotePost
 import com.shaterguy.fc2weeklyranker.network.RemoteSearchPost
 import com.shaterguy.fc2weeklyranker.network.isTransientNetworkError
 import com.shaterguy.fc2weeklyranker.repo.AppRepository
+import com.shaterguy.fc2weeklyranker.search.SearchRecoveryPolicy
 import com.shaterguy.fc2weeklyranker.search.SearchStatus
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -29,6 +30,12 @@ internal const val SEARCH_SNAPSHOT_KEY = "search-cache-v1"
 data class VideoSyncResult(
     val refreshStartedAtEpochMillis: Long,
     val hasActiveMedia: Boolean,
+)
+
+data class SearchProgress(
+    val query: String,
+    val completedPages: Int,
+    val totalPages: Int,
 )
 
 internal sealed interface RetryIntent {
@@ -108,6 +115,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val mutableSearchResults = MutableStateFlow<List<RemoteSearchPost>>(emptyList())
     private val mutableSearchMessage = MutableStateFlow<String?>(null)
     private val searchLoading = MutableStateFlow(false)
+    private val searchCancelling = MutableStateFlow(false)
+    private val mutableSearchProgress = MutableStateFlow<SearchProgress?>(null)
     private val mutableSearchOpeningPostId = MutableStateFlow<String?>(null)
     private var currentSearchToken: String? = null
     private val retryCoordinator = ForegroundRetryCoordinator()
@@ -122,6 +131,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val searchResults = mutableSearchResults.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
     val searchMessage = mutableSearchMessage.stateIn(viewModelScope, SharingStarted.Eagerly, null)
     val isSearchLoading = searchLoading.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    val isSearchCancelling = searchCancelling.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    val searchProgress = mutableSearchProgress.stateIn(viewModelScope, SharingStarted.Eagerly, null)
     val searchOpeningPostId = mutableSearchOpeningPostId.stateIn(viewModelScope, SharingStarted.Eagerly, null)
     val baseUrl = repo.settings.baseUrl.stateIn(viewModelScope, SharingStarted.Eagerly, "https://01.avsee.is")
     val anchorEpochMillis = combine(repo.settings.anchorEpochMillis, localAnchor) { stored, local -> local ?: stored }
@@ -143,9 +154,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     currentSearchToken = session?.token
                     mutableSearchResults.value = results.map { it.toRemote() }
                     searchLoading.value = session?.status == SearchStatus.RUNNING
+                    if (session?.status != SearchStatus.RUNNING) searchCancelling.value = false
+                    mutableSearchProgress.value = session?.let {
+                        SearchProgress(
+                            query = it.query,
+                            completedPages = (it.nextPage - 1).coerceAtLeast(0),
+                            totalPages = it.totalPages.coerceAtLeast(0),
+                        )
+                    }
                     mutableSearchMessage.value = when {
                         session?.status == SearchStatus.FAILED ->
                             "검색 실패: ${session.errorMessage ?: "알 수 없는 오류"}"
+                        session?.status == SearchStatus.CANCELLED ->
+                            session.errorMessage ?: "검색을 중지했습니다."
+                        session?.status == SearchStatus.INTERRUPTED ->
+                            session.errorMessage ?: "이전 검색 작업을 종료했습니다. 새 검색을 시작할 수 있습니다."
                         session?.status == SearchStatus.COMPLETED && results.isEmpty() ->
                             "검색 결과가 없습니다."
                         else -> null
@@ -162,6 +185,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun onAppForegrounded() {
         retryCoordinator.onForeground()?.let(::retry)
+        reconcileSearchSession()
     }
 
     fun onAppBackgrounded() {
@@ -241,12 +265,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             searchLoading.value = false
             return
         }
+        if (searchCancelling.value) return
 
         uiOperations.next()
         loading.value = false
         mutableMessage.value = null
         mutableSearchResults.value = emptyList()
         mutableSearchMessage.value = null
+        mutableSearchProgress.value = SearchProgress(term, 0, 0)
         searchLoading.value = true
 
         val schedule = AppGraph.searchScheduler.start(term, baseUrl.value)
@@ -263,6 +289,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     "백그라운드 검색 작업을 시작하지 못했습니다.",
                     System.currentTimeMillis(),
                 )
+            }
+        }
+    }
+
+    fun cancelSearch() {
+        val token = currentSearchToken ?: return
+        if (!searchLoading.value || searchCancelling.value) return
+        searchCancelling.value = true
+        viewModelScope.launch {
+            try {
+                searchDao.cancel(token, System.currentTimeMillis())
+            } finally {
+                AppGraph.searchScheduler.cancel(token)
+                searchCancelling.value = false
+            }
+        }
+    }
+
+    private fun reconcileSearchSession() {
+        viewModelScope.launch {
+            val session = searchDao.currentSession() ?: return@launch
+            if (session.status != SearchStatus.RUNNING) return@launch
+            val active = AppGraph.searchScheduler.isActive(session.token)
+            if (SearchRecoveryPolicy.shouldInterrupt(session.status, active)) {
+                AppGraph.searchScheduler.cancelActive()
+                searchDao.interrupt(session.token, System.currentTimeMillis())
             }
         }
     }

@@ -18,6 +18,8 @@ internal object SearchStatus {
     const val RUNNING = "RUNNING"
     const val COMPLETED = "COMPLETED"
     const val FAILED = "FAILED"
+    const val CANCELLED = "CANCELLED"
+    const val INTERRUPTED = "INTERRUPTED"
 }
 
 @Entity(tableName = "search_session")
@@ -107,6 +109,31 @@ internal abstract class SearchDao {
         """,
     )
     abstract suspend fun fail(token: String, message: String, updatedAt: Long): Int
+
+    @Query(
+        """
+        UPDATE search_session
+        SET status = :status, errorMessage = :message, updatedAtEpochMillis = :updatedAt
+        WHERE slot = 1 AND token = :token AND status = 'RUNNING'
+        """,
+    )
+    protected abstract suspend fun finishRunning(
+        token: String,
+        status: String,
+        message: String,
+        updatedAt: Long,
+    ): Int
+
+    suspend fun cancel(token: String, updatedAt: Long): Int =
+        finishRunning(token, SearchStatus.CANCELLED, "검색을 중지했습니다.", updatedAt)
+
+    suspend fun interrupt(token: String, updatedAt: Long): Int =
+        finishRunning(
+            token,
+            SearchStatus.INTERRUPTED,
+            "이전 검색 작업이 더 이상 실행 중이 아니어서 종료했습니다.",
+            updatedAt,
+        )
 
     @Transaction
     open suspend fun prepareSession(request: SearchRequest): SearchSessionEntity {

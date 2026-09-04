@@ -4,29 +4,18 @@ import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.app.job.JobInfo
 import android.app.job.JobParameters
 import android.app.job.JobScheduler
 import android.app.job.JobService
-import android.content.ComponentName
 import android.content.Context
 import android.content.pm.ServiceInfo
 import android.net.Network
-import android.net.NetworkCapabilities
-import android.net.NetworkRequest
 import android.os.Build
 import android.os.PersistableBundle
-import androidx.work.BackoffPolicy
-import androidx.work.Constraints
 import androidx.work.CoroutineWorker
-import androidx.work.ExistingWorkPolicy
 import androidx.work.ForegroundInfo
-import androidx.work.NetworkType
-import androidx.work.OneTimeWorkRequestBuilder
-import androidx.work.OutOfQuotaPolicy
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
-import androidx.work.workDataOf
 import com.shaterguy.fc2weeklyranker.AppGraph
 import com.shaterguy.fc2weeklyranker.network.AvseeClient
 import com.shaterguy.fc2weeklyranker.network.SearchPage
@@ -80,14 +69,9 @@ internal data class SearchScheduleResult(
     val scheduled: Boolean,
 )
 
-internal enum class SearchSchedulerKind { WORK_MANAGER, UIDT }
-
 internal object SearchRuntimePolicy {
     private const val MAX_TOTAL_PAGES = 500
     private val MAX_RUNTIME_NANOS = TimeUnit.MINUTES.toNanos(10)
-
-    fun schedulerKind(sdkInt: Int): SearchSchedulerKind =
-        if (sdkInt >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) SearchSchedulerKind.UIDT else SearchSchedulerKind.WORK_MANAGER
 
     fun validateTotalPages(totalPages: Int) {
         check(totalPages <= MAX_TOTAL_PAGES) {
@@ -107,7 +91,59 @@ internal object SearchRecoveryPolicy {
         status == SearchStatus.RUNNING && schedulerActive == false
 }
 
+internal class DirectSearchExecution(
+    private val scope: CoroutineScope,
+    private val runner: suspend (SearchRequest) -> SearchRunResult,
+) {
+    private val lock = Any()
+    private val executionGate = SearchExecutionGate()
+    private var currentJob: Job? = null
+
+    fun start(request: SearchRequest): Boolean = synchronized(lock) {
+        cancelCurrentLocked()
+        val generation = executionGate.begin(request.token)
+        val task = scope.launch(start = CoroutineStart.LAZY) {
+            runner(request)
+        }
+        currentJob = task
+        task.invokeOnCompletion {
+            synchronized(lock) {
+                if (currentJob === task && executionGate.isCurrent(request.token, generation)) {
+                    currentJob = null
+                    executionGate.invalidate()
+                }
+            }
+        }
+        task.start().also { started ->
+            if (!started) cancelCurrentLocked()
+        }
+    }
+
+    fun cancelActive() = synchronized(lock) {
+        cancelCurrentLocked()
+    }
+
+    fun cancel(token: String) = synchronized(lock) {
+        if (executionGate.token == token) cancelCurrentLocked()
+    }
+
+    fun isActive(token: String): Boolean = synchronized(lock) {
+        executionGate.token == token && currentJob?.isActive == true
+    }
+
+    private fun cancelCurrentLocked() {
+        currentJob?.cancel()
+        currentJob = null
+        executionGate.invalidate()
+    }
+}
+
 internal class SearchScheduler(private val context: Context) {
+    private val execution = DirectSearchExecution(
+        scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+        runner = { request -> SearchRunner.run(request) },
+    )
+
     fun start(query: String, baseUrl: String): SearchScheduleResult {
         val request = SearchRequest(
             token = UUID.randomUUID().toString(),
@@ -116,25 +152,22 @@ internal class SearchScheduler(private val context: Context) {
         )
         require(request.query.isNotEmpty())
         cancelActive()
-        val scheduled = when (SearchRuntimePolicy.schedulerKind(Build.VERSION.SDK_INT)) {
-            SearchSchedulerKind.UIDT -> scheduleUidt(request)
-            SearchSchedulerKind.WORK_MANAGER -> scheduleWorker(request)
-        }
-        return SearchScheduleResult(request, scheduled)
+        return SearchScheduleResult(request, execution.start(request))
     }
 
     fun cancelActive() {
-        WorkManager.getInstance(context).cancelUniqueWork(WORK_NAME)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            runCatching { uidtScheduler().cancel(JOB_ID) }
-        }
+        execution.cancelActive()
+        cancelLegacyJobs()
     }
 
     @SuppressLint("NewApi")
     fun cancel(token: String) {
-        val workManager = WorkManager.getInstance(context)
-        workManager.cancelAllWorkByTag(workTag(token))
-        workManager.cancelUniqueWork(WORK_NAME)
+        execution.cancel(token)
+        runCatching {
+            val workManager = WorkManager.getInstance(context)
+            workManager.cancelAllWorkByTag(workTag(token))
+            workManager.cancelUniqueWork(WORK_NAME)
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             runCatching {
                 val scheduler = uidtScheduler()
@@ -145,54 +178,14 @@ internal class SearchScheduler(private val context: Context) {
         }
     }
 
-    @SuppressLint("NewApi")
-    suspend fun isActive(token: String): Boolean? = withContext(Dispatchers.IO) {
-        when (SearchRuntimePolicy.schedulerKind(Build.VERSION.SDK_INT)) {
-            SearchSchedulerKind.WORK_MANAGER -> runCatching {
-                WorkManager.getInstance(context)
-                    .getWorkInfosByTag(workTag(token))
-                    .get()
-                    .any { !it.state.isFinished }
-            }.getOrNull()
-            SearchSchedulerKind.UIDT -> runCatching {
-                uidtScheduler().getPendingJob(JOB_ID)
-                    ?.extras
-                    ?.getString(SearchRequest.KEY_TOKEN) == token
-            }.getOrNull()
+    suspend fun isActive(token: String): Boolean = execution.isActive(token)
+
+    private fun cancelLegacyJobs() {
+        runCatching { WorkManager.getInstance(context).cancelUniqueWork(WORK_NAME) }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            runCatching { uidtScheduler().cancel(JOB_ID) }
         }
     }
-
-    private fun scheduleWorker(request: SearchRequest): Boolean = runCatching {
-        val work = OneTimeWorkRequestBuilder<SearchWorker>()
-            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
-            .setInputData(
-                workDataOf(
-                    SearchRequest.KEY_TOKEN to request.token,
-                    SearchRequest.KEY_QUERY to request.query,
-                    SearchRequest.KEY_BASE_URL to request.baseUrl,
-                ),
-            )
-            .addTag(workTag(request.token))
-            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 10L, TimeUnit.SECONDS)
-            .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
-            .build()
-        WorkManager.getInstance(context).enqueueUniqueWork(WORK_NAME, ExistingWorkPolicy.REPLACE, work)
-        true
-    }.getOrDefault(false)
-
-    @SuppressLint("NewApi")
-    private fun scheduleUidt(request: SearchRequest): Boolean = runCatching {
-        val network = NetworkRequest.Builder()
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            .build()
-        val info = JobInfo.Builder(JOB_ID, ComponentName(context, SearchJobService::class.java))
-            .setExtras(request.toPersistableBundle())
-            .setRequiredNetwork(network)
-            .setUserInitiated(true)
-            .setBackoffCriteria(30_000L, JobInfo.BACKOFF_POLICY_EXPONENTIAL)
-            .build()
-        uidtScheduler().schedule(info) == JobScheduler.RESULT_SUCCESS
-    }.getOrDefault(false)
 
     @SuppressLint("NewApi")
     private fun uidtScheduler(): JobScheduler =

@@ -72,6 +72,16 @@ class SearchParserTest {
     }
 
     @Test
+    fun `empty global search is a normal completed first page`() {
+        val pageUrl = "https://example.test/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=no-result&sop=and&gr_id=&srows=1000&onetable=&page=1"
+
+        val parsed = client.parseSearchPage("<div id='at-main'></div>", pageUrl)
+
+        assertEquals(1, parsed.totalPages)
+        assertTrue(parsed.posts.isEmpty())
+    }
+
+    @Test
     fun `uses current page when pagination has no later matching link`() {
         val pageUrl = "https://example.test/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=needle&sop=and&gr_id=&srows=1000&onetable=&page=4"
         val html = "<div id='at-main'></div><a href='/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=other&sop=and&gr_id=&srows=1000&onetable=&page=100'>other</a>"

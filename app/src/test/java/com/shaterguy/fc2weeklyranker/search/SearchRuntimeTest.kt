@@ -3,6 +3,9 @@ package com.shaterguy.fc2weeklyranker.search
 import com.shaterguy.fc2weeklyranker.network.isTransientNetworkError
 import com.shaterguy.fc2weeklyranker.network.retryTransientGet
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -17,10 +20,68 @@ import javax.net.ssl.SSLException
 
 class SearchRuntimeTest {
     @Test
-    fun `android 14 and newer use uidt while older versions use work manager`() {
-        assertEquals(SearchSchedulerKind.WORK_MANAGER, SearchRuntimePolicy.schedulerKind(33))
-        assertEquals(SearchSchedulerKind.UIDT, SearchRuntimePolicy.schedulerKind(34))
-        assertEquals(SearchSchedulerKind.UIDT, SearchRuntimePolicy.schedulerKind(36))
+    fun `direct search execution invokes runner immediately and tracks activity`() = runTest {
+        val started = CompletableDeferred<SearchRequest>()
+        val release = CompletableDeferred<Unit>()
+        val execution = DirectSearchExecution(this) { request ->
+            started.complete(request)
+            release.await()
+            SearchRunResult.COMPLETED
+        }
+        val request = SearchRequest("alpha", "needle", "https://example.test")
+
+        assertTrue(execution.start(request))
+        runCurrent()
+
+        assertSame(request, started.await())
+        assertTrue(execution.isActive("alpha"))
+        release.complete(Unit)
+        runCurrent()
+        assertFalse(execution.isActive("alpha"))
+    }
+
+    @Test
+    fun `replacement cancels stale direct job without clearing the new token`() = runTest {
+        val firstStarted = CompletableDeferred<Unit>()
+        val firstCancelled = CompletableDeferred<Unit>()
+        val secondStarted = CompletableDeferred<Unit>()
+        val secondCancelled = CompletableDeferred<Unit>()
+        val execution = DirectSearchExecution(this) { request ->
+            if (request.token == "first") {
+                firstStarted.complete(Unit)
+                try {
+                    awaitCancellation()
+                } finally {
+                    firstCancelled.complete(Unit)
+                }
+            } else {
+                secondStarted.complete(Unit)
+                try {
+                    awaitCancellation()
+                } finally {
+                    secondCancelled.complete(Unit)
+                }
+            }
+        }
+
+        assertTrue(execution.start(SearchRequest("first", "one", "https://example.test")))
+        runCurrent()
+        firstStarted.await()
+
+        assertTrue(execution.start(SearchRequest("second", "two", "https://example.test")))
+        runCurrent()
+        firstCancelled.await()
+        secondStarted.await()
+
+        assertFalse(execution.isActive("first"))
+        assertTrue(execution.isActive("second"))
+        execution.cancel("first")
+        assertTrue(execution.isActive("second"))
+
+        execution.cancel("second")
+        runCurrent()
+        secondCancelled.await()
+        assertFalse(execution.isActive("second"))
     }
 
     @Test

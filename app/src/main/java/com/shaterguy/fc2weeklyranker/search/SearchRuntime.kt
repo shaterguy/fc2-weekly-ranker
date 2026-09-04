@@ -29,6 +29,8 @@ import androidx.work.workDataOf
 import com.shaterguy.fc2weeklyranker.AppGraph
 import com.shaterguy.fc2weeklyranker.network.AvseeClient
 import com.shaterguy.fc2weeklyranker.network.SearchPage
+import com.shaterguy.fc2weeklyranker.network.isTransientNetworkError
+import com.shaterguy.fc2weeklyranker.network.retryTransientGet
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -43,15 +45,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import java.net.ProtocolException
-import java.net.SocketException
-import java.net.UnknownHostException
-import java.security.cert.CertificateException
-import java.util.Collections
-import java.util.IdentityHashMap
 import java.util.UUID
 import java.util.concurrent.TimeUnit
-import javax.net.ssl.SSLException
 
 internal data class SearchRequest(
     val token: String,
@@ -227,7 +222,7 @@ internal object SearchRunner {
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
-            if (isSearchTransientNetworkError(error)) {
+            if (isTransientNetworkError(error)) {
                 SearchRunResult.RETRY
             } else {
                 dao.fail(
@@ -257,51 +252,13 @@ internal class BackgroundSearchClient(
             .header("Accept-Language", "ko-KR,ko;q=0.9,en;q=0.7")
             .apply { if (page > 1) header("Referer", firstUrl) }
             .build()
-        val html = retrySearchGet(sleep = retrySleep) {
+        val html = retryTransientGet(sleep = retrySleep) {
             http.newCall(request).execute().use { response ->
                 check(response.isSuccessful) { "HTTP_${response.code}" }
                 response.body.string()
             }
         }
         parser.parseSearchPage(html, pageUrl)
-    }
-}
-
-internal fun isSearchTransientNetworkError(error: Throwable): Boolean {
-    val seen = Collections.newSetFromMap(IdentityHashMap<Throwable, Boolean>())
-    var current: Throwable? = error
-    var transientFound = false
-    while (current != null && seen.add(current)) {
-        if (
-            current is CancellationException ||
-            current is SSLException ||
-            current is ProtocolException ||
-            current is CertificateException
-        ) {
-            return false
-        }
-        if (current is SocketException || current is UnknownHostException) transientFound = true
-        current = current.cause
-    }
-    return transientFound
-}
-
-internal suspend fun <T> retrySearchGet(
-    delaysMillis: List<Long> = listOf(250L, 750L),
-    sleep: suspend (Long) -> Unit = { delay(it) },
-    request: () -> T,
-): T {
-    var retryIndex = 0
-    while (true) {
-        try {
-            return request()
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: Throwable) {
-            if (!isSearchTransientNetworkError(error) || retryIndex >= delaysMillis.size) throw error
-            sleep(delaysMillis[retryIndex])
-            retryIndex += 1
-        }
     }
 }
 

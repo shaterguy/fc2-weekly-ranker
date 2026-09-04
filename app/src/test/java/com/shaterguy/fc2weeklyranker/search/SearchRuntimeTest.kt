@@ -1,5 +1,7 @@
 package com.shaterguy.fc2weeklyranker.search
 
+import com.shaterguy.fc2weeklyranker.network.isTransientNetworkError
+import com.shaterguy.fc2weeklyranker.network.retryTransientGet
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -23,26 +25,26 @@ class SearchRuntimeTest {
     @Test
     fun `software caused connection abort is transient`() {
         val abort = SocketException("Software caused connection abort")
-        assertTrue(isSearchTransientNetworkError(abort))
-        assertTrue(isSearchTransientNetworkError(IllegalStateException("wrapped", abort)))
+        assertTrue(isTransientNetworkError(abort))
+        assertTrue(isTransientNetworkError(IllegalStateException("wrapped", abort)))
     }
 
     @Test
-    fun `tls certificate and cancellation failures are never treated as transient`() {
+    fun `tls certificate and cancellation failures still override socket abort`() {
         val ssl = SSLException("tls").apply { initCause(SocketException("abort")) }
         val certificate = CertificateException("certificate", SocketException("abort"))
         val cancellation = CancellationException("cancel").apply { initCause(SocketException("abort")) }
 
-        assertFalse(isSearchTransientNetworkError(ssl))
-        assertFalse(isSearchTransientNetworkError(certificate))
-        assertFalse(isSearchTransientNetworkError(cancellation))
+        assertFalse(isTransientNetworkError(ssl))
+        assertFalse(isTransientNetworkError(certificate))
+        assertFalse(isTransientNetworkError(cancellation))
     }
 
     @Test
     fun `search get retries transient abort twice and preserves cancellation`() = runTest {
         var attempts = 0
         val sleeps = mutableListOf<Long>()
-        val value = retrySearchGet(
+        val value = retryTransientGet(
             delaysMillis = listOf(10L, 20L),
             sleep = { sleeps += it },
         ) {
@@ -57,7 +59,7 @@ class SearchRuntimeTest {
 
         val cancellation = CancellationException("cancel")
         try {
-            retrySearchGet(delaysMillis = listOf(1L), sleep = { _ -> }) { throw cancellation }
+            retryTransientGet(delaysMillis = listOf(1L), sleep = { _ -> }) { throw cancellation }
             fail("expected cancellation")
         } catch (actual: CancellationException) {
             assertSame(cancellation, actual)

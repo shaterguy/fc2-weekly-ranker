@@ -16,6 +16,7 @@ import org.jsoup.nodes.Element
 import java.net.ConnectException
 import java.net.NoRouteToHostException
 import java.net.ProtocolException
+import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.net.URI
 import java.net.URLDecoder
@@ -579,7 +580,6 @@ class AvseeClient(
     }
 }
 
-
 internal suspend fun <T> resolveBoardDateBoundary(
     rowId: String,
     resolve: suspend () -> T,
@@ -590,7 +590,6 @@ internal suspend fun <T> resolveBoardDateBoundary(
 } catch (error: Throwable) {
     throw IllegalStateException("게시일자 경계 판정 실패: $rowId", error)
 }
-
 
 internal fun isTransientNetworkError(error: Throwable): Boolean {
     val seen = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Throwable, Boolean>())
@@ -609,7 +608,8 @@ internal fun isTransientNetworkError(error: Throwable): Boolean {
             current is UnknownHostException ||
             current is ConnectException ||
             current is NoRouteToHostException ||
-            current is SocketTimeoutException
+            current is SocketTimeoutException ||
+            current is SocketException
         ) {
             transientFound = true
         }

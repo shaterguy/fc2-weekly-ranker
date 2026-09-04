@@ -286,6 +286,11 @@ internal class SearchWorker(
             query = inputData.getString(SearchRequest.KEY_QUERY) ?: return Result.failure(),
             baseUrl = inputData.getString(SearchRequest.KEY_BASE_URL) ?: return Result.failure(),
         )
+        try {
+            setForeground(SearchNotifications.foregroundInfo(applicationContext, request.query))
+        } catch (_: IllegalStateException) {
+            return Result.retry()
+        }
         return when (SearchRunner.run(request)) {
             SearchRunResult.COMPLETED, SearchRunResult.STALE -> Result.success()
             SearchRunResult.RETRY -> Result.retry()

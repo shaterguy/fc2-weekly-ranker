@@ -16,7 +16,7 @@ Android app for browsing the configured `javfc2` board in fixed seven-day window
 - Source version: `0.2.0-dev11`, `versionCode=35`.
 - TEST application ID: `com.shaterguy.fc2weeklyranker.dev`.
 - The configured default origin is `https://01.avsee.is`; users can replace it in Settings after a board-and-detail parsing connection check.
-- FC2 search is scheduled outside the Activity/ViewModel lifetime. Android 14+ uses a user-initiated data-transfer `JobScheduler` job and older supported Android versions use expedited WorkManager; search session, page progress, and results are persisted in a dedicated Room database so background execution and system-driven restarts resume from the last completed page. Transient socket aborts reconnect within the background task rather than waiting for the app to return to the foreground.
+- FC2 search is scheduled outside the Activity/ViewModel lifetime. Android 14+ uses a user-initiated data-transfer `JobScheduler` job and Android 10–13 use an expedited WorkManager request that promotes the worker to WorkManager's managed foreground service; search session, page progress, and results are persisted in a dedicated Room database so background execution and system-driven restarts resume from the last completed page. Transient socket aborts reconnect within the background task rather than waiting for the app to return to the foreground.
 - The anchor instant is persisted in DataStore and changes only when the user explicitly refreshes it.
 - Page `n` covers `anchorDate-(7n+6)` through `anchorDate-7n` in `Asia/Seoul`.
 - Exact `itemprop=datePublished` KST timestamps are preferred; yearless fallback timestamps such as `MM.dd HH:mm` are resolved relative to the ranking window in `Asia/Seoul`.

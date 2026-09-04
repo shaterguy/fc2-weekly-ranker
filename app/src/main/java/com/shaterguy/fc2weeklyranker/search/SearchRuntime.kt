@@ -345,7 +345,12 @@ internal class SearchWorker(
         try {
             setForeground(SearchNotifications.foregroundInfo(applicationContext, request.query))
         } catch (_: IllegalStateException) {
-            return Result.retry()
+            AppGraph.searchDatabase.searchDao().fail(
+                request.token,
+                "백그라운드 검색을 실행 가능한 상태로 전환하지 못했습니다.",
+                System.currentTimeMillis(),
+            )
+            return Result.failure()
         }
         return when (SearchRunner.run(request)) {
             SearchRunResult.COMPLETED, SearchRunResult.STALE -> Result.success()

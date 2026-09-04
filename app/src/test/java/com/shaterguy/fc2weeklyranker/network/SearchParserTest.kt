@@ -14,7 +14,7 @@ class SearchParserTest {
         val url = client.buildSearchUrl("https://example.test", "한글 test", 3)
         assertTrue(url.startsWith("https://example.test/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx="))
         assertTrue(url.contains("%ED%95%9C%EA%B8%80%20test"))
-        assertTrue(url.contains("&sop=and&gr_id=&srows=10&onetable=&page=3"))
+        assertTrue(url.contains("&sop=and&gr_id=&srows=1000&onetable=&page=3"))
         assertFalse(url.contains("+"))
     }
 
@@ -56,11 +56,11 @@ class SearchParserTest {
                 <a href='./board.php?bo_table=javfc2&wr_id=999'>sidebar recommendation</a>
               </div>
             </div>
-            <a href='/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=needle&sop=and&gr_id=&srows=10&onetable=&page=2'>2</a>
-            <a href='/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=needle&sop=and&gr_id=&srows=10&onetable=&page=9'>last</a>
-            <a href='/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=other&sop=and&gr_id=&srows=10&onetable=&page=999'>unrelated search</a>
+            <a href='/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=needle&sop=and&gr_id=&srows=1000&onetable=&page=2'>2</a>
+            <a href='/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=needle&sop=and&gr_id=&srows=1000&onetable=&page=9'>last</a>
+            <a href='/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=other&sop=and&gr_id=&srows=1000&onetable=&page=999'>unrelated search</a>
         """.trimIndent()
-        val pageUrl = "https://example.test/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=needle&sop=and&gr_id=&srows=10&onetable=&page=1"
+        val pageUrl = "https://example.test/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=needle&sop=and&gr_id=&srows=1000&onetable=&page=1"
 
         val parsed = client.parseSearchPage(html, pageUrl)
 
@@ -73,8 +73,8 @@ class SearchParserTest {
 
     @Test
     fun `uses current page when pagination has no later matching link`() {
-        val pageUrl = "https://example.test/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=needle&sop=and&gr_id=&srows=10&onetable=&page=4"
-        val html = "<div id='at-main'></div><a href='/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=other&sop=and&gr_id=&srows=10&onetable=&page=100'>other</a>"
+        val pageUrl = "https://example.test/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=needle&sop=and&gr_id=&srows=1000&onetable=&page=4"
+        val html = "<div id='at-main'></div><a href='/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=other&sop=and&gr_id=&srows=1000&onetable=&page=100'>other</a>"
         assertEquals(4, client.parseSearchPage(html, pageUrl).totalPages)
     }
 }

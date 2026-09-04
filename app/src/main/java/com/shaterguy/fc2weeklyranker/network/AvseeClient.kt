@@ -228,7 +228,7 @@ class AvseeClient(
     internal fun buildSearchUrl(baseUrl: String, query: String, page: Int): String {
         require(page >= 1)
         val encoded = URLEncoder.encode(query.trim(), "UTF-8").replace("+", "%20")
-        return "$baseUrl$SEARCH_PATH?sfl=wr_subject%7C%7Cwr_content&stx=$encoded&sop=and&gr_id=&srows=10&onetable=&page=$page"
+        return "$baseUrl$SEARCH_PATH?sfl=wr_subject%7C%7Cwr_content&stx=$encoded&sop=and&gr_id=&srows=1000&onetable=&page=$page"
     }
 
     internal fun parseSearchPage(html: String, pageUrl: String): SearchPage {

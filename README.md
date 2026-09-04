@@ -12,10 +12,11 @@ Android app for browsing the configured `javfc2` board in fixed seven-day window
 
 ## TEST channel
 
-- Historical TEST lineage starts at `v0.1.0-dev1`; the current development target is `v0.2.0-dev10`.
-- Source version: `0.2.0-dev10`, `versionCode=34`.
+- Historical TEST lineage starts at `v0.1.0-dev1`; the current development target is `v0.2.0-dev11`.
+- Source version: `0.2.0-dev11`, `versionCode=35`.
 - TEST application ID: `com.shaterguy.fc2weeklyranker.dev`.
 - The configured default origin is `https://01.avsee.is`; users can replace it in Settings after a board-and-detail parsing connection check.
+- FC2 search is scheduled outside the Activity/ViewModel lifetime. Android 14+ uses a user-initiated data-transfer `JobScheduler` job and older supported Android versions use expedited WorkManager; search session, page progress, and results are persisted in a dedicated Room database so background execution and system-driven restarts resume from the last completed page. Transient socket aborts reconnect within the background task rather than waiting for the app to return to the foreground.
 - The anchor instant is persisted in DataStore and changes only when the user explicitly refreshes it.
 - Page `n` covers `anchorDate-(7n+6)` through `anchorDate-7n` in `Asia/Seoul`.
 - Exact `itemprop=datePublished` KST timestamps are preferred; yearless fallback timestamps such as `MM.dd HH:mm` are resolved relative to the ranking window in `Asia/Seoul`.
@@ -45,7 +46,7 @@ Downloads are unique WorkManager jobs and write to `MediaStore.Downloads`. Downl
 - WebView file/content access and mixed content are disabled.
 - No `addJavascriptInterface` bridge is exposed to remote pages.
 - Session cookies and full request headers are not logged or committed.
-- The app requests only `INTERNET`; shared downloads use scoped storage.
+- The app requests only the existing network/background-execution permissions required by ranking, search, and scoped downloads; shared downloads use scoped storage.
 
 ## Remote verification
 

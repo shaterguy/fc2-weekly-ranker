@@ -9,11 +9,11 @@ import org.junit.Test
 
 class ForegroundRetryCoordinatorTest {
     @Test
-    fun `background failure is consumed once on foreground`() {
+    fun `background refresh failure is consumed once on foreground`() {
         val coordinator = ForegroundRetryCoordinator()
         coordinator.onForeground()
         val action = coordinator.actionStarted()
-        val intent = RetryIntent.Search("query", 7L)
+        val intent = RetryIntent.Refresh(1234L, 7L, 8L, 9L)
 
         coordinator.onBackground()
         assertNull(coordinator.failed(intent, action))
@@ -22,7 +22,7 @@ class ForegroundRetryCoordinatorTest {
     }
 
     @Test
-    fun `return before failure still consumes missed edge exactly once`() {
+    fun `return before refresh failure still consumes missed edge exactly once`() {
         val coordinator = ForegroundRetryCoordinator()
         coordinator.onForeground()
         val action = coordinator.actionStarted()
@@ -36,25 +36,27 @@ class ForegroundRetryCoordinatorTest {
     }
 
     @Test
-    fun `foreground only failure never becomes a future retry`() {
+    fun `foreground only refresh failure never becomes a future retry`() {
         val coordinator = ForegroundRetryCoordinator()
         coordinator.onForeground()
         val action = coordinator.actionStarted()
+        val intent = RetryIntent.Refresh(1234L, 1L, 2L, 3L)
 
-        assertNull(coordinator.failed(RetryIntent.Search("query", 1L), action))
+        assertNull(coordinator.failed(intent, action))
         coordinator.onBackground()
         assertNull(coordinator.onForeground())
     }
 
     @Test
-    fun `invalidate rejects a late failure and clears pending work`() {
+    fun `invalidate rejects a late refresh failure and clears pending work`() {
         val coordinator = ForegroundRetryCoordinator()
         coordinator.onForeground()
         val oldAction = coordinator.actionStarted()
         coordinator.onBackground()
         coordinator.invalidate()
+        val intent = RetryIntent.Refresh(1234L, 1L, 2L, 3L)
 
-        assertNull(coordinator.failed(RetryIntent.Search("old", 1L), oldAction))
+        assertNull(coordinator.failed(intent, oldAction))
         assertNull(coordinator.onForeground())
     }
 

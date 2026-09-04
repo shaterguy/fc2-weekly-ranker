@@ -10,10 +10,12 @@ import com.shaterguy.fc2weeklyranker.network.RemotePost
 import com.shaterguy.fc2weeklyranker.network.RemoteSearchPost
 import com.shaterguy.fc2weeklyranker.network.isTransientNetworkError
 import com.shaterguy.fc2weeklyranker.repo.AppRepository
+import com.shaterguy.fc2weeklyranker.search.SearchStatus
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
@@ -36,7 +38,6 @@ internal sealed interface RetryIntent {
         val repositoryToken: Long,
         val uiToken: Long,
     ) : RetryIntent
-    data class Search(val query: String, val generation: Long) : RetryIntent
 }
 
 internal class ForegroundRetryCoordinator {
@@ -99,6 +100,7 @@ internal class LatestOperationTracker {
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val repo = AppGraph.repository
     private val searchSource = AppGraph.sourceClient
+    private val searchDao = AppGraph.searchDatabase.searchDao()
     private val page = MutableStateFlow(0)
     private val localAnchor = MutableStateFlow<Long?>(null)
     private val mutableMessage = MutableStateFlow<String?>(null)
@@ -107,8 +109,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val mutableSearchMessage = MutableStateFlow<String?>(null)
     private val searchLoading = MutableStateFlow(false)
     private val mutableSearchOpeningPostId = MutableStateFlow<String?>(null)
-    private var searchJob: Job? = null
-    private var searchGeneration = 0L
+    private var currentSearchToken: String? = null
     private val retryCoordinator = ForegroundRetryCoordinator()
     private val refreshOperations = LatestOperationTracker()
     private val uiOperations = LatestOperationTracker()
@@ -136,6 +137,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     init {
         val token = beginGeneralOperation()
         viewModelScope.launch { runCatching { repo.recoverDownloads() } }
+        viewModelScope.launch {
+            combine(searchDao.observeSession(), searchDao.observeResults()) { session, results -> session to results }
+                .collect { (session, results) ->
+                    currentSearchToken = session?.token
+                    mutableSearchResults.value = results.map { it.toRemote() }
+                    searchLoading.value = session?.status == SearchStatus.RUNNING
+                    mutableSearchMessage.value = when {
+                        session?.status == SearchStatus.FAILED ->
+                            "검색 실패: ${session.errorMessage ?: "알 수 없는 오류"}"
+                        session?.status == SearchStatus.COMPLETED && results.isEmpty() ->
+                            "검색 결과가 없습니다."
+                        else -> null
+                    }
+                }
+        }
         viewModelScope.launch {
             val anchor = repo.ensureAnchor()
             if (!uiOperations.isLatest(token)) return@launch
@@ -219,46 +235,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun searchPosts(query: String) {
         val term = query.trim()
-        val generation = ++searchGeneration
-        searchJob?.cancel()
-        mutableSearchMessage.value = null
-        uiOperations.next()
-        loading.value = false
-        mutableMessage.value = null
-        val startedAt = retryCoordinator.actionStarted()
         if (term.isEmpty()) {
             mutableSearchResults.value = emptyList()
+            mutableSearchMessage.value = null
             searchLoading.value = false
             return
         }
-        launchSearch(RetryIntent.Search(term, generation), startedAt)
-    }
 
-    private fun launchSearch(intent: RetryIntent.Search, startedAt: Long) {
-        if (intent.generation != searchGeneration) return
-        searchJob = viewModelScope.launch {
-            searchLoading.value = true
-            var retryIntent: RetryIntent? = null
-            try {
-                val result = searchSource.searchPosts(repo.settings.baseUrl.first(), intent.query)
-                if (intent.generation == searchGeneration) {
-                    mutableSearchResults.value = result
-                    mutableSearchMessage.value = if (result.isEmpty()) "검색 결과가 없습니다." else null
-                }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                if (intent.generation == searchGeneration) {
-                    mutableSearchResults.value = emptyList()
-                    mutableSearchMessage.value = "검색 실패: ${safeMessage(error)}"
-                    if (isTransientNetworkError(error)) {
-                        retryIntent = retryCoordinator.failed(intent, startedAt)
-                    }
-                }
-            } finally {
-                if (intent.generation == searchGeneration) searchLoading.value = false
+        uiOperations.next()
+        loading.value = false
+        mutableMessage.value = null
+        mutableSearchResults.value = emptyList()
+        mutableSearchMessage.value = null
+        searchLoading.value = true
+
+        val schedule = AppGraph.searchScheduler.start(term, baseUrl.value)
+        currentSearchToken = schedule.request.token
+        if (!schedule.scheduled) {
+            searchLoading.value = false
+            mutableSearchMessage.value = "검색 실패: 백그라운드 검색 작업을 시작하지 못했습니다."
+        }
+        viewModelScope.launch {
+            searchDao.prepareSession(schedule.request)
+            if (!schedule.scheduled) {
+                searchDao.fail(
+                    schedule.request.token,
+                    "백그라운드 검색 작업을 시작하지 못했습니다.",
+                    System.currentTimeMillis(),
+                )
             }
-            retryIntent?.let(::retry)
         }
     }
 
@@ -270,9 +275,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             ) {
                 launchRefresh(intent, retryCoordinator.retryStarted())
             }
-            is RetryIntent.Search -> if (intent.generation == searchGeneration) {
-                launchSearch(intent, retryCoordinator.retryStarted())
-            }
         }
     }
 
@@ -281,21 +283,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         uiOperations.next()
         loading.value = false
         mutableMessage.value = null
-        retryCoordinator.invalidate()
         mutableSearchMessage.value = null
-        val generation = searchGeneration
+        val searchToken = currentSearchToken
         mutableSearchOpeningPostId.value = post.id
         viewModelScope.launch {
             try {
                 ensureSearchPost(post)
-                if (generation == searchGeneration) {
+                if (searchToken == currentSearchToken) {
                     mutableSearchMessage.value = null
                     onReady(post.id)
                 }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                if (generation == searchGeneration) {
+                if (searchToken == currentSearchToken) {
                     mutableSearchMessage.value = "게시물 열기 실패: ${safeMessage(error)}"
                 }
             } finally {
@@ -413,11 +414,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         retryCoordinator.invalidate()
         mutableMessage.value = null
     }
+
     fun clearSearchMessage() {
-        uiOperations.next()
-        loading.value = false
-        mutableMessage.value = null
-        retryCoordinator.invalidate()
         mutableSearchMessage.value = null
     }
 

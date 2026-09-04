@@ -8,6 +8,8 @@ import com.shaterguy.fc2weeklyranker.data.AppDatabase
 import com.shaterguy.fc2weeklyranker.data.SettingsStore
 import com.shaterguy.fc2weeklyranker.network.AvseeClient
 import com.shaterguy.fc2weeklyranker.repo.AppRepository
+import com.shaterguy.fc2weeklyranker.search.SearchDatabase
+import com.shaterguy.fc2weeklyranker.search.SearchScheduler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -39,6 +41,8 @@ class RankerApplication : Application() {
 object AppGraph {
     lateinit var database: AppDatabase
         private set
+    internal lateinit var searchDatabase: SearchDatabase
+        private set
     lateinit var settings: SettingsStore
         private set
     lateinit var httpClient: OkHttpClient
@@ -47,11 +51,15 @@ object AppGraph {
         private set
     lateinit var repository: AppRepository
         private set
+    internal lateinit var searchScheduler: SearchScheduler
+        private set
 
     fun initialize(app: Application) {
         if (::database.isInitialized) return
         database = Room.databaseBuilder(app, AppDatabase::class.java, "ranker.db")
             .addMigrations(AppDatabase.MIGRATION_1_2)
+            .build()
+        searchDatabase = Room.databaseBuilder(app, SearchDatabase::class.java, "search.db")
             .build()
         settings = SettingsStore(app)
         httpClient = OkHttpClient.Builder()
@@ -62,5 +70,6 @@ object AppGraph {
             .build()
         sourceClient = AvseeClient(httpClient)
         repository = AppRepository(app, database, settings, sourceClient)
+        searchScheduler = SearchScheduler(app)
     }
 }

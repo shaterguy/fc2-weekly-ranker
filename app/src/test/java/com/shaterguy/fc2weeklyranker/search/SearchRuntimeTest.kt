@@ -65,4 +65,17 @@ class SearchRuntimeTest {
             assertSame(cancellation, actual)
         }
     }
+
+    @Test
+    fun `same search token network restart invalidates stale completion`() {
+        val gate = SearchExecutionGate()
+        val first = gate.begin("session")
+        val second = gate.begin("session")
+
+        assertFalse(gate.isCurrent("session", first))
+        assertTrue(gate.isCurrent("session", second))
+
+        gate.invalidate()
+        assertFalse(gate.isCurrent("session", second))
+    }
 }

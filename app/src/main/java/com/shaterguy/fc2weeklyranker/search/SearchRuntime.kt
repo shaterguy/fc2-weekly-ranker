@@ -11,6 +11,7 @@ import android.app.job.JobService
 import android.content.ComponentName
 import android.content.Context
 import android.content.pm.ServiceInfo
+import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.os.Build
@@ -43,6 +44,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.Dns
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.util.UUID
@@ -188,10 +190,10 @@ internal object SearchNotifications {
 internal enum class SearchRunResult { COMPLETED, RETRY, FAILED, STALE }
 
 internal object SearchRunner {
-    suspend fun run(request: SearchRequest): SearchRunResult {
+    suspend fun run(request: SearchRequest, network: Network? = null): SearchRunResult {
         val dao = AppGraph.searchDatabase.searchDao()
         var session = dao.prepareSession(request)
-        val client = BackgroundSearchClient(AppGraph.httpClient, AppGraph.sourceClient)
+        val client = BackgroundSearchClient(AppGraph.httpClient, AppGraph.sourceClient, network)
         var page = session.nextPage.coerceAtLeast(1)
         var totalPages = session.totalPages.coerceAtLeast(0)
 
@@ -239,9 +241,18 @@ internal object SearchRunner {
 internal class BackgroundSearchClient(
     http: OkHttpClient,
     private val parser: AvseeClient,
+    network: Network? = null,
     private val retrySleep: suspend (Long) -> Unit = { delay(it) },
 ) {
-    private val http = http.newBuilder().retryOnConnectionFailure(false).build()
+    private val http = http.newBuilder()
+        .retryOnConnectionFailure(false)
+        .apply {
+            network?.let { assignedNetwork ->
+                socketFactory(assignedNetwork.socketFactory)
+                dns(Dns { hostname -> assignedNetwork.getAllByName(hostname).toList() })
+            }
+        }
+        .build()
 
     suspend fun searchPage(baseUrl: String, query: String, page: Int): SearchPage = withContext(Dispatchers.IO) {
         val pageUrl = parser.buildSearchUrl(baseUrl, query, page)
@@ -283,10 +294,30 @@ internal class SearchWorker(
     }
 }
 
+internal class SearchExecutionGate {
+    private var generation = 0L
+    var token: String? = null
+        private set
+
+    fun begin(token: String): Long {
+        generation += 1L
+        this.token = token
+        return generation
+    }
+
+    fun invalidate() {
+        generation += 1L
+        token = null
+    }
+
+    fun isCurrent(token: String, generation: Long): Boolean =
+        this.token == token && this.generation == generation
+}
+
 class SearchJobService : JobService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var currentJob: Job? = null
-    private var currentToken: String? = null
+    private val executionGate = SearchExecutionGate()
 
     @SuppressLint("NewApi")
     override fun onStartJob(params: JobParameters): Boolean {
@@ -297,30 +328,42 @@ class SearchJobService : JobService() {
             SearchNotifications.notification(applicationContext, request.query),
             JobService.JOB_END_NOTIFICATION_POLICY_REMOVE,
         )
+        startOrReplace(params, request)
+        return true
+    }
+
+    @SuppressLint("NewApi")
+    override fun onNetworkChanged(params: JobParameters) {
+        val request = SearchRequest.from(params.extras) ?: return
+        if (executionGate.token != request.token) return
+        startOrReplace(params, request)
+    }
+
+    @SuppressLint("NewApi")
+    private fun startOrReplace(params: JobParameters, request: SearchRequest) {
         currentJob?.cancel()
-        currentToken = request.token
+        val generation = executionGate.begin(request.token)
         val task = scope.launch(start = CoroutineStart.LAZY) {
-            val result = SearchRunner.run(request)
+            val result = SearchRunner.run(request, params.network)
             withContext(Dispatchers.Main.immediate) {
-                if (currentToken == request.token) {
+                if (executionGate.isCurrent(request.token, generation)) {
                     currentJob = null
-                    currentToken = null
+                    executionGate.invalidate()
+                    jobFinished(params, result == SearchRunResult.RETRY)
                 }
-                jobFinished(params, result == SearchRunResult.RETRY)
             }
         }
         currentJob = task
         task.start()
-        return true
     }
 
     @SuppressLint("NewApi")
     override fun onStopJob(params: JobParameters): Boolean {
         val stoppedToken = params.extras.getString(SearchRequest.KEY_TOKEN)
-        if (currentToken == stoppedToken) {
+        if (executionGate.token == stoppedToken) {
             currentJob?.cancel()
             currentJob = null
-            currentToken = null
+            executionGate.invalidate()
         }
         return params.stopReason !in setOf(
             JobParameters.STOP_REASON_USER,
@@ -331,7 +374,7 @@ class SearchJobService : JobService() {
     override fun onDestroy() {
         currentJob?.cancel()
         currentJob = null
-        currentToken = null
+        executionGate.invalidate()
         scope.cancel()
         super.onDestroy()
     }

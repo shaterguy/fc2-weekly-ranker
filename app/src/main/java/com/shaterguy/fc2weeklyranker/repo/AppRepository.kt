@@ -26,6 +26,36 @@ import java.security.MessageDigest
 import java.time.Instant
 import java.time.ZoneId
 
+internal class LatestRefreshCommitGuard {
+    private var latest = 0L
+
+    @Synchronized
+    fun next(): Long {
+        latest += 1L
+        return latest
+    }
+
+    @Synchronized
+    fun isLatest(token: Long): Boolean = latest == token
+
+    @Synchronized
+    fun commitIfLatest(token: Long, commit: () -> Unit): Boolean {
+        if (latest != token) return false
+        commit()
+        return true
+    }
+}
+
+internal suspend fun refreshThenCommitLatestAnchor(
+    targetAnchorMillis: Long,
+    requestToken: Long,
+    refresh: suspend (Long) -> Unit,
+    commitIfLatest: suspend (Long, Long) -> Boolean,
+): Boolean {
+    refresh(targetAnchorMillis)
+    return commitIfLatest(targetAnchorMillis, requestToken)
+}
+
 class AppRepository(private val context: Context, private val db: AppDatabase, val settings: SettingsStore, private val source: AvseeClient) {
     private data class ProbeKey(val postId: String, val resolverOrdinal: Int)
     private data class ProbeSession(
@@ -34,6 +64,7 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
     )
 
     private val videoMutationMutex = Mutex()
+    private val manualRefreshGuard = LatestRefreshCommitGuard()
     private val probeSessions = mutableMapOf<ProbeKey, ProbeSession>()
     private val downloadScheduler = DownloadScheduler(context)
 
@@ -75,7 +106,10 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
     }
 
     suspend fun refreshPage(pageIndex: Int, force: Boolean = false) {
-        val anchorMillis = settings.ensureAnchor()
+        refreshPageForAnchor(pageIndex, settings.ensureAnchor(), force)
+    }
+
+    private suspend fun refreshPageForAnchor(pageIndex: Int, anchorMillis: Long, force: Boolean) {
         val anchor = Instant.ofEpochMilli(anchorMillis)
         val baseUrl = settings.baseUrl.first()
         val coverageKey = coverageKey(baseUrl, anchorMillis, pageIndex)
@@ -105,11 +139,24 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
         settings.markRankingWindowCovered(coverageKey)
     }
 
-    suspend fun manualRefresh(): Long {
+    fun beginManualRefresh(): Long = manualRefreshGuard.next()
+
+    suspend fun manualRefresh(targetAnchorMillis: Long, requestToken: Long): Long {
+        require(targetAnchorMillis > 0L)
+        require(requestToken > 0L)
+        if (!manualRefreshGuard.isLatest(requestToken)) return targetAnchorMillis
         source.clearCrawlCache()
-        val anchor = settings.refreshAnchor()
-        refreshPage(0, force = true)
-        return anchor
+        refreshThenCommitLatestAnchor(
+            targetAnchorMillis = targetAnchorMillis,
+            requestToken = requestToken,
+            refresh = { anchor -> refreshPageForAnchor(0, anchor, force = true) },
+            commitIfLatest = { anchor, token ->
+                settings.setAnchorIf(anchor) { commit ->
+                    manualRefreshGuard.commitIfLatest(token, commit)
+                }
+            },
+        )
+        return targetAnchorMillis
     }
 
     suspend fun setBaseUrl(input: String): Result<String> {

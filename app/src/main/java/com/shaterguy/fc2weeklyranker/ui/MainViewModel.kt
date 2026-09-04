@@ -8,6 +8,7 @@ import com.shaterguy.fc2weeklyranker.AppGraph
 import com.shaterguy.fc2weeklyranker.data.PostEntity
 import com.shaterguy.fc2weeklyranker.network.RemotePost
 import com.shaterguy.fc2weeklyranker.network.RemoteSearchPost
+import com.shaterguy.fc2weeklyranker.network.isTransientNetworkError
 import com.shaterguy.fc2weeklyranker.repo.AppRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -28,6 +29,73 @@ data class VideoSyncResult(
     val hasActiveMedia: Boolean,
 )
 
+internal sealed interface RetryIntent {
+    data class Refresh(
+        val targetAnchorMillis: Long,
+        val refreshToken: Long,
+        val repositoryToken: Long,
+        val uiToken: Long,
+    ) : RetryIntent
+    data class Search(val query: String, val generation: Long) : RetryIntent
+}
+
+internal class ForegroundRetryCoordinator {
+    private var foreground = false
+    private var backgroundEpoch = 0L
+    private var actionVersion = 0L
+    private var actionStartBackgroundEpoch = 0L
+    private var pending: RetryIntent? = null
+
+    fun actionStarted(): Long {
+        actionVersion += 1
+        actionStartBackgroundEpoch = backgroundEpoch
+        pending = null
+        return actionVersion
+    }
+
+    fun retryStarted(): Long {
+        actionStartBackgroundEpoch = backgroundEpoch
+        return actionVersion
+    }
+
+    fun onBackground() {
+        if (foreground) {
+            foreground = false
+            backgroundEpoch += 1
+        }
+    }
+
+    fun onForeground(): RetryIntent? {
+        if (foreground) return null
+        foreground = true
+        return pending.also { pending = null }
+    }
+
+    fun failed(intent: RetryIntent, startedActionVersion: Long): RetryIntent? {
+        if (startedActionVersion != actionVersion) return null
+        if (backgroundEpoch <= actionStartBackgroundEpoch) return null
+        pending = intent
+        return if (foreground) pending.also { pending = null } else null
+    }
+
+    fun invalidate() {
+        actionVersion += 1
+        actionStartBackgroundEpoch = backgroundEpoch
+        pending = null
+    }
+}
+
+internal class LatestOperationTracker {
+    private var latest = 0L
+
+    fun next(): Long {
+        latest += 1
+        return latest
+    }
+
+    fun isLatest(token: Long): Boolean = token == latest
+}
+
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val repo = AppGraph.repository
     private val searchSource = AppGraph.sourceClient
@@ -41,6 +109,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val mutableSearchOpeningPostId = MutableStateFlow<String?>(null)
     private var searchJob: Job? = null
     private var searchGeneration = 0L
+    private val retryCoordinator = ForegroundRetryCoordinator()
+    private val refreshOperations = LatestOperationTracker()
+    private val uiOperations = LatestOperationTracker()
     private val probeRegistrationJobs = mutableMapOf<String, MutableList<Job>>()
     private val pagePrefetch = PagePrefetchCoordinator(viewModelScope, repo::ensurePage)
 
@@ -63,37 +134,86 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val visitedPostIds = repo.visitedPostIds().stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
 
     init {
+        val token = beginGeneralOperation()
         viewModelScope.launch { runCatching { repo.recoverDownloads() } }
         viewModelScope.launch {
             val anchor = repo.ensureAnchor()
+            if (!uiOperations.isLatest(token)) return@launch
             localAnchor.value = anchor
-            if (loadPage(0)) pagePrefetch.start(1)
+            if (loadPage(0, token)) pagePrefetch.start(1)
         }
+    }
+
+    fun onAppForegrounded() {
+        retryCoordinator.onForeground()?.let(::retry)
+    }
+
+    fun onAppBackgrounded() {
+        retryCoordinator.onBackground()
     }
 
     fun olderPage() {
         val target = page.value + 1
+        val token = beginGeneralOperation()
         page.value = target
         viewModelScope.launch {
-            if (loadPage(target)) pagePrefetch.start(target + 1)
+            if (loadPage(target, token)) pagePrefetch.start(target + 1)
         }
     }
 
     fun newerPage() {
         if (page.value == 0) return
         val target = page.value - 1
+        val token = beginGeneralOperation()
         page.value = target
         viewModelScope.launch {
-            if (loadPage(target)) pagePrefetch.start(target + 1)
+            if (loadPage(target, token)) pagePrefetch.start(target + 1)
         }
     }
 
     fun refreshAnchor() {
+        pagePrefetch.cancel()
+        page.value = 0
+        val refreshToken = refreshOperations.next()
+        val repositoryToken = repo.beginManualRefresh()
+        val uiToken = uiOperations.next()
+        val intent = RetryIntent.Refresh(System.currentTimeMillis(), refreshToken, repositoryToken, uiToken)
+        loading.value = false
+        mutableMessage.value = null
+        val startedAt = retryCoordinator.actionStarted()
+        launchRefresh(intent, startedAt)
+    }
+
+    private fun launchRefresh(intent: RetryIntent.Refresh, startedAt: Long) {
         viewModelScope.launch {
-            pagePrefetch.cancel()
-            page.value = 0
-            val success = runOperation { localAnchor.value = repo.manualRefresh() }
-            if (success) pagePrefetch.start(1)
+            if (!refreshOperations.isLatest(intent.refreshToken) || !uiOperations.isLatest(intent.uiToken)) return@launch
+            loading.value = true
+            var retryIntent: RetryIntent? = null
+            try {
+                val anchor = repo.manualRefresh(intent.targetAnchorMillis, intent.repositoryToken)
+                if (refreshOperations.isLatest(intent.refreshToken)) {
+                    localAnchor.value = anchor
+                }
+                if (uiOperations.isLatest(intent.uiToken)) {
+                    mutableMessage.value = null
+                    pagePrefetch.start(1)
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (
+                    refreshOperations.isLatest(intent.refreshToken) &&
+                    uiOperations.isLatest(intent.uiToken)
+                ) {
+                    mutableMessage.value = "작업 실패: ${safeMessage(error)}"
+                    if (isTransientNetworkError(error)) {
+                        retryIntent = retryCoordinator.failed(intent, startedAt)
+                    }
+                }
+            } finally {
+                if (uiOperations.isLatest(intent.uiToken)) loading.value = false
+            }
+            retryIntent?.let(::retry)
         }
     }
 
@@ -102,40 +222,76 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val generation = ++searchGeneration
         searchJob?.cancel()
         mutableSearchMessage.value = null
+        uiOperations.next()
+        loading.value = false
+        mutableMessage.value = null
+        val startedAt = retryCoordinator.actionStarted()
         if (term.isEmpty()) {
             mutableSearchResults.value = emptyList()
             searchLoading.value = false
             return
         }
+        launchSearch(RetryIntent.Search(term, generation), startedAt)
+    }
+
+    private fun launchSearch(intent: RetryIntent.Search, startedAt: Long) {
+        if (intent.generation != searchGeneration) return
         searchJob = viewModelScope.launch {
             searchLoading.value = true
+            var retryIntent: RetryIntent? = null
             try {
-                val result = searchSource.searchPosts(repo.settings.baseUrl.first(), term)
-                if (generation == searchGeneration) {
+                val result = searchSource.searchPosts(repo.settings.baseUrl.first(), intent.query)
+                if (intent.generation == searchGeneration) {
                     mutableSearchResults.value = result
                     mutableSearchMessage.value = if (result.isEmpty()) "검색 결과가 없습니다." else null
                 }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                if (generation == searchGeneration) {
+                if (intent.generation == searchGeneration) {
                     mutableSearchResults.value = emptyList()
                     mutableSearchMessage.value = "검색 실패: ${safeMessage(error)}"
+                    if (isTransientNetworkError(error)) {
+                        retryIntent = retryCoordinator.failed(intent, startedAt)
+                    }
                 }
             } finally {
-                if (generation == searchGeneration) searchLoading.value = false
+                if (intent.generation == searchGeneration) searchLoading.value = false
+            }
+            retryIntent?.let(::retry)
+        }
+    }
+
+    private fun retry(intent: RetryIntent) {
+        when (intent) {
+            is RetryIntent.Refresh -> if (
+                refreshOperations.isLatest(intent.refreshToken) &&
+                uiOperations.isLatest(intent.uiToken)
+            ) {
+                launchRefresh(intent, retryCoordinator.retryStarted())
+            }
+            is RetryIntent.Search -> if (intent.generation == searchGeneration) {
+                launchSearch(intent, retryCoordinator.retryStarted())
             }
         }
     }
 
     fun openSearchPost(post: RemoteSearchPost, onReady: (String) -> Unit) {
         if (mutableSearchOpeningPostId.value != null) return
+        uiOperations.next()
+        loading.value = false
+        mutableMessage.value = null
+        retryCoordinator.invalidate()
+        mutableSearchMessage.value = null
         val generation = searchGeneration
         mutableSearchOpeningPostId.value = post.id
         viewModelScope.launch {
             try {
                 ensureSearchPost(post)
-                if (generation == searchGeneration) onReady(post.id)
+                if (generation == searchGeneration) {
+                    mutableSearchMessage.value = null
+                    onReady(post.id)
+                }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
@@ -149,7 +305,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun toggleFavorite(postId: String) {
-        viewModelScope.launch { runOperation { repo.toggleFavorite(postId) } }
+        val token = beginGeneralOperation()
+        viewModelScope.launch { runOperation(token) { repo.toggleFavorite(postId) } }
     }
 
     fun openPost(postId: String) {
@@ -162,27 +319,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun isFavorite(postId: String) = repo.isFavorite(postId)
     fun videos(postId: String) = repo.videos(postId)
     fun download(videoId: String) = repo.download(videoId)
+
     suspend fun loadVideos(postId: String): VideoSyncResult? {
         cancelPendingProbeRegistrations(probeRegistrationJobs.remove(postId))
         val refreshStartedAt = System.currentTimeMillis()
+        val token = beginGeneralOperation()
         loading.value = true
         return try {
             mutableSearchResults.value.firstOrNull { it.id == postId }?.let { ensureSearchPost(it) }
             repo.loadVideos(postId)
             val current = repo.videos(postId).first()
+            if (uiOperations.isLatest(token)) mutableMessage.value = null
             VideoSyncResult(
                 refreshStartedAtEpochMillis = refreshStartedAt,
                 hasActiveMedia = current.any {
                     it.sourceKind == AppRepository.SOURCE_DIRECT || it.sourceKind == AppRepository.SOURCE_IFRAME
                 },
             )
+        } catch (error: CancellationException) {
+            throw error
         } catch (error: Throwable) {
-            mutableMessage.value = "작업 실패: ${safeMessage(error)}"
+            if (uiOperations.isLatest(token)) mutableMessage.value = "작업 실패: ${safeMessage(error)}"
             null
         } finally {
-            loading.value = false
+            if (uiOperations.isLatest(token)) loading.value = false
         }
     }
+
     fun registerProbedVideo(postId: String, url: String, referer: String, ordinal: Int) {
         val jobs = probeRegistrationJobs.getOrPut(postId) { mutableListOf() }
         jobs.removeAll { it.isCompleted }
@@ -194,34 +357,69 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun stopDownload(videoId: String) { viewModelScope.launch { repo.stopDownload(videoId) } }
 
     fun saveBaseUrl(input: String) {
+        val token = beginGeneralOperation()
         viewModelScope.launch {
+            if (!uiOperations.isLatest(token)) return@launch
             pagePrefetch.cancel()
             loading.value = true
             var refreshed = false
-            repo.setBaseUrl(input).onSuccess {
-                mutableMessage.value = "사이트 주소를 저장했습니다. 기준시각은 그대로 유지됩니다."
-                runCatching { repo.refreshPage(page.value) }
-                    .onSuccess { refreshed = true }
-                    .onFailure { mutableMessage.value = "주소는 저장했지만 목록 갱신에 실패했습니다: ${safeMessage(it)}" }
-            }.onFailure { mutableMessage.value = "주소 저장 실패: ${safeMessage(it)}" }
-            loading.value = false
-            if (refreshed) pagePrefetch.start(page.value + 1)
+            try {
+                repo.setBaseUrl(input).onSuccess {
+                    if (uiOperations.isLatest(token)) {
+                        mutableMessage.value = "사이트 주소를 저장했습니다. 기준시각은 그대로 유지됩니다."
+                    }
+                    runCatching { repo.refreshPage(page.value) }
+                        .onSuccess {
+                            refreshed = true
+                            if (uiOperations.isLatest(token)) mutableMessage.value = null
+                        }
+                        .onFailure {
+                            if (uiOperations.isLatest(token)) {
+                                mutableMessage.value = "주소는 저장했지만 목록 갱신에 실패했습니다: ${safeMessage(it)}"
+                            }
+                        }
+                }.onFailure {
+                    if (uiOperations.isLatest(token)) mutableMessage.value = "주소 저장 실패: ${safeMessage(it)}"
+                }
+            } finally {
+                if (uiOperations.isLatest(token)) loading.value = false
+            }
+            if (refreshed && uiOperations.isLatest(token)) pagePrefetch.start(page.value + 1)
         }
     }
 
     fun testConnection() {
+        val token = beginGeneralOperation()
         viewModelScope.launch {
+            if (!uiOperations.isLatest(token)) return@launch
             loading.value = true
-            mutableMessage.value = repo.testCurrentBaseUrl().fold(
-                { "게시판 연결에 성공했습니다." },
-                { "연결 실패: ${safeMessage(it)}" },
-            )
-            loading.value = false
+            try {
+                val result = repo.testCurrentBaseUrl()
+                if (uiOperations.isLatest(token)) {
+                    mutableMessage.value = result.fold(
+                        { "게시판 연결에 성공했습니다." },
+                        { "연결 실패: ${safeMessage(it)}" },
+                    )
+                }
+            } finally {
+                if (uiOperations.isLatest(token)) loading.value = false
+            }
         }
     }
 
-    fun clearMessage() { mutableMessage.value = null }
-    fun clearSearchMessage() { mutableSearchMessage.value = null }
+    fun clearMessage() {
+        uiOperations.next()
+        loading.value = false
+        retryCoordinator.invalidate()
+        mutableMessage.value = null
+    }
+    fun clearSearchMessage() {
+        uiOperations.next()
+        loading.value = false
+        mutableMessage.value = null
+        retryCoordinator.invalidate()
+        mutableSearchMessage.value = null
+    }
 
     private suspend fun ensureSearchPost(post: RemoteSearchPost) {
         val dao = AppGraph.database.postDao()
@@ -235,24 +433,55 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private suspend fun loadPage(pageIndex: Int): Boolean {
-        loading.value = true
-        val prefetched = pagePrefetch.consume(pageIndex)
-        val result = if (prefetched) Result.success(Unit) else runCatching { repo.ensurePage(pageIndex) }
-        result.onFailure { mutableMessage.value = "작업 실패: ${safeMessage(it)}" }
+    private fun beginGeneralOperation(): Long {
+        val token = uiOperations.next()
         loading.value = false
-        return result.isSuccess
+        retryCoordinator.invalidate()
+        mutableMessage.value = null
+        return token
     }
 
-    private suspend fun runOperation(block: suspend () -> Unit): Boolean {
+    private suspend fun loadPage(pageIndex: Int, token: Long): Boolean {
+        if (!uiOperations.isLatest(token)) return false
         loading.value = true
-        val result = runCatching { block() }
-        result.onFailure { mutableMessage.value = "작업 실패: ${safeMessage(it)}" }
-        loading.value = false
-        return result.isSuccess
+        return try {
+            val prefetched = pagePrefetch.consume(pageIndex)
+            if (!prefetched) repo.ensurePage(pageIndex)
+            if (uiOperations.isLatest(token)) mutableMessage.value = null
+            true
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            if (uiOperations.isLatest(token)) mutableMessage.value = "작업 실패: ${safeMessage(error)}"
+            false
+        } finally {
+            if (uiOperations.isLatest(token)) loading.value = false
+        }
     }
 
-    private fun safeMessage(error: Throwable): String = error.message?.take(100) ?: error::class.java.simpleName
+    private suspend fun runOperation(token: Long, block: suspend () -> Unit): Boolean {
+        if (!uiOperations.isLatest(token)) return false
+        loading.value = true
+        return try {
+            block()
+            if (uiOperations.isLatest(token)) mutableMessage.value = null
+            true
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            if (uiOperations.isLatest(token)) mutableMessage.value = "작업 실패: ${safeMessage(error)}"
+            false
+        } finally {
+            if (uiOperations.isLatest(token)) loading.value = false
+        }
+    }
+
+    private fun safeMessage(error: Throwable): String =
+        if (isTransientNetworkError(error)) {
+            "네트워크 연결이 불안정합니다. 연결을 확인한 뒤 다시 시도해 주세요."
+        } else {
+            error.message?.take(100) ?: error::class.java.simpleName
+        }
 }
 
 internal fun searchPostEntity(detail: RemotePost, fetchedAtEpochMillis: Long): PostEntity = PostEntity(

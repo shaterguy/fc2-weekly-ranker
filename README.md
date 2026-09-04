@@ -12,8 +12,8 @@ Android app for browsing the configured `javfc2` board in fixed seven-day window
 
 ## TEST channel
 
-- Historical TEST lineage starts at `v0.1.0-dev1`; the current development target is `v0.2.0-dev4`.
-- Source version: `0.2.0-dev4`, `versionCode=28`.
+- Historical TEST lineage starts at `v0.1.0-dev1`; the current development target is `v0.2.0-dev10`.
+- Source version: `0.2.0-dev10`, `versionCode=34`.
 - TEST application ID: `com.shaterguy.fc2weeklyranker.dev`.
 - The configured default origin is `https://01.avsee.is`; users can replace it in Settings after a board-and-detail parsing connection check.
 - The anchor instant is persisted in DataStore and changes only when the user explicitly refreshes it.

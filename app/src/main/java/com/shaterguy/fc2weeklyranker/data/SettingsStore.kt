@@ -26,8 +26,27 @@ class SettingsStore(context: Context, private val clockMillis: () -> Long = { Sy
 
     suspend fun refreshAnchor(): Long {
         val now = clockMillis()
-        dataStore.edit { it[ANCHOR] = now }
+        setAnchor(now)
         return now
+    }
+
+    suspend fun setAnchor(anchorEpochMillis: Long) {
+        require(anchorEpochMillis > 0L)
+        dataStore.edit { it[ANCHOR] = anchorEpochMillis }
+    }
+
+    suspend fun setAnchorIf(
+        anchorEpochMillis: Long,
+        guardedWrite: (() -> Unit) -> Boolean,
+    ): Boolean {
+        require(anchorEpochMillis > 0L)
+        var committed = false
+        dataStore.edit { preferences ->
+            committed = guardedWrite {
+                preferences[ANCHOR] = anchorEpochMillis
+            }
+        }
+        return committed
     }
 
     suspend fun setBaseUrl(normalizedBaseUrl: String) { dataStore.edit { it[BASE_URL] = normalizedBaseUrl } }

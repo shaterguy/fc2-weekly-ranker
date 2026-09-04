@@ -1,9 +1,11 @@
 package com.shaterguy.fc2weeklyranker.network
 
 import com.shaterguy.fc2weeklyranker.domain.DateWindow
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -11,15 +13,22 @@ import okhttp3.Request
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import java.net.ConnectException
+import java.net.NoRouteToHostException
+import java.net.ProtocolException
+import java.net.SocketTimeoutException
 import java.net.URI
 import java.net.URLDecoder
 import java.net.URLEncoder
+import java.net.UnknownHostException
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.ZoneId
+import java.security.cert.CertificateException
 import java.util.Collections
+import javax.net.ssl.SSLException
 import java.util.LinkedHashMap
 
 private const val BOARD_PATH = "/bbs/board.php?bo_table=javfc2&sop=and&sst=wr_datetime&sod=desc"
@@ -27,6 +36,7 @@ private const val SEARCH_PATH = "/bbs/search.php"
 private const val UA = "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 Chrome/151 Mobile Safari/537.36"
 private val SEOUL = ZoneId.of("Asia/Seoul")
 private val COUNT_TOKEN = Regex("(?<![A-Za-z0-9])(?:\\d{1,3}(?:,\\d{3})+|\\d+)(?![A-Za-z0-9])")
+private val GET_RETRY_DELAYS_MILLIS = listOf(250L, 750L)
 
 data class RemoteMedia(val url: String, val referer: String, val kind: String, val ordinal: Int)
 data class RemotePost(val id: String, val url: String, val title: String, val postedAt: Instant, val recommendationCount: Int, val media: List<RemoteMedia>)
@@ -36,9 +46,13 @@ internal data class BoardRow(val id: String, val url: String, val title: String,
 internal data class SearchPage(val posts: List<RemoteSearchPost>, val totalPages: Int)
 
 class AvseeClient(
-    private val http: OkHttpClient,
+    http: OkHttpClient,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val retrySleep: suspend (Long) -> Unit = { delay(it) },
 ) {
+    private val http = http.newBuilder()
+        .retryOnConnectionFailure(false)
+        .build()
     private data class CrawlBoardPage(
         val number: Int,
         val url: String,
@@ -56,13 +70,17 @@ class AvseeClient(
     )
 
     suspend fun testConnection(baseUrl: String): Result<Unit> = withContext(ioDispatcher) {
-        runCatching {
+        try {
             val boardUrl = "$baseUrl$BOARD_PATH"
             val rows = parseBoardRows(fetch(boardUrl), baseUrl)
             check(rows.isNotEmpty()) { "게시물 목록을 찾을 수 없습니다." }
             val first = rows.first()
             parsePostedDate(fetch(first.url, boardUrl), first.url, Instant.now())
-            Unit
+            Result.success(Unit)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            Result.failure(error)
         }
     }
 
@@ -294,10 +312,8 @@ class AvseeClient(
         dateCache: MutableMap<String, LocalDate>,
     ): LocalDate {
         dateCache[row.id]?.let { return it }
-        val parsed = runCatching {
+        val parsed = resolveBoardDateBoundary(row.id) {
             parsePostedDate(fetchForCrawl(row.url, boardUrl), row.url, referenceInstant)
-        }.getOrElse { cause ->
-            throw IllegalStateException("게시일자 경계 판정 실패: ${row.id}", cause)
         }
         dateCache[row.id] = parsed
         return parsed
@@ -356,6 +372,8 @@ class AvseeClient(
                 }
                 resolveSegment(start, mid)
                 resolveSegment(mid, end)
+            } catch (error: CancellationException) {
+                throw error
             } catch (_: IllegalStateException) {
                 resolveSequential(start, end)
             }
@@ -520,20 +538,23 @@ class AvseeClient(
         return path.endsWith(".mp4") || path.endsWith(".m3u8") || path.endsWith(".webm")
     }
 
-    private fun fetchForCrawl(url: String, referer: String? = null): String {
+    private suspend fun fetchForCrawl(url: String, referer: String? = null): String {
         crawlHtmlCache[url]?.let { return it }
         return fetch(url, referer).also { crawlHtmlCache[url] = it }
     }
 
-    private fun fetch(url: String, referer: String? = null): String {
+    private suspend fun fetch(url: String, referer: String? = null): String {
         val request = Request.Builder().url(url)
+            .get()
             .header("User-Agent", UA)
             .header("Accept-Language", "ko-KR,ko;q=0.9,en;q=0.7")
             .apply { if (referer != null) header("Referer", referer) }
             .build()
-        http.newCall(request).execute().use { response ->
-            check(response.isSuccessful) { "HTTP_${response.code}" }
-            return response.body.string()
+        return retryTransientGet(sleep = retrySleep) {
+            http.newCall(request).execute().use { response ->
+                check(response.isSuccessful) { "HTTP_${response.code}" }
+                response.body.string()
+            }
         }
     }
 
@@ -555,5 +576,63 @@ class AvseeClient(
         private const val MAX_SEARCH_PAGE = 1_000_000
         private const val MAX_CRAWL_BOARD_REQUESTS = 2_048
         private const val MAX_CRAWL_CACHE_ENTRIES = 256
+    }
+}
+
+
+internal suspend fun <T> resolveBoardDateBoundary(
+    rowId: String,
+    resolve: suspend () -> T,
+): T = try {
+    resolve()
+} catch (error: CancellationException) {
+    throw error
+} catch (error: Throwable) {
+    throw IllegalStateException("게시일자 경계 판정 실패: $rowId", error)
+}
+
+
+internal fun isTransientNetworkError(error: Throwable): Boolean {
+    val seen = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Throwable, Boolean>())
+    var current: Throwable? = error
+    var transientFound = false
+    while (current != null && seen.add(current)) {
+        if (
+            current is CancellationException ||
+            current is SSLException ||
+            current is ProtocolException ||
+            current is CertificateException
+        ) {
+            return false
+        }
+        if (
+            current is UnknownHostException ||
+            current is ConnectException ||
+            current is NoRouteToHostException ||
+            current is SocketTimeoutException
+        ) {
+            transientFound = true
+        }
+        current = current.cause
+    }
+    return transientFound
+}
+
+internal suspend fun <T> retryTransientGet(
+    delaysMillis: List<Long> = GET_RETRY_DELAYS_MILLIS,
+    sleep: suspend (Long) -> Unit = { delay(it) },
+    request: () -> T,
+): T {
+    var retryIndex = 0
+    while (true) {
+        try {
+            return request()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            if (!isTransientNetworkError(error) || retryIndex >= delaysMillis.size) throw error
+            sleep(delaysMillis[retryIndex])
+            retryIndex += 1
+        }
     }
 }

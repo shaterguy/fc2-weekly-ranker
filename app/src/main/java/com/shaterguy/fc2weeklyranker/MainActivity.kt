@@ -4,6 +4,7 @@ import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.viewModels
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.foundation.clickable
@@ -47,7 +48,6 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -71,9 +71,21 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
 class MainActivity : ComponentActivity() {
+    private val mainViewModel: MainViewModel by viewModels()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { MaterialTheme { RankerApp() } }
+        setContent { MaterialTheme { RankerApp(mainViewModel) } }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        mainViewModel.onAppForegrounded()
+    }
+
+    override fun onStop() {
+        if (!isChangingConfigurations) mainViewModel.onAppBackgrounded()
+        super.onStop()
     }
 }
 
@@ -99,7 +111,7 @@ internal fun detailPostNeighbors(postIds: List<String>, currentPostId: String): 
 }
 
 @Composable
-private fun RankerApp(vm: MainViewModel = viewModel()) {
+private fun RankerApp(vm: MainViewModel) {
     val nav = rememberNavController()
     val backStack by nav.currentBackStackEntryAsState()
     val route = backStack?.destination?.route.orEmpty()

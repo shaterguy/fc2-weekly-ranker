@@ -204,6 +204,7 @@ private class FullscreenSeekContainer(
                 seeking = false
             }
             MotionEvent.ACTION_MOVE -> {
+                if (!player.isCommandAvailable(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)) return false
                 if (startsInControllerZone()) return false
                 val dx = event.x - downX
                 val dy = event.y - downY
@@ -234,6 +235,7 @@ private class FullscreenSeekContainer(
         height > 0 && downY >= (height - controllerExclusionHeightPx).coerceAtLeast(0)
 
     private fun seekForHorizontalDrag(currentX: Float) {
+        if (!player.isCommandAvailable(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)) return
         val deltaMs = fullscreenSeekDeltaMs(currentX - downX, width)
         val durationMs = player.duration.takeIf { it >= 0L }
         player.seekTo(clampFullscreenSeekPosition(startPositionMs, deltaMs, durationMs))

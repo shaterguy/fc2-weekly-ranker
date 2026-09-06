@@ -1,10 +1,17 @@
 package com.shaterguy.fc2weeklyranker.media
 
+import android.annotation.SuppressLint
+import android.app.Activity
 import android.app.Dialog
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.pm.ActivityInfo
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowInsetsController
@@ -14,6 +21,7 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.FrameLayout
 import androidx.annotation.OptIn
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -25,6 +33,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
+import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
@@ -34,14 +44,47 @@ import com.shaterguy.fc2weeklyranker.data.VideoEntity
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URI
+import kotlin.math.abs
 
 private const val MEDIA_PROBE_SCRIPT = "(function(){var videos=Array.from(document.querySelectorAll('video')).map(function(v){var s=v.querySelector('source[src]');return v.currentSrc||v.src||(s?(s.currentSrc||s.src):'');}).filter(Boolean);if(videos.length){return JSON.stringify(videos);}return JSON.stringify(Array.from(document.querySelectorAll('source[src]')).map(function(s){return s.currentSrc||s.src||'';}).filter(Boolean));})()"
 private val MEDIA_PROBE_DELAYS_MS = longArrayOf(0L, 250L, 750L, 1_500L, 3_000L, 6_000L, 10_000L)
+internal const val FULLSCREEN_MAX_SEEK_MS = 10_000L
+
+internal enum class VideoFrameOrientation {
+    LANDSCAPE,
+    PORTRAIT,
+}
+
+internal fun classifyVideoFrameOrientation(
+    width: Int,
+    height: Int,
+    pixelWidthHeightRatio: Float,
+): VideoFrameOrientation? {
+    if (width <= 0 || height <= 0 || pixelWidthHeightRatio <= 0f || !pixelWidthHeightRatio.isFinite()) return null
+    val displayWidth = width.toDouble() * pixelWidthHeightRatio.toDouble()
+    return when {
+        displayWidth > height.toDouble() -> VideoFrameOrientation.LANDSCAPE
+        displayWidth < height.toDouble() -> VideoFrameOrientation.PORTRAIT
+        else -> null
+    }
+}
+
+internal fun fullscreenSeekDeltaMs(horizontalDistancePx: Float, containerWidthPx: Int): Long {
+    if (containerWidthPx <= 0 || !horizontalDistancePx.isFinite()) return 0L
+    val fraction = (horizontalDistancePx / containerWidthPx.toFloat()).coerceIn(-1f, 1f)
+    return (fraction * FULLSCREEN_MAX_SEEK_MS.toFloat()).toLong()
+}
+
+internal fun clampFullscreenSeekPosition(startPositionMs: Long, deltaMs: Long, durationMs: Long?): Long {
+    val target = (startPositionMs + deltaMs).coerceAtLeast(0L)
+    return if (durationMs != null && durationMs >= 0L) target.coerceAtMost(durationMs) else target
+}
 
 @OptIn(UnstableApi::class)
 @Composable
 fun NativeVideoPlayer(video: VideoEntity, modifier: Modifier = Modifier) {
     val context = LocalContext.current
+    val activity = remember(context) { context.findActivity() }
     val player = remember(video.id) {
         val headers = linkedMapOf("Referer" to video.referer, "User-Agent" to video.userAgent)
         CookieManager.getInstance().getCookie(video.url)?.takeIf(String::isNotBlank)?.let { headers["Cookie"] = it }
@@ -61,19 +104,33 @@ fun NativeVideoPlayer(video: VideoEntity, modifier: Modifier = Modifier) {
 
     fun openFullscreen() {
         if (dialogHolder[0] != null) return
+        val previousOrientation = activity?.requestedOrientation
         val fullscreenView = PlayerView(context).apply {
             useController = true
+        }
+        val fullscreenContainer = FullscreenSeekContainer(context, player).apply {
+            addView(
+                fullscreenView,
+                ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT),
+            )
+        }
+        val orientationListener = object : Player.Listener {
+            override fun onVideoSizeChanged(videoSize: VideoSize) {
+                if (dialogHolder[0] != null) activity?.applyVideoOrientation(videoSize)
+            }
         }
         val dialog = Dialog(context, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
         dialogHolder[0] = dialog
         dialog.setContentView(
-            fullscreenView,
+            fullscreenContainer,
             ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT),
         )
         fullscreenView.setFullscreenButtonClickListener { isFullscreen ->
             if (!isFullscreen) dialog.dismiss()
         }
         dialog.setOnShowListener {
+            player.addListener(orientationListener)
+            activity?.applyVideoOrientation(player.videoSize)
             PlayerView.switchTargetView(player, compactView, fullscreenView)
             compactView.setFullscreenButtonState(true)
             fullscreenView.setFullscreenButtonState(true)
@@ -81,6 +138,8 @@ fun NativeVideoPlayer(video: VideoEntity, modifier: Modifier = Modifier) {
         }
         dialog.setOnDismissListener {
             if (dialogHolder[0] === dialog) dialogHolder[0] = null
+            player.removeListener(orientationListener)
+            previousOrientation?.let { activity?.requestedOrientation = it }
             PlayerView.switchTargetView(player, fullscreenView, compactView)
             compactView.setFullscreenButtonState(false)
             fullscreenView.player = null
@@ -105,6 +164,80 @@ fun NativeVideoPlayer(video: VideoEntity, modifier: Modifier = Modifier) {
         factory = { compactView },
         update = { it.player = player },
     )
+}
+
+private fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
+private fun Activity.applyVideoOrientation(videoSize: VideoSize) {
+    val requested = when (
+        classifyVideoFrameOrientation(videoSize.width, videoSize.height, videoSize.pixelWidthHeightRatio)
+    ) {
+        VideoFrameOrientation.LANDSCAPE -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        VideoFrameOrientation.PORTRAIT -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+        null -> return
+    }
+    if (requestedOrientation != requested) requestedOrientation = requested
+}
+
+@SuppressLint("ClickableViewAccessibility")
+private class FullscreenSeekContainer(
+    context: Context,
+    private val player: Player,
+) : FrameLayout(context) {
+    private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
+    private val controllerExclusionHeightPx = (96f * resources.displayMetrics.density).toInt()
+    private var downX = 0f
+    private var downY = 0f
+    private var startPositionMs = 0L
+    private var seeking = false
+
+    override fun onInterceptTouchEvent(event: MotionEvent): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                downX = event.x
+                downY = event.y
+                startPositionMs = player.currentPosition
+                seeking = false
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (startsInControllerZone()) return false
+                val dx = event.x - downX
+                val dy = event.y - downY
+                if (abs(dx) > touchSlop && abs(dx) > abs(dy)) {
+                    seeking = true
+                    return true
+                }
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> seeking = false
+        }
+        return false
+    }
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (!seeking) return super.onTouchEvent(event)
+        when (event.actionMasked) {
+            MotionEvent.ACTION_MOVE -> seekForHorizontalDrag(event.x)
+            MotionEvent.ACTION_UP -> {
+                seekForHorizontalDrag(event.x)
+                seeking = false
+            }
+            MotionEvent.ACTION_CANCEL -> seeking = false
+        }
+        return true
+    }
+
+    private fun startsInControllerZone(): Boolean =
+        height > 0 && downY >= (height - controllerExclusionHeightPx).coerceAtLeast(0)
+
+    private fun seekForHorizontalDrag(currentX: Float) {
+        val deltaMs = fullscreenSeekDeltaMs(currentX - downX, width)
+        val durationMs = player.duration.takeIf { it >= 0L }
+        player.seekTo(clampFullscreenSeekPosition(startPositionMs, deltaMs, durationMs))
+    }
 }
 
 @Suppress("DEPRECATION")

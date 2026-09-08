@@ -2,6 +2,7 @@ package com.shaterguy.fc2weeklyranker.network
 
 import okhttp3.OkHttpClient
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.Instant
@@ -27,7 +28,7 @@ class ParserFixtureTest {
     }
 
     @Test
-    fun `reads exact live published content and wr good count`() {
+    fun `reads exact live published content comment count and wr good count`() {
         val html = """
             <h1 itemprop='headline'>Live-shaped FC2 fixture</h1>
             <div class='view-head'>
@@ -43,7 +44,22 @@ class ParserFixtureTest {
             "https://example.test/bbs/board.php?bo_table=javfc2&wr_id=607221",
         )
         assertEquals(Instant.parse("2026-08-29T10:28:42Z"), post.postedAt)
+        assertEquals(49, post.commentCount)
         assertEquals(37, post.recommendationCount)
+    }
+
+    @Test
+    fun `keeps explicit zero comments distinct from unknown comments`() {
+        val explicitZero = parser.parseDetail(
+            "<h1>Zero</h1><div><i class='fa fa-comment'></i><b>0</b><time datetime='2026-09-08T10:00:00Z'></time></div>",
+            "https://example.test/bbs/board.php?bo_table=javfc2&wr_id=700",
+        )
+        val unknown = parser.parseDetail(
+            "<h1>Unknown</h1><time datetime='2026-09-08T10:00:00Z'></time>",
+            "https://example.test/bbs/board.php?bo_table=javfc2&wr_id=701",
+        )
+        assertEquals(0, explicitZero.commentCount)
+        assertNull(unknown.commentCount)
     }
 
     @Test

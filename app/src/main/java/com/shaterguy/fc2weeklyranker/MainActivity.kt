@@ -56,6 +56,7 @@ import androidx.navigation.navArgument
 import com.shaterguy.fc2weeklyranker.data.DownloadStatus
 import com.shaterguy.fc2weeklyranker.data.PostEntity
 import com.shaterguy.fc2weeklyranker.data.VideoEntity
+import com.shaterguy.fc2weeklyranker.domain.RankedPost
 import com.shaterguy.fc2weeklyranker.domain.RankingMode
 import com.shaterguy.fc2weeklyranker.domain.windowFor
 import com.shaterguy.fc2weeklyranker.download.VideoDownloadWorker
@@ -161,13 +162,15 @@ private fun RankingScreen(vm: MainViewModel, onPost: (String) -> Unit) {
         StatusLine(loading, message, vm::clearMessage)
         if (!loading && posts.isEmpty()) Text("이 기간에 표시할 게시물이 없습니다.", Modifier.padding(vertical = 24.dp))
         LazyColumn(contentPadding = PaddingValues(bottom = 20.dp)) {
-            itemsIndexed(posts, key = { _, post -> post.id }) { index, post ->
+            itemsIndexed(posts, key = { _, ranked -> ranked.post.id }) { index, ranked ->
+                val post = ranked.post
                 PostCard(
                     rank = index + 1,
                     post = post,
                     onPost = onPost,
                     visited = visited.contains(post.id),
                     favorite = post.id in favoriteIds,
+                    rankingSummary = formatRankingSummary(ranked, rankingMode),
                 )
             }
         }
@@ -479,6 +482,7 @@ private fun PostCard(
     visited: Boolean,
     favorite: Boolean,
     showRank: Boolean = true,
+    rankingSummary: String? = null,
 ) {
     Card(
         Modifier
@@ -517,7 +521,11 @@ private fun PostCard(
                         fontWeight = FontWeight.SemiBold,
                     )
                 }
-                Text("추천 ${post.recommendationCount} · 일평균 ${"%.2f".format(post.dailyRate)}")
+                if (rankingSummary != null) {
+                    Text(rankingSummary)
+                } else {
+                    Text("추천 ${post.recommendationCount} · 일평균 ${"%.2f".format(post.dailyRate)}")
+                }
                 Text(formatDate(post.postedAtEpochMillis), style = MaterialTheme.typography.bodySmall)
             }
         }
@@ -533,6 +541,13 @@ private fun StatusLine(loading: Boolean, message: String?, clear: () -> Unit) {
         }
     }
     if (message != null) TextButton(onClick = clear) { Text(message) }
+}
+
+private fun formatRankingSummary(ranked: RankedPost, mode: RankingMode): String {
+    val comments = ranked.commentCount?.toString() ?: "미확인"
+    val label = if (mode == RankingMode.POPULARITY) "Popularity" else "Trending"
+    val score = if (mode == RankingMode.POPULARITY) ranked.popularityScore else ranked.trendingScore
+    return "댓글 $comments · $label ${"%.1f".format(score)}"
 }
 
 private fun formatBytes(value: Long?): String {

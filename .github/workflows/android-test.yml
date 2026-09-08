@@ -13,7 +13,7 @@ permissions:
 jobs:
   verify-build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
@@ -44,7 +44,7 @@ jobs:
           APK="$(find app/build/outputs/apk/debug -maxdepth 1 -type f -name '*-unsigned.apk' -print -quit)"
           test -s "$APK"
           BADGING="$("$ANDROID_HOME/build-tools/37.0.0/aapt" dump badging "$APK")"
-          grep -Fq "package: name='com.shaterguy.fc2weeklyranker.dev' versionCode='24' versionName='0.1.0-dev24'" <<<"$BADGING"
+          grep -Fq "package: name='com.shaterguy.fc2weeklyranker.dev' versionCode='40' versionName='0.2.0-dev16'" <<<"$BADGING"
           printf '%s\n' "$GITHUB_SHA" > app/build/outputs/apk/debug/SOURCE_COMMIT.txt
           sha256sum "$APK" > app/build/outputs/apk/debug/UNSIGNED_SHA256SUMS.txt
       - name: Upload unsigned TEST provenance
@@ -79,13 +79,13 @@ jobs:
           UNSIGNED="$(find app/build/outputs/apk/debug -maxdepth 1 -type f -name '*-unsigned.apk' -print -quit)"
           OUT=app/build/outputs/fc2-weekly-ranker-test
           mkdir -p "$OUT"
-          ALIGNED="$OUT/fc2-weekly-ranker-test-v0.1.0-dev24-aligned-unsigned.apk"
-          APK="$OUT/fc2-weekly-ranker-test-v0.1.0-dev24.apk"
+          ALIGNED="$OUT/fc2-weekly-ranker-test-v0.2.0-dev16-aligned-unsigned.apk"
+          APK="$OUT/fc2-weekly-ranker-test-v0.2.0-dev16.apk"
           "$BT/zipalign" -p -f 4 "$UNSIGNED" "$ALIGNED"
           APKSIGNER="$BT/apksigner" bash tools/sign_test.sh "$ALIGNED" "$PASS_FILE" "$APK" > "$OUT/APKSIGNER_VERIFY.txt"
           "$BT/apksigner" verify --verbose --print-certs-pem --min-sdk-version 29 "$APK" > "$OUT/APK_CERT.txt"
           BADGING="$("$BT/aapt" dump badging "$APK")"
-          grep -Fq "package: name='com.shaterguy.fc2weeklyranker.dev' versionCode='24' versionName='0.1.0-dev24'" <<<"$BADGING"
+          grep -Fq "package: name='com.shaterguy.fc2weeklyranker.dev' versionCode='40' versionName='0.2.0-dev16'" <<<"$BADGING"
           PINNED_TEST_CERT_SHA256='ff32473e516ff59ca24ada94fe22e8282ce70fd66bd94fb0975340106d981cfd'
           CERT_SHA256="$(awk -F= '/^certificate_sha256=/{print $2; exit}' "$OUT/APKSIGNER_VERIFY.txt" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
           [[ "$CERT_SHA256" =~ ^[0-9a-f]{64}$ ]]
@@ -119,6 +119,119 @@ jobs:
           sha256sum "$APK" > "$OUT/SHA256SUMS.txt"
           printf '%s\n' "$GITHUB_SHA" > "$OUT/SOURCE_COMMIT.txt"
           echo 'configured=true' >> "$GITHUB_OUTPUT"
+      - name: Verify DEV upgrade migration and stable co-install
+        if: steps.sign.outputs.configured == 'true'
+        shell: bash
+        env:
+          SIGNING_PASSPHRASE: ${{ secrets.FC2_WEEKLY_RANKER_TEST_SIGNING_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          BT="$ANDROID_HOME/build-tools/37.0.0"
+          CURRENT_APK="$GITHUB_WORKSPACE/app/build/outputs/fc2-weekly-ranker-test/fc2-weekly-ranker-test-v0.2.0-dev16.apk"
+          OLD="$RUNNER_TEMP/fc2-dev15"
+          PASS_FILE="$RUNNER_TEMP/fc2-ranker-signing-pass-compat"
+          AVD_NAME=fc2-compat
+          trap 'rm -f "$PASS_FILE"; adb emu kill >/dev/null 2>&1 || true' EXIT
+
+          git fetch --no-tags origin refs/heads/v0.2.0-dev15:refs/remotes/origin/v0.2.0-dev15
+          git worktree add --detach "$OLD" refs/remotes/origin/v0.2.0-dev15
+          gradle --no-daemon --stacktrace -p "$OLD" :app:assembleDebug
+          OLD_UNSIGNED="$(find "$OLD/app/build/outputs/apk/debug" -maxdepth 1 -type f -name '*-unsigned.apk' -print -quit)"
+          test -s "$OLD_UNSIGNED"
+          OLD_ALIGNED="$RUNNER_TEMP/fc2-weekly-ranker-test-v0.2.0-dev15-aligned.apk"
+          OLD_APK="$RUNNER_TEMP/fc2-weekly-ranker-test-v0.2.0-dev15.apk"
+          "$BT/zipalign" -p -f 4 "$OLD_UNSIGNED" "$OLD_ALIGNED"
+          umask 077
+          printf '%s' "$SIGNING_PASSPHRASE" > "$PASS_FILE"
+          APKSIGNER="$BT/apksigner" bash "$OLD/tools/sign_test.sh" "$OLD_ALIGNED" "$PASS_FILE" "$OLD_APK" >/dev/null
+          "$BT/apksigner" verify --min-sdk-version 29 "$OLD_APK"
+
+          sdkmanager "platform-tools" "emulator" "system-images;android-29;google_apis;x86_64"
+          echo no | avdmanager create avd --force --name "$AVD_NAME" --package "system-images;android-29;google_apis;x86_64" --device pixel
+          sudo chmod 666 /dev/kvm 2>/dev/null || true
+          emulator -avd "$AVD_NAME" -no-window -noaudio -no-boot-anim -no-snapshot -gpu swiftshader_indirect >/tmp/fc2-emulator.log 2>&1 &
+          adb wait-for-device
+          for _ in $(seq 1 120); do
+            [[ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == "1" ]] && break
+            sleep 2
+          done
+          [[ "$(adb shell getprop sys.boot_completed | tr -d '\r')" == "1" ]]
+
+          STABLE_APK="$RUNNER_TEMP/fc2-weekly-ranker-v0.1.0.apk"
+          curl --fail --location --retry 3 \
+            --output "$STABLE_APK" \
+            "https://github.com/shaterguy/fc2-weekly-ranker/releases/download/v0.1.0/fc2-weekly-ranker-v0.1.0.apk"
+          adb install "$STABLE_APK"
+          adb install "$OLD_APK"
+          adb shell am start -W -n com.shaterguy.fc2weeklyranker.dev/com.shaterguy.fc2weeklyranker.MainActivity >/dev/null
+          sleep 4
+          adb shell am force-stop com.shaterguy.fc2weeklyranker.dev
+          sleep 1
+
+          OLD_DB="$RUNNER_TEMP/ranker-dev15.db"
+          adb exec-out run-as com.shaterguy.fc2weeklyranker.dev cat databases/ranker.db > "$OLD_DB"
+          python3 - "$OLD_DB" <<'PY'
+          import sqlite3
+          import sys
+
+          path = sys.argv[1]
+          con = sqlite3.connect(path)
+          version = con.execute("PRAGMA user_version").fetchone()[0]
+          if version != 2:
+              raise SystemExit(f"expected DEV15 database v2, got {version}")
+          con.execute("PRAGMA foreign_keys=ON")
+          con.execute(
+              "INSERT OR REPLACE INTO posts(id,url,title,postedAtEpochMillis,recommendationCount,dailyRate,snapshotKey,fetchedAtEpochMillis) VALUES(?,?,?,?,?,?,?,?)",
+              ("compat-marker", "https://example.test/compat", "compat-marker", 1, 9, 9.0, "compat", 2),
+          )
+          con.execute("INSERT OR REPLACE INTO favorites(postId,createdAtEpochMillis) VALUES(?,?)", ("compat-marker", 3))
+          con.execute(
+              "INSERT OR REPLACE INTO videos(id,postId,url,referer,userAgent,sourceKind,ordinal,discoveredAtEpochMillis) VALUES(?,?,?,?,?,?,?,?)",
+              ("compat-video", "compat-marker", "https://example.test/video.mp4", "https://example.test/compat", "ua", "DIRECT", 0, 4),
+          )
+          con.execute(
+              "INSERT OR REPLACE INTO downloads(videoId,status,contentUri,downloadedBytes,totalBytes,errorCode,updatedAtEpochMillis,enqueueOrder,retryCount) VALUES(?,?,?,?,?,?,?,?,?)",
+              ("compat-video", "PAUSED", None, 123, 1000, None, 5, 777, 2),
+          )
+          con.commit()
+          con.close()
+          PY
+          adb shell run-as com.shaterguy.fc2weeklyranker.dev rm -f databases/ranker.db-wal databases/ranker.db-shm
+          adb shell run-as com.shaterguy.fc2weeklyranker.dev sh -c 'cat > databases/ranker.db' < "$OLD_DB"
+
+          adb install -r "$CURRENT_APK"
+          adb shell am start -W -n com.shaterguy.fc2weeklyranker.dev/com.shaterguy.fc2weeklyranker.MainActivity >/dev/null
+          sleep 5
+          adb shell am force-stop com.shaterguy.fc2weeklyranker.dev
+          sleep 1
+
+          NEW_DB="$RUNNER_TEMP/ranker-dev16.db"
+          adb exec-out run-as com.shaterguy.fc2weeklyranker.dev cat databases/ranker.db > "$NEW_DB"
+          python3 - "$NEW_DB" <<'PY'
+          import sqlite3
+          import sys
+
+          con = sqlite3.connect(sys.argv[1])
+          version = con.execute("PRAGMA user_version").fetchone()[0]
+          if version != 3:
+              raise SystemExit(f"expected DEV16 database v3, got {version}")
+          tables = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+          if "rank_observations" not in tables:
+              raise SystemExit("rank_observations table missing after migration")
+          if con.execute("SELECT COUNT(*) FROM posts WHERE id='compat-marker'").fetchone()[0] != 1:
+              raise SystemExit("post marker lost during migration")
+          if con.execute("SELECT COUNT(*) FROM favorites WHERE postId='compat-marker'").fetchone()[0] != 1:
+              raise SystemExit("favorite marker lost during migration")
+          if con.execute("SELECT COUNT(*) FROM videos WHERE id='compat-video'").fetchone()[0] != 1:
+              raise SystemExit("video marker lost during migration")
+          download = con.execute("SELECT downloadedBytes,totalBytes,enqueueOrder,retryCount FROM downloads WHERE videoId='compat-video'").fetchone()
+          if download != (123, 1000, 777, 2):
+              raise SystemExit(f"download marker changed during migration: {download}")
+          con.close()
+          PY
+
+          adb shell dumpsys package com.shaterguy.fc2weeklyranker | grep -Fq 'versionName=0.1.0'
+          adb shell dumpsys package com.shaterguy.fc2weeklyranker.dev | grep -Fq 'versionName=0.2.0-dev16'
       - name: Upload signed TEST evidence
         if: steps.sign.outputs.configured == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -136,7 +249,7 @@ jobs:
         if: steps.sign.outputs.configured == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          path: app/build/outputs/fc2-weekly-ranker-test/fc2-weekly-ranker-test-v0.1.0-dev24.apk
+          path: app/build/outputs/fc2-weekly-ranker-test/fc2-weekly-ranker-test-v0.2.0-dev16.apk
           archive: false
           if-no-files-found: error
           retention-days: 14

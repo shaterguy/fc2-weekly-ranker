@@ -172,8 +172,11 @@ jobs:
           mkdir -p "$OLD_DB_DIR"
           adb exec-out run-as com.shaterguy.fc2weeklyranker.dev cat databases/ranker.db > "$OLD_DB_DIR/ranker.db"
           for suffix in -wal -shm; do
-            if adb shell run-as com.shaterguy.fc2weeklyranker.dev test -f "databases/ranker.db${suffix}"; then
-              adb exec-out run-as com.shaterguy.fc2weeklyranker.dev cat "databases/ranker.db${suffix}" > "$OLD_DB_DIR/ranker.db${suffix}"
+            sidecar="$OLD_DB_DIR/ranker.db${suffix}"
+            if ! adb exec-out run-as com.shaterguy.fc2weeklyranker.dev cat "databases/ranker.db${suffix}" > "$sidecar" 2>/dev/null; then
+              rm -f "$sidecar"
+            elif [[ ! -s "$sidecar" ]]; then
+              rm -f "$sidecar"
             fi
           done
           OLD_DB="$OLD_DB_DIR/ranker.db"
@@ -207,8 +210,11 @@ jobs:
           mkdir -p "$NEW_DB_DIR"
           adb exec-out run-as com.shaterguy.fc2weeklyranker.dev cat databases/ranker.db > "$NEW_DB_DIR/ranker.db"
           for suffix in -wal -shm; do
-            if adb shell run-as com.shaterguy.fc2weeklyranker.dev test -f "databases/ranker.db${suffix}"; then
-              adb exec-out run-as com.shaterguy.fc2weeklyranker.dev cat "databases/ranker.db${suffix}" > "$NEW_DB_DIR/ranker.db${suffix}"
+            sidecar="$NEW_DB_DIR/ranker.db${suffix}"
+            if ! adb exec-out run-as com.shaterguy.fc2weeklyranker.dev cat "databases/ranker.db${suffix}" > "$sidecar" 2>/dev/null; then
+              rm -f "$sidecar"
+            elif [[ ! -s "$sidecar" ]]; then
+              rm -f "$sidecar"
             fi
           done
           NEW_DB="$NEW_DB_DIR/ranker.db"

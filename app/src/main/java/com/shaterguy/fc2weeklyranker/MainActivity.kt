@@ -56,6 +56,7 @@ import androidx.navigation.navArgument
 import com.shaterguy.fc2weeklyranker.data.DownloadStatus
 import com.shaterguy.fc2weeklyranker.data.PostEntity
 import com.shaterguy.fc2weeklyranker.data.VideoEntity
+import com.shaterguy.fc2weeklyranker.domain.RankingMode
 import com.shaterguy.fc2weeklyranker.domain.windowFor
 import com.shaterguy.fc2weeklyranker.download.VideoDownloadWorker
 import com.shaterguy.fc2weeklyranker.media.NativeVideoPlayer
@@ -133,6 +134,7 @@ private fun RankerApp(vm: MainViewModel = viewModel()) {
 @Composable
 private fun RankingScreen(vm: MainViewModel, onPost: (String) -> Unit) {
     val posts by vm.posts.collectAsState()
+    val rankingMode by vm.rankingMode.collectAsState()
     val favoritePosts by vm.favorites.collectAsState()
     val visited by vm.visitedPostIds.collectAsState()
     val anchor by vm.anchorEpochMillis.collectAsState()
@@ -143,7 +145,7 @@ private fun RankingScreen(vm: MainViewModel, onPost: (String) -> Unit) {
     val window = remember(anchor, page) { windowFor(Instant.ofEpochMilli(anchor), page) }
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         Spacer(Modifier.height(12.dp))
-        Text("7일 추천 랭킹", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        Text("7일 FC2 랭킹", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         Text("기준 ${formatDateTime(anchor)}")
         Text("${window.startDate} ∼ ${window.endDate}", style = MaterialTheme.typography.bodyLarge)
         Row(
@@ -155,6 +157,7 @@ private fun RankingScreen(vm: MainViewModel, onPost: (String) -> Unit) {
             TextButton(onClick = vm::refreshAnchor, enabled = !loading) { Text("기준 새로고침") }
             OutlinedButton(onClick = vm::olderPage, enabled = !loading) { Text("이전 7일") }
         }
+        RankingModeSelector(rankingMode, vm::selectRankingMode)
         StatusLine(loading, message, vm::clearMessage)
         if (!loading && posts.isEmpty()) Text("이 기간에 표시할 게시물이 없습니다.", Modifier.padding(vertical = 24.dp))
         LazyColumn(contentPadding = PaddingValues(bottom = 20.dp)) {
@@ -166,6 +169,33 @@ private fun RankingScreen(vm: MainViewModel, onPost: (String) -> Unit) {
                     visited = visited.contains(post.id),
                     favorite = post.id in favoriteIds,
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun RankingModeSelector(selected: RankingMode, onSelect: (RankingMode) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        if (selected == RankingMode.POPULARITY) {
+            Button(onClick = { onSelect(RankingMode.POPULARITY) }, modifier = Modifier.weight(1f)) {
+                Text("인기순 (Popularity)")
+            }
+        } else {
+            OutlinedButton(onClick = { onSelect(RankingMode.POPULARITY) }, modifier = Modifier.weight(1f)) {
+                Text("인기순 (Popularity)")
+            }
+        }
+        if (selected == RankingMode.TRENDING) {
+            Button(onClick = { onSelect(RankingMode.TRENDING) }, modifier = Modifier.weight(1f)) {
+                Text("급상승순 (Trending)")
+            }
+        } else {
+            OutlinedButton(onClick = { onSelect(RankingMode.TRENDING) }, modifier = Modifier.weight(1f)) {
+                Text("급상승순 (Trending)")
             }
         }
     }

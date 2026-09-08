@@ -85,6 +85,25 @@ class AdaptiveRankingTest {
     }
 
     @Test
+    fun `duplicate bucket and sub-thirty-minute burst cannot fabricate trending`() {
+        val post = post("duplicate", ageHours = 48, legacyRate = 0.0)
+        val first = obsAt(post, comments = 1, observedMinutesAgo = 20)
+        val duplicateLater = obsAt(post, comments = 200, observedMinutesAgo = 10).copy(
+            observedBucketEpochMillis = first.observedBucketEpochMillis,
+        )
+
+        val result = AdaptiveRanking.rank(
+            listOf(post),
+            listOf(first, duplicateLater),
+            RankingMode.TRENDING,
+            now,
+        ).single()
+
+        assertFalse(result.trendingObserved)
+        assertEquals(0.0, result.trendingScore, 0.0001)
+    }
+
+    @Test
     fun `legacy daily rate remains a cold-start safety net`() {
         val first = post("legacy-high", ageHours = 48, legacyRate = 10.0)
         val second = post("legacy-low", ageHours = 48, legacyRate = 1.0)
@@ -105,8 +124,11 @@ class AdaptiveRankingTest {
         fetchedAtEpochMillis = now,
     )
 
-    private fun obs(post: PostEntity, comments: Int, observedHoursAgo: Int = 0): RankObservationEntity {
-        val observedAt = now - observedHoursAgo * 3_600_000L
+    private fun obs(post: PostEntity, comments: Int, observedHoursAgo: Int = 0): RankObservationEntity =
+        obsAt(post, comments, observedHoursAgo * 60)
+
+    private fun obsAt(post: PostEntity, comments: Int, observedMinutesAgo: Int): RankObservationEntity {
+        val observedAt = now - observedMinutesAgo * 60_000L
         return RankObservationEntity(
             datasetKey = "avsee:javfc2",
             postId = post.id,

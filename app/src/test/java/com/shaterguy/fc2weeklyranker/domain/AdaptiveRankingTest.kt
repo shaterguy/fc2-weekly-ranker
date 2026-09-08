@@ -92,15 +92,22 @@ class AdaptiveRankingTest {
             observedBucketEpochMillis = first.observedBucketEpochMillis,
         )
 
-        val result = AdaptiveRanking.rank(
+        val duplicated = AdaptiveRanking.rank(
             listOf(post),
             listOf(first, duplicateLater),
             RankingMode.TRENDING,
             now,
         ).single()
+        val baseline = AdaptiveRanking.rank(
+            listOf(post),
+            listOf(duplicateLater),
+            RankingMode.TRENDING,
+            now,
+        ).single()
 
-        assertFalse(result.trendingObserved)
-        assertEquals(0.0, result.trendingScore, 0.0001)
+        assertFalse(duplicated.trendingObserved)
+        assertEquals(baseline.trendingScore, duplicated.trendingScore, 0.0001)
+        assertEquals(baseline.commentCount, duplicated.commentCount)
     }
 
     @Test

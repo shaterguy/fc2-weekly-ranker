@@ -31,6 +31,7 @@ object AppGraph {
     fun initialize(app: Application) {
         if (::database.isInitialized) return
         database = Room.databaseBuilder(app, AppDatabase::class.java, "ranker.db")
+            .addMigrations(AppDatabase.MIGRATION_1_2, AppDatabase.MIGRATION_2_3)
             .build()
         settings = SettingsStore(app)
         httpClient = OkHttpClient.Builder()

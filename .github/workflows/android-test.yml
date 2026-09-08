@@ -168,8 +168,15 @@ jobs:
           adb shell am force-stop com.shaterguy.fc2weeklyranker.dev
           sleep 1
 
-          OLD_DB="$RUNNER_TEMP/ranker-dev15.db"
-          adb exec-out run-as com.shaterguy.fc2weeklyranker.dev cat databases/ranker.db > "$OLD_DB"
+          OLD_DB_DIR="$RUNNER_TEMP/dev15-db"
+          mkdir -p "$OLD_DB_DIR"
+          adb exec-out run-as com.shaterguy.fc2weeklyranker.dev cat databases/ranker.db > "$OLD_DB_DIR/ranker.db"
+          for suffix in -wal -shm; do
+            if adb shell run-as com.shaterguy.fc2weeklyranker.dev test -f "databases/ranker.db${suffix}"; then
+              adb exec-out run-as com.shaterguy.fc2weeklyranker.dev cat "databases/ranker.db${suffix}" > "$OLD_DB_DIR/ranker.db${suffix}"
+            fi
+          done
+          OLD_DB="$OLD_DB_DIR/ranker.db"
           python3 - "$OLD_DB" <<'PY'
           import sqlite3
           import sys
@@ -184,6 +191,7 @@ jobs:
           con.execute("INSERT OR REPLACE INTO videos(id,postId,url,referer,userAgent,sourceKind,ordinal,discoveredAtEpochMillis) VALUES(?,?,?,?,?,?,?,?)", ("compat-video", "compat-marker", "https://example.test/video.mp4", "https://example.test/compat", "ua", "DIRECT", 0, 4))
           con.execute("INSERT OR REPLACE INTO downloads(videoId,status,contentUri,downloadedBytes,totalBytes,errorCode,updatedAtEpochMillis,enqueueOrder,retryCount) VALUES(?,?,?,?,?,?,?,?,?)", ("compat-video", "PAUSED", None, 123, 1000, None, 5, 777, 2))
           con.commit()
+          con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
           con.close()
           PY
           adb shell run-as com.shaterguy.fc2weeklyranker.dev rm -f databases/ranker.db-wal databases/ranker.db-shm
@@ -195,8 +203,15 @@ jobs:
           adb shell am force-stop com.shaterguy.fc2weeklyranker.dev
           sleep 1
 
-          NEW_DB="$RUNNER_TEMP/ranker-dev16.db"
-          adb exec-out run-as com.shaterguy.fc2weeklyranker.dev cat databases/ranker.db > "$NEW_DB"
+          NEW_DB_DIR="$RUNNER_TEMP/dev16-db"
+          mkdir -p "$NEW_DB_DIR"
+          adb exec-out run-as com.shaterguy.fc2weeklyranker.dev cat databases/ranker.db > "$NEW_DB_DIR/ranker.db"
+          for suffix in -wal -shm; do
+            if adb shell run-as com.shaterguy.fc2weeklyranker.dev test -f "databases/ranker.db${suffix}"; then
+              adb exec-out run-as com.shaterguy.fc2weeklyranker.dev cat "databases/ranker.db${suffix}" > "$NEW_DB_DIR/ranker.db${suffix}"
+            fi
+          done
+          NEW_DB="$NEW_DB_DIR/ranker.db"
           python3 - "$NEW_DB" <<'PY'
           import sqlite3
           import sys

@@ -149,7 +149,7 @@ jobs:
           sdkmanager "platform-tools" "emulator" "system-images;android-29;google_apis;x86_64"
           echo no | avdmanager create avd --force --name "$AVD_NAME" --package "system-images;android-29;google_apis;x86_64" --device pixel
           sudo chmod 666 /dev/kvm 2>/dev/null || true
-          emulator -avd "$AVD_NAME" -no-window -noaudio -no-boot-anim -no-snapshot -gpu swiftshader_indirect >/tmp/fc2-emulator.log 2>&1 &
+          "$ANDROID_HOME/emulator/emulator" -avd "$AVD_NAME" -no-window -noaudio -no-boot-anim -no-snapshot -gpu swiftshader_indirect >/tmp/fc2-emulator.log 2>&1 &
           if ! timeout 180s adb wait-for-device; then
             echo 'ERROR: Android emulator did not expose an adb device within 180 seconds.' >&2
             cat /tmp/fc2-emulator.log >&2 || true

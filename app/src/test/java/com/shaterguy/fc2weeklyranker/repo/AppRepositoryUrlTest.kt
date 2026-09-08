@@ -2,12 +2,25 @@ package com.shaterguy.fc2weeklyranker.repo
 
 import com.shaterguy.fc2weeklyranker.download.VideoDownloadWorker
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Test
 
 class AppRepositoryUrlTest {
     @Test
     fun `snapshot key invalidates live board parser revision`() {
         assertEquals("ranking-v4:1234:2", AppRepository.snapshotKey(1234L, 2))
+    }
+
+    @Test
+    fun `ranking dataset key is scoped to the configured origin`() {
+        assertEquals(
+            "https://01.avsee.is|javfc2",
+            AppRepository.rankDatasetKey("https://01.avsee.is"),
+        )
+        assertNotEquals(
+            AppRepository.rankDatasetKey("https://01.avsee.is"),
+            AppRepository.rankDatasetKey("https://02.avsee.is"),
+        )
     }
 
     @Test
@@ -29,10 +42,8 @@ class AppRepositoryUrlTest {
         )
     }
 
-
     @Test
     fun `HLS manifest is never treated as a downloadable video file`() {
         assertEquals(false, VideoDownloadWorker.supportsFileDownload("https://cdn.example.test/playlist.m3u8?token=abc"))
     }
-
 }

@@ -24,6 +24,7 @@ import com.shaterguy.fc2weeklyranker.network.AvseeClient
 import com.shaterguy.fc2weeklyranker.network.BaseUrlPolicy
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.net.URI
@@ -41,7 +42,9 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
     private val probeSessions = mutableMapOf<ProbeKey, ProbeSession>()
 
     fun posts(snapshotKey: String): Flow<List<PostEntity>> = db.postDao().postsForSnapshot(snapshotKey)
-    fun rankingObservations(): Flow<List<RankObservationEntity>> = db.rankObservationDao().observeDataset(RANK_DATASET_KEY)
+    fun rankingObservations(): Flow<List<RankObservationEntity>> = settings.baseUrl.flatMapLatest { baseUrl ->
+        db.rankObservationDao().observeDataset(rankDatasetKey(baseUrl))
+    }
     fun favorites(): Flow<List<PostEntity>> = db.postDao().favorites()
     fun post(postId: String): Flow<PostEntity?> = db.postDao().observeById(postId)
     fun isFavorite(postId: String): Flow<Boolean> = db.postDao().observeFavorite(postId)
@@ -58,7 +61,9 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
     suspend fun refreshPage(pageIndex: Int) {
         val anchorMillis = settings.ensureAnchor()
         val anchor = Instant.ofEpochMilli(anchorMillis)
-        val remote = source.crawlWindow(settings.baseUrl.first(), windowFor(anchor, pageIndex))
+        val baseUrl = settings.baseUrl.first()
+        val datasetKey = rankDatasetKey(baseUrl)
+        val remote = source.crawlWindow(baseUrl, windowFor(anchor, pageIndex))
         val ranked = rank(anchor, remote.map { RankCandidate(it, it.postedAt, it.recommendationCount, it.id) })
         val now = System.currentTimeMillis()
         val postEntities = ranked.map { (candidate, rate) ->
@@ -82,7 +87,7 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
             if (observedAt + MAX_CLOCK_SKEW_MILLIS < postedAt) return@mapNotNull null
             if (observedAt > now + MAX_CLOCK_SKEW_MILLIS) return@mapNotNull null
             RankObservationEntity(
-                datasetKey = RANK_DATASET_KEY,
+                datasetKey = datasetKey,
                 postId = post.id,
                 postedAtEpochMillis = postedAt,
                 commentCount = commentCount,
@@ -97,10 +102,10 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
             if (observations.isNotEmpty()) {
                 observationDao.upsertAll(observations)
                 observations.mapTo(linkedSetOf()) { it.postId }.forEach { postId ->
-                    observationDao.trimPost(RANK_DATASET_KEY, postId, MAX_OBSERVATIONS_PER_POST)
+                    observationDao.trimPost(datasetKey, postId, MAX_OBSERVATIONS_PER_POST)
                 }
             }
-            observationDao.trimDataset(RANK_DATASET_KEY, MAX_OBSERVATIONS_TOTAL)
+            observationDao.trimDataset(datasetKey, MAX_OBSERVATIONS_TOTAL)
         }
     }
 
@@ -278,7 +283,6 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
         const val SOURCE_HISTORICAL = "HISTORICAL"
         private const val PROBE_ORDINAL_BASE = 1_000_000
         private const val PROBE_SLOT_STRIDE = 1_000
-        private const val RANK_DATASET_KEY = "avsee:javfc2"
         private const val OBSERVATION_BUCKET_MILLIS = 30L * 60L * 1_000L
         private const val OBSERVATION_RETENTION_MILLIS = 90L * 24L * 60L * 60L * 1_000L
         private const val MAX_OBSERVATIONS_PER_POST = 64
@@ -287,6 +291,9 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
         private const val MAX_CLOCK_SKEW_MILLIS = 5L * 60L * 1_000L
 
         fun snapshotKey(anchorMillis: Long, pageIndex: Int): String = "ranking-v4:$anchorMillis:$pageIndex"
+
+        internal fun rankDatasetKey(baseUrl: String): String =
+            "${baseUrl.trimEnd('/').lowercase()}|javfc2"
 
         internal fun observationBucket(observedAtEpochMillis: Long): Long =
             observedAtEpochMillis - observedAtEpochMillis % OBSERVATION_BUCKET_MILLIS

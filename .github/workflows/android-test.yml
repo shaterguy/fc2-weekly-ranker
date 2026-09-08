@@ -94,23 +94,14 @@ jobs:
           import re
           import sys
           from pathlib import Path
-
           from cryptography import x509
           from cryptography.hazmat.primitives import hashes
-
           data = Path(sys.argv[1]).read_bytes()
           expected = sys.argv[2].lower()
-          blocks = re.findall(
-              rb"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
-              data,
-              flags=re.S,
-          )
+          blocks = re.findall(rb"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", data, flags=re.S)
           if not blocks:
               raise SystemExit("no signer certificate PEM found in independent verification")
-          fingerprints = {
-              x509.load_pem_x509_certificate(block + b"\n").fingerprint(hashes.SHA256()).hex()
-              for block in blocks
-          }
+          fingerprints = {x509.load_pem_x509_certificate(block + b"\n").fingerprint(hashes.SHA256()).hex() for block in blocks}
           if expected not in fingerprints:
               raise SystemExit("independent signer certificate fingerprint mismatch")
           PY
@@ -131,6 +122,8 @@ jobs:
           OLD="$RUNNER_TEMP/fc2-dev15"
           PASS_FILE="$RUNNER_TEMP/fc2-ranker-signing-pass-compat"
           AVD_NAME=fc2-compat
+          export ANDROID_AVD_HOME="$RUNNER_TEMP/android-avd"
+          mkdir -p "$ANDROID_AVD_HOME"
           trap 'rm -f "$PASS_FILE"; adb emu kill >/dev/null 2>&1 || true' EXIT
 
           git fetch --no-tags origin refs/heads/v0.2.0-dev15:refs/remotes/origin/v0.2.0-dev15
@@ -147,7 +140,8 @@ jobs:
           "$BT/apksigner" verify --min-sdk-version 29 "$OLD_APK"
 
           sdkmanager "platform-tools" "emulator" "system-images;android-29;google_apis;x86_64"
-          echo no | avdmanager create avd --force --name "$AVD_NAME" --package "system-images;android-29;google_apis;x86_64" --device pixel
+          echo no | avdmanager create avd --force --name "$AVD_NAME" --package "system-images;android-29;google_apis;x86_64" --device pixel --path "$ANDROID_AVD_HOME/$AVD_NAME.avd"
+          "$ANDROID_HOME/emulator/emulator" -list-avds | grep -Fxq "$AVD_NAME"
           sudo chmod 666 /dev/kvm 2>/dev/null || true
           "$ANDROID_HOME/emulator/emulator" -avd "$AVD_NAME" -no-window -noaudio -no-boot-anim -no-snapshot -gpu swiftshader_indirect >/tmp/fc2-emulator.log 2>&1 &
           if ! timeout 180s adb wait-for-device; then
@@ -166,9 +160,7 @@ jobs:
           fi
 
           STABLE_APK="$RUNNER_TEMP/fc2-weekly-ranker-v0.1.0.apk"
-          curl --fail --location --retry 3 \
-            --output "$STABLE_APK" \
-            "https://github.com/shaterguy/fc2-weekly-ranker/releases/download/v0.1.0/fc2-weekly-ranker-v0.1.0.apk"
+          curl --fail --location --retry 3 --output "$STABLE_APK" "https://github.com/shaterguy/fc2-weekly-ranker/releases/download/v0.1.0/fc2-weekly-ranker-v0.1.0.apk"
           adb install "$STABLE_APK"
           adb install "$OLD_APK"
           adb shell am start -W -n com.shaterguy.fc2weeklyranker.dev/com.shaterguy.fc2weeklyranker.MainActivity >/dev/null
@@ -181,26 +173,16 @@ jobs:
           python3 - "$OLD_DB" <<'PY'
           import sqlite3
           import sys
-
           path = sys.argv[1]
           con = sqlite3.connect(path)
           version = con.execute("PRAGMA user_version").fetchone()[0]
           if version != 2:
               raise SystemExit(f"expected DEV15 database v2, got {version}")
           con.execute("PRAGMA foreign_keys=ON")
-          con.execute(
-              "INSERT OR REPLACE INTO posts(id,url,title,postedAtEpochMillis,recommendationCount,dailyRate,snapshotKey,fetchedAtEpochMillis) VALUES(?,?,?,?,?,?,?,?)",
-              ("compat-marker", "https://example.test/compat", "compat-marker", 1, 9, 9.0, "compat", 2),
-          )
+          con.execute("INSERT OR REPLACE INTO posts(id,url,title,postedAtEpochMillis,recommendationCount,dailyRate,snapshotKey,fetchedAtEpochMillis) VALUES(?,?,?,?,?,?,?,?)", ("compat-marker", "https://example.test/compat", "compat-marker", 1, 9, 9.0, "compat", 2))
           con.execute("INSERT OR REPLACE INTO favorites(postId,createdAtEpochMillis) VALUES(?,?)", ("compat-marker", 3))
-          con.execute(
-              "INSERT OR REPLACE INTO videos(id,postId,url,referer,userAgent,sourceKind,ordinal,discoveredAtEpochMillis) VALUES(?,?,?,?,?,?,?,?)",
-              ("compat-video", "compat-marker", "https://example.test/video.mp4", "https://example.test/compat", "ua", "DIRECT", 0, 4),
-          )
-          con.execute(
-              "INSERT OR REPLACE INTO downloads(videoId,status,contentUri,downloadedBytes,totalBytes,errorCode,updatedAtEpochMillis,enqueueOrder,retryCount) VALUES(?,?,?,?,?,?,?,?,?)",
-              ("compat-video", "PAUSED", None, 123, 1000, None, 5, 777, 2),
-          )
+          con.execute("INSERT OR REPLACE INTO videos(id,postId,url,referer,userAgent,sourceKind,ordinal,discoveredAtEpochMillis) VALUES(?,?,?,?,?,?,?,?)", ("compat-video", "compat-marker", "https://example.test/video.mp4", "https://example.test/compat", "ua", "DIRECT", 0, 4))
+          con.execute("INSERT OR REPLACE INTO downloads(videoId,status,contentUri,downloadedBytes,totalBytes,errorCode,updatedAtEpochMillis,enqueueOrder,retryCount) VALUES(?,?,?,?,?,?,?,?,?)", ("compat-video", "PAUSED", None, 123, 1000, None, 5, 777, 2))
           con.commit()
           con.close()
           PY
@@ -218,7 +200,6 @@ jobs:
           python3 - "$NEW_DB" <<'PY'
           import sqlite3
           import sys
-
           con = sqlite3.connect(sys.argv[1])
           version = con.execute("PRAGMA user_version").fetchone()[0]
           if version != 3:

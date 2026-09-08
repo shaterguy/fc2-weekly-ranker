@@ -1,6 +1,7 @@
 package com.shaterguy.fc2weeklyranker.repo
 
 import android.content.Context
+import androidx.room.withTransaction
 import androidx.work.Constraints
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
@@ -12,6 +13,7 @@ import com.shaterguy.fc2weeklyranker.data.DownloadEntity
 import com.shaterguy.fc2weeklyranker.data.DownloadStatus
 import com.shaterguy.fc2weeklyranker.data.FavoriteEntity
 import com.shaterguy.fc2weeklyranker.data.PostEntity
+import com.shaterguy.fc2weeklyranker.data.RankObservationEntity
 import com.shaterguy.fc2weeklyranker.data.SettingsStore
 import com.shaterguy.fc2weeklyranker.data.VideoEntity
 import com.shaterguy.fc2weeklyranker.domain.RankCandidate
@@ -39,6 +41,7 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
     private val probeSessions = mutableMapOf<ProbeKey, ProbeSession>()
 
     fun posts(snapshotKey: String): Flow<List<PostEntity>> = db.postDao().postsForSnapshot(snapshotKey)
+    fun rankingObservations(): Flow<List<RankObservationEntity>> = db.rankObservationDao().observeDataset(RANK_DATASET_KEY)
     fun favorites(): Flow<List<PostEntity>> = db.postDao().favorites()
     fun post(postId: String): Flow<PostEntity?> = db.postDao().observeById(postId)
     fun isFavorite(postId: String): Flow<Boolean> = db.postDao().observeFavorite(postId)
@@ -58,10 +61,47 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
         val remote = source.crawlWindow(settings.baseUrl.first(), windowFor(anchor, pageIndex))
         val ranked = rank(anchor, remote.map { RankCandidate(it, it.postedAt, it.recommendationCount, it.id) })
         val now = System.currentTimeMillis()
-        db.postDao().upsert(ranked.map { (candidate, rate) ->
+        val postEntities = ranked.map { (candidate, rate) ->
             val post = candidate.value
-            PostEntity(post.id, post.url, post.title, post.postedAt.toEpochMilli(), post.recommendationCount, rate, snapshotKey(anchorMillis, pageIndex), now)
-        })
+            PostEntity(
+                post.id,
+                post.url,
+                post.title,
+                post.postedAt.toEpochMilli(),
+                post.recommendationCount,
+                rate,
+                snapshotKey(anchorMillis, pageIndex),
+                post.observedAtEpochMillis ?: now,
+            )
+        }
+        val observations = remote.mapNotNull { post ->
+            val commentCount = post.commentCount ?: return@mapNotNull null
+            val observedAt = post.observedAtEpochMillis ?: return@mapNotNull null
+            val postedAt = post.postedAt.toEpochMilli()
+            if (commentCount !in 0..MAX_COMMENT_COUNT) return@mapNotNull null
+            if (observedAt + MAX_CLOCK_SKEW_MILLIS < postedAt) return@mapNotNull null
+            if (observedAt > now + MAX_CLOCK_SKEW_MILLIS) return@mapNotNull null
+            RankObservationEntity(
+                datasetKey = RANK_DATASET_KEY,
+                postId = post.id,
+                postedAtEpochMillis = postedAt,
+                commentCount = commentCount,
+                observedAtEpochMillis = observedAt,
+                observedBucketEpochMillis = observationBucket(observedAt),
+            )
+        }
+        db.withTransaction {
+            db.postDao().upsert(postEntities)
+            val observationDao = db.rankObservationDao()
+            observationDao.deleteOlderThan(now - OBSERVATION_RETENTION_MILLIS)
+            if (observations.isNotEmpty()) {
+                observationDao.upsertAll(observations)
+                observations.mapTo(linkedSetOf()) { it.postId }.forEach { postId ->
+                    observationDao.trimPost(RANK_DATASET_KEY, postId, MAX_OBSERVATIONS_PER_POST)
+                }
+            }
+            observationDao.trimDataset(RANK_DATASET_KEY, MAX_OBSERVATIONS_TOTAL)
+        }
     }
 
     suspend fun manualRefresh(): Long {
@@ -152,7 +192,7 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
         val previous = dao.byVideoId(videoId)
         if (previous?.status in setOf(DownloadStatus.QUEUED, DownloadStatus.RUNNING, DownloadStatus.FINALIZING, DownloadStatus.COMPLETED)) return
         if (!VideoDownloadWorker.supportsFileDownload(video.url)) {
-            dao.upsert(downloadState(videoId, DownloadStatus.FAILED, previous?.contentUri, previous?.downloadedBytes ?: 0L, previous?.totalBytes, "HLS_OFFLINE_UNSUPPORTED"))
+            dao.upsert(downloadState(videoId, DownloadStatus.FAILED, previous?.contentUri, previous?.downloadedBytes ?: 0L, previous?.totalBytes, "HLS_OFFLINE_UNSUPPORTED", previous))
             return
         }
         val canFinalize = previous?.let {
@@ -167,6 +207,7 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
                 if (restarting) 0L else previous?.downloadedBytes ?: 0L,
                 if (restarting) null else previous?.totalBytes,
                 null,
+                previous,
             ),
         )
         enqueueDownload(videoId)
@@ -196,7 +237,7 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
         if (changed == 0) return
         WorkManager.getInstance(context).cancelUniqueWork(VideoDownloadWorker.workName(videoId))
         previous.contentUri?.let { value -> runCatching { context.contentResolver.delete(android.net.Uri.parse(value), null, null) } }
-        dao.upsert(downloadState(videoId, DownloadStatus.STOPPED, null, 0L, null, null))
+        dao.upsert(downloadState(videoId, DownloadStatus.STOPPED, null, 0L, null, null, previous))
     }
 
     private fun enqueueDownload(videoId: String) {
@@ -211,8 +252,25 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
         probeSessions.keys.removeAll { it.postId == postId }
     }
 
-    private fun downloadState(videoId: String, status: String, contentUri: String?, downloadedBytes: Long, totalBytes: Long?, errorCode: String?) =
-        DownloadEntity(videoId, status, contentUri, downloadedBytes, totalBytes, errorCode, System.currentTimeMillis())
+    private fun downloadState(
+        videoId: String,
+        status: String,
+        contentUri: String?,
+        downloadedBytes: Long,
+        totalBytes: Long?,
+        errorCode: String?,
+        previous: DownloadEntity? = null,
+    ) = DownloadEntity(
+        videoId = videoId,
+        status = status,
+        contentUri = contentUri,
+        downloadedBytes = downloadedBytes,
+        totalBytes = totalBytes,
+        errorCode = errorCode,
+        updatedAtEpochMillis = System.currentTimeMillis(),
+        enqueueOrder = previous?.enqueueOrder ?: 0L,
+        retryCount = previous?.retryCount ?: 0,
+    )
 
     companion object {
         const val SOURCE_DIRECT = "DIRECT"
@@ -220,8 +278,18 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
         const val SOURCE_HISTORICAL = "HISTORICAL"
         private const val PROBE_ORDINAL_BASE = 1_000_000
         private const val PROBE_SLOT_STRIDE = 1_000
+        private const val RANK_DATASET_KEY = "avsee:javfc2"
+        private const val OBSERVATION_BUCKET_MILLIS = 30L * 60L * 1_000L
+        private const val OBSERVATION_RETENTION_MILLIS = 90L * 24L * 60L * 60L * 1_000L
+        private const val MAX_OBSERVATIONS_PER_POST = 64
+        private const val MAX_OBSERVATIONS_TOTAL = 20_000
+        private const val MAX_COMMENT_COUNT = 1_000_000
+        private const val MAX_CLOCK_SKEW_MILLIS = 5L * 60L * 1_000L
 
         fun snapshotKey(anchorMillis: Long, pageIndex: Int): String = "ranking-v4:$anchorMillis:$pageIndex"
+
+        internal fun observationBucket(observedAtEpochMillis: Long): Long =
+            observedAtEpochMillis - observedAtEpochMillis % OBSERVATION_BUCKET_MILLIS
 
         fun stableVideoId(postId: String, url: String): String =
             MessageDigest.getInstance("SHA-256").digest("$postId|${canonicalMediaKey(url)}".toByteArray()).take(12).joinToString("") { "%02x".format(it) }

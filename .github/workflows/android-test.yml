@@ -150,12 +150,20 @@ jobs:
           echo no | avdmanager create avd --force --name "$AVD_NAME" --package "system-images;android-29;google_apis;x86_64" --device pixel
           sudo chmod 666 /dev/kvm 2>/dev/null || true
           emulator -avd "$AVD_NAME" -no-window -noaudio -no-boot-anim -no-snapshot -gpu swiftshader_indirect >/tmp/fc2-emulator.log 2>&1 &
-          adb wait-for-device
+          if ! timeout 180s adb wait-for-device; then
+            echo 'ERROR: Android emulator did not expose an adb device within 180 seconds.' >&2
+            cat /tmp/fc2-emulator.log >&2 || true
+            exit 1
+          fi
           for _ in $(seq 1 120); do
             [[ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == "1" ]] && break
             sleep 2
           done
-          [[ "$(adb shell getprop sys.boot_completed | tr -d '\r')" == "1" ]]
+          if [[ "$(adb shell getprop sys.boot_completed | tr -d '\r')" != "1" ]]; then
+            echo 'ERROR: Android emulator did not complete boot within 240 seconds after adb became available.' >&2
+            cat /tmp/fc2-emulator.log >&2 || true
+            exit 1
+          fi
 
           STABLE_APK="$RUNNER_TEMP/fc2-weekly-ranker-v0.1.0.apk"
           curl --fail --location --retry 3 \

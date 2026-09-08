@@ -135,6 +135,7 @@ object AdaptiveRanking {
         val perPostSlopes = histories.values.mapNotNull { history ->
             val slopes = history.zipWithNext().mapNotNull { (first, second) ->
                 if (second.commentCount < first.commentCount) return@mapNotNull null
+                if (first.postedAtEpochMillis != second.postedAtEpochMillis) return@mapNotNull null
                 val elapsedMillis = second.observedAtEpochMillis - first.observedAtEpochMillis
                 if (elapsedMillis < MIN_GROWTH_INTERVAL_MILLIS || elapsedMillis > MAX_GROWTH_INTERVAL_MILLIS) return@mapNotNull null
                 val dx = logAge(second.postedAtEpochMillis, second.observedAtEpochMillis) - logAge(first.postedAtEpochMillis, first.observedAtEpochMillis)
@@ -153,6 +154,7 @@ object AdaptiveRanking {
     private fun collectIntervals(histories: Map<String, List<RankObservationEntity>>, nowEpochMillis: Long): List<TrendInterval> = buildList {
         histories.forEach { (postId, history) ->
             history.zipWithNext().forEach { (first, second) ->
+                if (first.postedAtEpochMillis != second.postedAtEpochMillis) return@forEach
                 val elapsedHours = (second.observedAtEpochMillis - first.observedAtEpochMillis) / HOUR_MILLIS.toDouble()
                 if (elapsedHours < MIN_TREND_INTERVAL_HOURS || elapsedHours > MAX_TREND_INTERVAL_HOURS) return@forEach
                 if (second.observedAtEpochMillis < nowEpochMillis - TREND_LOOKBACK_MILLIS) return@forEach

@@ -100,7 +100,7 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
             val observationDao = db.rankObservationDao()
             observationDao.deleteOlderThan(now - OBSERVATION_RETENTION_MILLIS)
             if (observations.isNotEmpty()) {
-                observationDao.upsertAll(observations)
+                observationDao.upsertNewest(observations)
                 observations.mapTo(linkedSetOf()) { it.postId }.forEach { postId ->
                     observationDao.trimPost(datasetKey, postId, MAX_OBSERVATIONS_PER_POST)
                 }

@@ -130,8 +130,45 @@ interface RankObservationDao {
     @Query("SELECT * FROM rank_observations WHERE datasetKey = :datasetKey ORDER BY observedAtEpochMillis ASC")
     fun observeDataset(datasetKey: String): Flow<List<RankObservationEntity>>
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun upsertAll(observations: List<RankObservationEntity>)
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertIgnore(observation: RankObservationEntity): Long
+
+    @Query(
+        """
+        UPDATE rank_observations
+        SET postedAtEpochMillis = :postedAtEpochMillis,
+            commentCount = :commentCount,
+            observedAtEpochMillis = :observedAtEpochMillis
+        WHERE datasetKey = :datasetKey
+          AND postId = :postId
+          AND observedBucketEpochMillis = :observedBucketEpochMillis
+          AND observedAtEpochMillis < :observedAtEpochMillis
+        """,
+    )
+    suspend fun updateIfNewer(
+        datasetKey: String,
+        postId: String,
+        observedBucketEpochMillis: Long,
+        postedAtEpochMillis: Long,
+        commentCount: Int,
+        observedAtEpochMillis: Long,
+    ): Int
+
+    @Transaction
+    suspend fun upsertNewest(observations: List<RankObservationEntity>) {
+        observations.forEach { observation ->
+            if (insertIgnore(observation) == -1L) {
+                updateIfNewer(
+                    datasetKey = observation.datasetKey,
+                    postId = observation.postId,
+                    observedBucketEpochMillis = observation.observedBucketEpochMillis,
+                    postedAtEpochMillis = observation.postedAtEpochMillis,
+                    commentCount = observation.commentCount,
+                    observedAtEpochMillis = observation.observedAtEpochMillis,
+                )
+            }
+        }
+    }
 
     @Query("DELETE FROM rank_observations WHERE observedAtEpochMillis < :cutoffEpochMillis")
     suspend fun deleteOlderThan(cutoffEpochMillis: Long)

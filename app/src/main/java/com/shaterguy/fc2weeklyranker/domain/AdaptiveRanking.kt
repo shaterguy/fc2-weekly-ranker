@@ -13,16 +13,15 @@ private const val HOUR_MILLIS = 3_600_000L
 private const val DAY_MILLIS = 86_400_000L
 private const val HISTORY_DAYS = 90L
 private const val CLOCK_SKEW_MILLIS = 5 * 60_000L
+private const val MIN_GROWTH_INTERVAL_MILLIS = 30L * 60L * 1_000L
+private const val MAX_GROWTH_INTERVAL_MILLIS = 30L * DAY_MILLIS
 private const val MIN_TREND_INTERVAL_HOURS = 0.5
 private const val MAX_TREND_INTERVAL_HOURS = 72.0
 private const val TREND_LOOKBACK_MILLIS = 72L * HOUR_MILLIS
 private const val LN_2 = 0.6931471805599453
-private const val MAX_LOG_AGE_CORRECTION = 1.3862943611198906 // ln(4)
+private const val MAX_LOG_AGE_CORRECTION = 1.3862943611198906
 
-enum class RankingMode {
-    POPULARITY,
-    TRENDING,
-}
+enum class RankingMode { POPULARITY, TRENDING }
 
 data class RankedPost(
     val post: PostEntity,
@@ -41,7 +40,6 @@ object AdaptiveRanking {
         nowEpochMillis: Long = System.currentTimeMillis(),
     ): List<RankedPost> {
         if (posts.isEmpty()) return emptyList()
-
         val histories = observations.asSequence()
             .filter { isValidObservation(it, nowEpochMillis) }
             .groupBy { it.postId }
@@ -53,14 +51,9 @@ object AdaptiveRanking {
         val intervalRateCap = robustRateCap(intervals.map { it.ratePerHour })
         val cappedIntervals = intervals.map { it.copy(ratePerHour = it.ratePerHour.coerceAtMost(intervalRateCap)) }
         val intervalPostCount = cappedIntervals.mapTo(hashSetOf()) { it.postId }.size
-        val trendPrior = cappedIntervals.map { it.ratePerHour }
-            .takeIf { intervalPostCount >= 3 && it.isNotEmpty() }
-            ?.let(::median)
-
+        val trendPrior = cappedIntervals.map { it.ratePerHour }.takeIf { intervalPostCount >= 3 && it.isNotEmpty() }?.let(::median)
         val observedCommentRates = posts.mapNotNull { post ->
-            latestByPost[post.id]?.let { observation ->
-                coldDailyRate(post, observation.commentCount, observation.observedAtEpochMillis)
-            }
+            latestByPost[post.id]?.let { observation -> coldDailyRate(post, observation.commentCount, observation.observedAtEpochMillis) }
         }
         val legacyRates = posts.map { it.dailyRate.coerceAtLeast(0.0) }
 
@@ -77,64 +70,32 @@ object AdaptiveRanking {
             val latest = latestByPost[post.id]
             val commentCount = latest?.commentCount
             val coldPopularity = if (latest != null && observedCommentRates.isNotEmpty()) {
-                percentile(
-                    coldDailyRate(post, latest.commentCount, latest.observedAtEpochMillis),
-                    observedCommentRates,
-                )
+                percentile(coldDailyRate(post, latest.commentCount, latest.observedAtEpochMillis), observedCommentRates)
             } else {
                 percentile(post.dailyRate.coerceAtLeast(0.0), legacyRates)
             }
-            val learned = if (latest != null) {
-                sameAgePopularity(
-                    post = post,
-                    target = latest,
-                    histories = histories,
-                    globalGrowthSlope = globalGrowthSlope,
-                    nowEpochMillis = nowEpochMillis,
-                )
-            } else {
-                null
-            }
+            val learned = if (latest != null) sameAgePopularity(post, latest, histories, globalGrowthSlope, nowEpochMillis) else null
             val popularityConfidence = learned?.second ?: 0.0
-            val popularity = 100.0 * (
-                if (learned == null) coldPopularity
-                else (1.0 - popularityConfidence) * coldPopularity + popularityConfidence * learned.first
-            )
-
+            val popularity = 100.0 * if (learned == null) coldPopularity else (1.0 - popularityConfidence) * coldPopularity + popularityConfidence * learned.first
             val ownIntervals = cappedIntervals.filter { it.postId == post.id }
             val trendObserved = ownIntervals.isNotEmpty()
             val latestObservedAt = latest?.observedAtEpochMillis
             val freshness = freshnessDecay(latestObservedAt, nowEpochMillis)
             val trendRaw = if (trendObserved) {
-                val weightedRate = weightedRecentRate(ownIntervals, nowEpochMillis)
-                val acceleration = accelerationBoost(ownIntervals)
-                weightedRate * (1.0 + 0.25 * acceleration) * freshness
+                weightedRecentRate(ownIntervals, nowEpochMillis) * (1.0 + 0.25 * accelerationBoost(ownIntervals)) * freshness
             } else {
-                val coldHourly = when {
-                    latest != null -> coldDailyRate(post, latest.commentCount, latest.observedAtEpochMillis) / 24.0
-                    else -> post.dailyRate.coerceAtLeast(0.0) / 24.0
-                }
+                val coldHourly = if (latest != null) coldDailyRate(post, latest.commentCount, latest.observedAtEpochMillis) / 24.0 else post.dailyRate.coerceAtLeast(0.0) / 24.0
                 val learnedWeight = if (trendPrior == null) 0.0 else intervalPostCount / (intervalPostCount + 20.0)
                 ((1.0 - learnedWeight) * coldHourly + learnedWeight * (trendPrior ?: 0.0)) * freshness
             }
             Working(post, commentCount, popularity, popularityConfidence, trendRaw, trendObserved)
         }
-
         val positiveTrendValues = working.map { it.trendRaw.coerceAtLeast(0.0) }
         return working.map { item ->
             val trendScore = if (item.trendRaw <= 0.0) 0.0 else 100.0 * percentile(item.trendRaw, positiveTrendValues)
-            RankedPost(
-                post = item.post,
-                commentCount = item.commentCount,
-                popularityScore = item.popularity.coerceIn(0.0, 100.0),
-                trendingScore = trendScore.coerceIn(0.0, 100.0),
-                popularityConfidence = item.confidence.coerceIn(0.0, 1.0),
-                trendingObserved = item.trendObserved,
-            )
+            RankedPost(item.post, item.commentCount, item.popularity.coerceIn(0.0, 100.0), trendScore.coerceIn(0.0, 100.0), item.confidence.coerceIn(0.0, 1.0), item.trendObserved)
         }.sortedWith(
-            compareByDescending<RankedPost> {
-                if (mode == RankingMode.POPULARITY) it.popularityScore else it.trendingScore
-            }
+            compareByDescending<RankedPost> { if (mode == RankingMode.POPULARITY) it.popularityScore else it.trendingScore }
                 .thenByDescending { it.commentCount ?: -1 }
                 .thenByDescending { it.post.dailyRate }
                 .thenByDescending { it.post.postedAtEpochMillis }
@@ -151,51 +112,34 @@ object AdaptiveRanking {
     ): Pair<Double, Double>? {
         val targetX = logAge(target.postedAtEpochMillis, target.observedAtEpochMillis)
         data class Peer(val adjustedComments: Double, val weight: Double)
-        val peers = histories.asSequence()
-            .filter { (postId, _) -> postId != post.id }
-            .mapNotNull { (_, history) ->
-                val peer = history.minByOrNull { observation ->
-                    abs(logAge(observation.postedAtEpochMillis, observation.observedAtEpochMillis) - targetX)
-                } ?: return@mapNotNull null
-                val peerX = logAge(peer.postedAtEpochMillis, peer.observedAtEpochMillis)
-                val distance = abs(peerX - targetX)
-                if (distance > 1.5) return@mapNotNull null
-                val correction = (globalGrowthSlope * (targetX - peerX))
-                    .coerceIn(-MAX_LOG_AGE_CORRECTION, MAX_LOG_AGE_CORRECTION)
-                val adjusted = expm1((ln1p(peer.commentCount.toDouble()) + correction).coerceAtLeast(0.0))
-                val freshnessDays = max(0.0, (nowEpochMillis - peer.observedAtEpochMillis) / DAY_MILLIS.toDouble())
-                val weight = exp(-distance / 0.55) * exp(-LN_2 * freshnessDays / 30.0)
-                Peer(adjusted, weight)
-            }
-            .filter { it.weight > 0.01 }
-            .toList()
+        val peers = histories.asSequence().filter { (postId, _) -> postId != post.id }.mapNotNull { (_, history) ->
+            val peer = history.minByOrNull { observation -> abs(logAge(observation.postedAtEpochMillis, observation.observedAtEpochMillis) - targetX) } ?: return@mapNotNull null
+            val peerX = logAge(peer.postedAtEpochMillis, peer.observedAtEpochMillis)
+            val distance = abs(peerX - targetX)
+            if (distance > 1.5) return@mapNotNull null
+            val correction = (globalGrowthSlope * (targetX - peerX)).coerceIn(-MAX_LOG_AGE_CORRECTION, MAX_LOG_AGE_CORRECTION)
+            val adjusted = expm1((ln1p(peer.commentCount.toDouble()) + correction).coerceAtLeast(0.0))
+            val freshnessDays = max(0.0, (nowEpochMillis - peer.observedAtEpochMillis) / DAY_MILLIS.toDouble())
+            Peer(adjusted, exp(-distance / 0.55) * exp(-LN_2 * freshnessDays / 30.0))
+        }.filter { it.weight > 0.01 }.toList()
         if (peers.isEmpty()) return null
-
         val totalWeight = peers.sumOf { it.weight }
         if (totalWeight <= 0.0) return null
-        val belowWeight = peers.sumOf { peer ->
-            when {
-                peer.adjustedComments < target.commentCount -> peer.weight
-                peer.adjustedComments == target.commentCount.toDouble() -> peer.weight * 0.5
-                else -> 0.0
-            }
-        }
+        val belowWeight = peers.sumOf { peer -> when { peer.adjustedComments < target.commentCount -> peer.weight; peer.adjustedComments == target.commentCount.toDouble() -> peer.weight * 0.5; else -> 0.0 } }
         val learnedPercentile = (belowWeight / totalWeight).coerceIn(0.0, 1.0)
         val effectivePeers = totalWeight.coerceAtMost(peers.size.toDouble())
-        val confidence = effectivePeers / (effectivePeers + 20.0)
-        return learnedPercentile to confidence
+        return learnedPercentile to effectivePeers / (effectivePeers + 20.0)
     }
 
     private fun learnedGrowthSlope(histories: Map<String, List<RankObservationEntity>>): Double {
         val perPostSlopes = histories.values.mapNotNull { history ->
             val slopes = history.zipWithNext().mapNotNull { (first, second) ->
                 if (second.commentCount < first.commentCount) return@mapNotNull null
-                val x1 = logAge(first.postedAtEpochMillis, first.observedAtEpochMillis)
-                val x2 = logAge(second.postedAtEpochMillis, second.observedAtEpochMillis)
-                val dx = x2 - x1
+                val elapsedMillis = second.observedAtEpochMillis - first.observedAtEpochMillis
+                if (elapsedMillis < MIN_GROWTH_INTERVAL_MILLIS || elapsedMillis > MAX_GROWTH_INTERVAL_MILLIS) return@mapNotNull null
+                val dx = logAge(second.postedAtEpochMillis, second.observedAtEpochMillis) - logAge(first.postedAtEpochMillis, first.observedAtEpochMillis)
                 if (dx <= 0.02) return@mapNotNull null
-                ((ln1p(second.commentCount.toDouble()) - ln1p(first.commentCount.toDouble())) / dx)
-                    .takeIf { it.isFinite() && it >= 0.0 }
+                ((ln1p(second.commentCount.toDouble()) - ln1p(first.commentCount.toDouble())) / dx).takeIf { it.isFinite() && it >= 0.0 }
             }
             slopes.takeIf { it.isNotEmpty() }?.let(::median)
         }
@@ -204,16 +148,9 @@ object AdaptiveRanking {
         return (median(perPostSlopes) * shrinkage).coerceAtLeast(0.0)
     }
 
-    private data class TrendInterval(
-        val postId: String,
-        val endEpochMillis: Long,
-        val ratePerHour: Double,
-    )
+    private data class TrendInterval(val postId: String, val endEpochMillis: Long, val durationHours: Double, val ratePerHour: Double)
 
-    private fun collectIntervals(
-        histories: Map<String, List<RankObservationEntity>>,
-        nowEpochMillis: Long,
-    ): List<TrendInterval> = buildList {
+    private fun collectIntervals(histories: Map<String, List<RankObservationEntity>>, nowEpochMillis: Long): List<TrendInterval> = buildList {
         histories.forEach { (postId, history) ->
             history.zipWithNext().forEach { (first, second) ->
                 val elapsedHours = (second.observedAtEpochMillis - first.observedAtEpochMillis) / HOUR_MILLIS.toDouble()
@@ -222,7 +159,7 @@ object AdaptiveRanking {
                 val delta = second.commentCount - first.commentCount
                 if (delta < 0) return@forEach
                 val rate = delta / elapsedHours
-                if (rate.isFinite() && rate >= 0.0) add(TrendInterval(postId, second.observedAtEpochMillis, rate))
+                if (rate.isFinite() && rate >= 0.0) add(TrendInterval(postId, second.observedAtEpochMillis, elapsedHours, rate))
             }
         }
     }
@@ -233,7 +170,7 @@ object AdaptiveRanking {
         var weightSum = 0.0
         intervals.forEach { interval ->
             val hoursOld = max(0.0, (nowEpochMillis - interval.endEpochMillis) / HOUR_MILLIS.toDouble())
-            val weight = exp(-LN_2 * hoursOld / 24.0)
+            val weight = exp(-LN_2 * hoursOld / 24.0) * (24.0 / interval.durationHours).coerceAtMost(1.0)
             weighted += interval.ratePerHour * weight
             weightSum += weight
         }
@@ -267,11 +204,7 @@ object AdaptiveRanking {
         return true
     }
 
-    private fun deduplicate(values: List<RankObservationEntity>): List<RankObservationEntity> = values
-        .groupBy { it.observedBucketEpochMillis }
-        .values
-        .mapNotNull { bucket -> bucket.maxByOrNull { it.observedAtEpochMillis } }
-        .sortedBy { it.observedAtEpochMillis }
+    private fun deduplicate(values: List<RankObservationEntity>): List<RankObservationEntity> = values.groupBy { it.observedBucketEpochMillis }.values.mapNotNull { bucket -> bucket.maxByOrNull { it.observedAtEpochMillis } }.sortedBy { it.observedAtEpochMillis }
 
     private fun coldDailyRate(post: PostEntity, comments: Int, atEpochMillis: Long): Double {
         val elapsedDays = max(1.0, (atEpochMillis - post.postedAtEpochMillis).coerceAtLeast(0L) / DAY_MILLIS.toDouble())
@@ -293,13 +226,7 @@ object AdaptiveRanking {
         val finite = population.filter { it.isFinite() }
         if (finite.isEmpty()) return 0.5
         var below = 0.0
-        finite.forEach { peer ->
-            below += when {
-                peer < value -> 1.0
-                peer == value -> 0.5
-                else -> 0.0
-            }
-        }
+        finite.forEach { peer -> below += when { peer < value -> 1.0; peer == value -> 0.5; else -> 0.0 } }
         return (below / finite.size).coerceIn(0.0, 1.0)
     }
 

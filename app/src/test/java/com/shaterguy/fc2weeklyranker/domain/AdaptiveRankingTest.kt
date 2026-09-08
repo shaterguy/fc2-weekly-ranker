@@ -86,6 +86,26 @@ class AdaptiveRankingTest {
     }
 
     @Test
+    fun `sub-thirty-minute hidden bursts do not train the growth curve`() {
+        val target = post("target-growth", ageHours = 24, legacyRate = 0.0)
+        val peer = post("peer-growth", ageHours = 48, legacyRate = 0.0)
+        val base = listOf(obs(target, 10), obs(peer, 15))
+        val baseline = AdaptiveRanking.rank(listOf(target, peer), base, RankingMode.POPULARITY, now)
+            .first { it.post.id == target.id }.popularityScore
+
+        val noisy = base.toMutableList()
+        repeat(5) { index ->
+            val hidden = post("hidden-burst-$index", ageHours = 1, legacyRate = 0.0)
+            noisy += obsAt(hidden, comments = 1, observedMinutesAgo = 31)
+            noisy += obsAt(hidden, comments = 100, observedMinutesAgo = 29)
+        }
+        val withNoise = AdaptiveRanking.rank(listOf(target, peer), noisy, RankingMode.POPULARITY, now)
+            .first { it.post.id == target.id }.popularityScore
+
+        assertEquals(baseline, withNoise, 0.0001)
+    }
+
+    @Test
     fun `comment decreases and stale observations are not learned as positive trend`() {
         val decreasing = post("decreasing", ageHours = 240, legacyRate = 2.0)
         val stale = post("stale", ageHours = 2_400, legacyRate = 3.0)

@@ -4,7 +4,10 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.shaterguy.fc2weeklyranker.AppGraph
+import com.shaterguy.fc2weeklyranker.domain.AdaptiveRanking
+import com.shaterguy.fc2weeklyranker.domain.RankingMode
 import com.shaterguy.fc2weeklyranker.repo.AppRepository
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -12,6 +15,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -24,19 +28,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val repo = AppGraph.repository
     private val page = MutableStateFlow(0)
     private val localAnchor = MutableStateFlow<Long?>(null)
+    private val rankingModeState = MutableStateFlow(RankingMode.POPULARITY)
     private val mutableMessage = MutableStateFlow<String?>(null)
     private val loading = MutableStateFlow(false)
     private val probeRegistrationJobs = mutableMapOf<String, MutableList<Job>>()
 
     val pageIndex = page.stateIn(viewModelScope, SharingStarted.Eagerly, 0)
+    val rankingMode = rankingModeState.stateIn(viewModelScope, SharingStarted.Eagerly, RankingMode.POPULARITY)
     val message = mutableMessage.stateIn(viewModelScope, SharingStarted.Eagerly, null)
     val isLoading = loading.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     val baseUrl = repo.settings.baseUrl.stateIn(viewModelScope, SharingStarted.Eagerly, "https://01.avsee.is")
     val anchorEpochMillis = combine(repo.settings.anchorEpochMillis, localAnchor) { stored, local -> local ?: stored }
         .filterNotNull()
         .stateIn(viewModelScope, SharingStarted.Eagerly, System.currentTimeMillis())
-    val posts = combine(anchorEpochMillis, page) { anchor, index -> AppRepository.snapshotKey(anchor, index) }
+    private val rawPosts = combine(anchorEpochMillis, page) { anchor, index -> AppRepository.snapshotKey(anchor, index) }
         .flatMapLatest(repo::posts)
+    val posts = combine(rawPosts, repo.rankingObservations(), rankingModeState) { currentPosts, observations, mode ->
+        AdaptiveRanking.rank(currentPosts, observations, mode, System.currentTimeMillis()).map { it.post }
+    }
+        .flowOn(Dispatchers.Default)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val favorites = repo.favorites().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val visitedPostIds = repo.visitedPostIds().stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
@@ -47,6 +57,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             localAnchor.value = anchor
             runOperation { repo.ensurePage(0) }
         }
+    }
+
+    fun selectRankingMode(mode: RankingMode) {
+        rankingModeState.value = mode
     }
 
     fun olderPage() {

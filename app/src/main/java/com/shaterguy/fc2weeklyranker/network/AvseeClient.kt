@@ -24,18 +24,30 @@ import java.util.LinkedHashMap
 private const val BOARD_PATH = "/bbs/board.php?bo_table=javfc2&sop=and&sst=wr_datetime&sod=desc"
 private const val UA = "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 Chrome/151 Mobile Safari/537.36"
 private val SEOUL = ZoneId.of("Asia/Seoul")
+private val COUNT_TOKEN = Regex("(?<![A-Za-z0-9])(?:\\d{1,3}(?:,\\d{3})+|\\d+)(?![A-Za-z0-9])")
 
 data class RemoteMedia(val url: String, val referer: String, val kind: String, val ordinal: Int)
-data class RemotePost(val id: String, val url: String, val title: String, val postedAt: Instant, val recommendationCount: Int, val media: List<RemoteMedia>)
+data class RemotePost(
+    val id: String,
+    val url: String,
+    val title: String,
+    val postedAt: Instant,
+    val recommendationCount: Int,
+    val media: List<RemoteMedia>,
+    val commentCount: Int? = null,
+    val observedAtEpochMillis: Long? = null,
+)
+
+private data class FetchedHtml(val html: String, val fetchedAtEpochMillis: Long)
 
 class AvseeClient(
     private val http: OkHttpClient,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
     private val crawlHtmlCache = Collections.synchronizedMap(
-        object : LinkedHashMap<String, String>(MAX_CRAWL_CACHE_ENTRIES, 0.75f, true) {
+        object : LinkedHashMap<String, FetchedHtml>(MAX_CRAWL_CACHE_ENTRIES, 0.75f, true) {
             override fun removeEldestEntry(
-                eldest: MutableMap.MutableEntry<String, String>?,
+                eldest: MutableMap.MutableEntry<String, FetchedHtml>?,
             ): Boolean = size > MAX_CRAWL_CACHE_ENTRIES
         },
     )
@@ -60,7 +72,7 @@ class AvseeClient(
             val prefetched = prefetchedBoard?.takeIf { it.first == page }
             prefetchedBoard = null
             val links = prefetched?.second?.getOrThrow()
-                ?: parseBoardLinks(fetchForCrawl(boardUrl), baseUrl)
+                ?: parseBoardLinks(fetchForCrawl(boardUrl).html, baseUrl)
             if (links.isEmpty()) break
             var parsedOnPage = 0
             var failedOnPage = 0
@@ -70,7 +82,13 @@ class AvseeClient(
                     async {
                         runCatching {
                             detailLimiter.withPermit {
-                                parseDetail(fetchForCrawl(link, boardUrl), link, window.upperInclusive)
+                                val fetched = fetchForCrawl(link, boardUrl)
+                                parseDetail(
+                                    html = fetched.html,
+                                    detailUrl = link,
+                                    referenceInstant = window.upperInclusive,
+                                    observedAtEpochMillis = fetched.fetchedAtEpochMillis,
+                                )
                             }
                         }
                     }
@@ -80,7 +98,7 @@ class AvseeClient(
                         val nextPage = page + 1
                         val nextBoardUrl = "$baseUrl$BOARD_PATH&page=$nextPage"
                         nextPage to runCatching {
-                            parseBoardLinks(fetchForCrawl(nextBoardUrl), baseUrl)
+                            parseBoardLinks(fetchForCrawl(nextBoardUrl).html, baseUrl)
                         }
                     }
                 } else {
@@ -124,6 +142,7 @@ class AvseeClient(
         html: String,
         detailUrl: String,
         referenceInstant: Instant = Instant.now(),
+        observedAtEpochMillis: Long? = null,
     ): RemotePost {
         val doc = Jsoup.parse(html, detailUrl)
         val id = queryParam(detailUrl, "wr_id") ?: detailUrl.substringAfterLast('=').take(80)
@@ -131,7 +150,16 @@ class AvseeClient(
             .firstNotNullOfOrNull { selector -> doc.selectFirst(selector)?.text()?.trim()?.takeIf(String::isNotBlank) }
             ?: "게시물 $id"
         val postedAt = parsePostedAt(doc, referenceInstant) ?: error("게시시각을 찾을 수 없습니다.")
-        return RemotePost(id, detailUrl, title, postedAt, parseRecommendation(doc), parseMedia(doc, detailUrl))
+        return RemotePost(
+            id = id,
+            url = detailUrl,
+            title = title,
+            postedAt = postedAt,
+            recommendationCount = parseRecommendation(doc),
+            media = parseMedia(doc, detailUrl),
+            commentCount = parseCommentCount(doc),
+            observedAtEpochMillis = observedAtEpochMillis,
+        )
     }
 
     private fun parsePostedAt(doc: Document, referenceInstant: Instant): Instant? {
@@ -205,6 +233,21 @@ class AvseeClient(
             .minByOrNull { candidate -> Duration.between(candidate, referenceInstant).abs() }
     }
 
+    private fun parseCommentCount(doc: Document): Int? {
+        doc.select(".fa-comment, [class*=comment], [class*=cmt]").forEach { marker ->
+            val texts = buildList {
+                marker.text().takeIf(String::isNotBlank)?.let(::add)
+                marker.nextElementSibling()?.text()?.takeIf(String::isNotBlank)?.let(::add)
+                marker.parent()?.takeIf { it != doc.body() }?.text()?.takeIf(String::isNotBlank)?.let(::add)
+            }
+            texts.firstNotNullOfOrNull(::parseCountToken)?.let { return it }
+        }
+        return null
+    }
+
+    private fun parseCountToken(text: String): Int? =
+        COUNT_TOKEN.find(text)?.value?.replace(",", "")?.toIntOrNull()
+
     private fun parseRecommendation(doc: Document): Int {
         doc.select("#wr_good, [onclick*=apms_good] b, .view-good b, #good_button strong, #bo_v_act .bo_v_good strong, [id*=good] strong, [class*=good] strong").forEach { node ->
             Regex("\\d+").find(node.text())?.value?.toIntOrNull()?.let { return it }
@@ -253,12 +296,14 @@ class AvseeClient(
         return path.endsWith(".mp4") || path.endsWith(".m3u8") || path.endsWith(".webm")
     }
 
-    private fun fetchForCrawl(url: String, referer: String? = null): String {
+    private fun fetchForCrawl(url: String, referer: String? = null): FetchedHtml {
         crawlHtmlCache[url]?.let { return it }
-        return fetch(url, referer).also { crawlHtmlCache[url] = it }
+        return fetchActual(url, referer).also { crawlHtmlCache[url] = it }
     }
 
-    private fun fetch(url: String, referer: String? = null): String {
+    private fun fetch(url: String, referer: String? = null): String = fetchActual(url, referer).html
+
+    private fun fetchActual(url: String, referer: String? = null): FetchedHtml {
         val request = Request.Builder().url(url)
             .header("User-Agent", UA)
             .header("Accept-Language", "ko-KR,ko;q=0.9,en;q=0.7")
@@ -266,7 +311,8 @@ class AvseeClient(
             .build()
         http.newCall(request).execute().use { response ->
             check(response.isSuccessful) { "HTTP_${response.code}" }
-            return response.body.string()
+            val html = response.body.string()
+            return FetchedHtml(html, System.currentTimeMillis())
         }
     }
 

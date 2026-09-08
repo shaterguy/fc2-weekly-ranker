@@ -44,7 +44,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val rawPosts = combine(anchorEpochMillis, page) { anchor, index -> AppRepository.snapshotKey(anchor, index) }
         .flatMapLatest(repo::posts)
     val posts = combine(rawPosts, repo.rankingObservations(), rankingModeState) { currentPosts, observations, mode ->
-        AdaptiveRanking.rank(currentPosts, observations, mode, System.currentTimeMillis()).map { it.post }
+        AdaptiveRanking.rank(currentPosts, observations, mode, System.currentTimeMillis())
     }
         .flowOn(Dispatchers.Default)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())

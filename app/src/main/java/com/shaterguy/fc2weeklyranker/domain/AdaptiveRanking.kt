@@ -58,7 +58,9 @@ object AdaptiveRanking {
             ?.let(::median)
 
         val observedCommentRates = posts.mapNotNull { post ->
-            latestByPost[post.id]?.let { observation -> coldDailyRate(post, observation.commentCount, nowEpochMillis) }
+            latestByPost[post.id]?.let { observation ->
+                coldDailyRate(post, observation.commentCount, observation.observedAtEpochMillis)
+            }
         }
         val legacyRates = posts.map { it.dailyRate.coerceAtLeast(0.0) }
 
@@ -76,7 +78,7 @@ object AdaptiveRanking {
             val commentCount = latest?.commentCount
             val coldPopularity = if (latest != null && observedCommentRates.isNotEmpty()) {
                 percentile(
-                    coldDailyRate(post, latest.commentCount, nowEpochMillis),
+                    coldDailyRate(post, latest.commentCount, latest.observedAtEpochMillis),
                     observedCommentRates,
                 )
             } else {
@@ -109,7 +111,7 @@ object AdaptiveRanking {
                 weightedRate * (1.0 + 0.25 * acceleration) * freshness
             } else {
                 val coldHourly = when {
-                    latest != null -> coldDailyRate(post, latest.commentCount, nowEpochMillis) / 24.0
+                    latest != null -> coldDailyRate(post, latest.commentCount, latest.observedAtEpochMillis) / 24.0
                     else -> post.dailyRate.coerceAtLeast(0.0) / 24.0
                 }
                 val learnedWeight = if (trendPrior == null) 0.0 else intervalPostCount / (intervalPostCount + 20.0)
@@ -271,8 +273,8 @@ object AdaptiveRanking {
         .mapNotNull { bucket -> bucket.maxByOrNull { it.observedAtEpochMillis } }
         .sortedBy { it.observedAtEpochMillis }
 
-    private fun coldDailyRate(post: PostEntity, comments: Int, nowEpochMillis: Long): Double {
-        val elapsedDays = max(1.0, (nowEpochMillis - post.postedAtEpochMillis).coerceAtLeast(0L) / DAY_MILLIS.toDouble())
+    private fun coldDailyRate(post: PostEntity, comments: Int, atEpochMillis: Long): Double {
+        val elapsedDays = max(1.0, (atEpochMillis - post.postedAtEpochMillis).coerceAtLeast(0L) / DAY_MILLIS.toDouble())
         return comments.coerceAtLeast(0) / elapsedDays
     }
 

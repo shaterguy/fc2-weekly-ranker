@@ -25,6 +25,25 @@ class AdaptiveRankingTest {
     }
 
     @Test
+    fun `cold popularity uses observation age instead of assuming comments stayed unchanged until now`() {
+        val earlyObservedOldPost = post("early-observed", ageHours = 240, legacyRate = 0.0)
+        val recentPost = post("recent", ageHours = 48, legacyRate = 0.0)
+        val observations = listOf(
+            obsAt(earlyObservedOldPost, comments = 10, observedMinutesAgo = 9 * 24 * 60),
+            obs(recentPost, comments = 5),
+        )
+
+        val ranked = AdaptiveRanking.rank(
+            listOf(recentPost, earlyObservedOldPost),
+            observations,
+            RankingMode.POPULARITY,
+            now,
+        )
+
+        assertEquals("early-observed", ranked.first().post.id)
+    }
+
+    @Test
     fun `trending prefers a rising post over a popular but stagnant post`() {
         val stagnant = post("stagnant", ageHours = 72, legacyRate = 100.0)
         val rising = post("rising", ageHours = 72, legacyRate = 1.0)

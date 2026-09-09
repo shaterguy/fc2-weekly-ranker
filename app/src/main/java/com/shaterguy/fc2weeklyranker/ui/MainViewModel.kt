@@ -6,6 +6,9 @@ import androidx.lifecycle.viewModelScope
 import androidx.room.withTransaction
 import com.shaterguy.fc2weeklyranker.AppGraph
 import com.shaterguy.fc2weeklyranker.data.PostEntity
+import com.shaterguy.fc2weeklyranker.domain.AdaptiveRanking
+import com.shaterguy.fc2weeklyranker.domain.RankedPost
+import com.shaterguy.fc2weeklyranker.domain.RankingMode
 import com.shaterguy.fc2weeklyranker.network.RemotePost
 import com.shaterguy.fc2weeklyranker.network.RemoteSearchPost
 import com.shaterguy.fc2weeklyranker.network.isTransientNetworkError
@@ -112,6 +115,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val localAnchor = MutableStateFlow<Long?>(null)
     private val mutableMessage = MutableStateFlow<String?>(null)
     private val loading = MutableStateFlow(false)
+    private val mutableRankingMode = MutableStateFlow(RankingMode.POPULARITY)
     private val mutableSearchResults = MutableStateFlow<List<RemoteSearchPost>>(emptyList())
     private val mutableSearchMessage = MutableStateFlow<String?>(null)
     private val searchLoading = MutableStateFlow(false)
@@ -128,6 +132,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val pageIndex = page.stateIn(viewModelScope, SharingStarted.Eagerly, 0)
     val message = mutableMessage.stateIn(viewModelScope, SharingStarted.Eagerly, null)
     val isLoading = loading.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    val rankingMode = mutableRankingMode.stateIn(viewModelScope, SharingStarted.Eagerly, RankingMode.POPULARITY)
     val searchResults = mutableSearchResults.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
     val searchMessage = mutableSearchMessage.stateIn(viewModelScope, SharingStarted.Eagerly, null)
     val isSearchLoading = searchLoading.stateIn(viewModelScope, SharingStarted.Eagerly, false)
@@ -142,6 +147,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         .flatMapLatest { (anchor, index) -> repo.posts(anchor, index) }
         .map(::rankingVisiblePosts)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    val rankedPosts = combine(posts, repo.rankingObservations(), rankingMode) { currentPosts, observations, mode ->
+        AdaptiveRanking.rank(currentPosts, observations, mode)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList<RankedPost>())
     val favorites = repo.favorites().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val visitedPostIds = repo.visitedPostIds().stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
 
@@ -209,6 +217,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             if (loadPage(target, token)) pagePrefetch.start(target + 1)
         }
+    }
+
+    fun selectRankingMode(mode: RankingMode) {
+        mutableRankingMode.value = mode
     }
 
     fun refreshAnchor() {

@@ -57,6 +57,8 @@ import androidx.navigation.navArgument
 import com.shaterguy.fc2weeklyranker.data.DownloadStatus
 import com.shaterguy.fc2weeklyranker.data.PostEntity
 import com.shaterguy.fc2weeklyranker.data.VideoEntity
+import com.shaterguy.fc2weeklyranker.domain.RankedPost
+import com.shaterguy.fc2weeklyranker.domain.RankingMode
 import com.shaterguy.fc2weeklyranker.domain.windowFor
 import com.shaterguy.fc2weeklyranker.download.VideoDownloadWorker
 import com.shaterguy.fc2weeklyranker.media.NativeVideoPlayer
@@ -116,8 +118,8 @@ private fun RankerApp(vm: MainViewModel) {
     val backStack by nav.currentBackStackEntryAsState()
     val route = backStack?.destination?.route.orEmpty()
     val showBottom = destinations.any { it.route == route }
-    val rankingPosts by vm.posts.collectAsState()
-    val rankingPostIds = remember(rankingPosts) { rankingPosts.map { it.id } }
+    val rankingPosts by vm.rankedPosts.collectAsState()
+    val rankingPostIds = remember(rankingPosts) { rankingPosts.map { it.post.id } }
     val favoritePosts by vm.favorites.collectAsState()
     val favoritePostIds = remember(favoritePosts) { favoritePosts.map { it.id } }
     var detailPostIds by rememberSaveable { mutableStateOf(arrayListOf<String>()) }
@@ -191,7 +193,8 @@ private fun RankerApp(vm: MainViewModel) {
 
 @Composable
 private fun RankingScreen(vm: MainViewModel, onPost: (String) -> Unit) {
-    val posts by vm.posts.collectAsState()
+    val posts by vm.rankedPosts.collectAsState()
+    val rankingMode by vm.rankingMode.collectAsState()
     val favoritePosts by vm.favorites.collectAsState()
     val visited by vm.visitedPostIds.collectAsState()
     val anchor by vm.anchorEpochMillis.collectAsState()
@@ -214,17 +217,47 @@ private fun RankingScreen(vm: MainViewModel, onPost: (String) -> Unit) {
             TextButton(onClick = vm::refreshAnchor, enabled = !loading) { Text("기준 새로고침") }
             OutlinedButton(onClick = vm::olderPage, enabled = !loading) { Text("이전 7일") }
         }
+        RankingModeSelector(rankingMode, vm::selectRankingMode)
         StatusLine(loading, message, vm::clearMessage)
         if (!loading && posts.isEmpty()) Text("이 기간에 표시할 게시물이 없습니다.", Modifier.padding(vertical = 24.dp))
         LazyColumn(contentPadding = PaddingValues(bottom = 20.dp)) {
-            itemsIndexed(posts, key = { _, post -> post.id }) { index, post ->
+            itemsIndexed(posts, key = { _, ranked -> ranked.post.id }) { index, ranked ->
+                val post = ranked.post
                 PostCard(
                     rank = index + 1,
                     post = post,
                     onPost = onPost,
                     visited = visited.contains(post.id),
                     favorite = post.id in favoriteIds,
+                    rankingSummary = formatRankingSummary(ranked, rankingMode),
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun RankingModeSelector(selected: RankingMode, onSelect: (RankingMode) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        if (selected == RankingMode.POPULARITY) {
+            Button(onClick = { onSelect(RankingMode.POPULARITY) }, modifier = Modifier.weight(1f)) {
+                Text("인기순")
+            }
+        } else {
+            OutlinedButton(onClick = { onSelect(RankingMode.POPULARITY) }, modifier = Modifier.weight(1f)) {
+                Text("인기순")
+            }
+        }
+        if (selected == RankingMode.TRENDING) {
+            Button(onClick = { onSelect(RankingMode.TRENDING) }, modifier = Modifier.weight(1f)) {
+                Text("급상승순")
+            }
+        } else {
+            OutlinedButton(onClick = { onSelect(RankingMode.TRENDING) }, modifier = Modifier.weight(1f)) {
+                Text("급상승순")
             }
         }
     }
@@ -577,6 +610,7 @@ private fun PostCard(
     favorite: Boolean,
     showRank: Boolean = true,
     showMetrics: Boolean = true,
+    rankingSummary: String? = null,
 ) {
     Card(
         Modifier
@@ -617,10 +651,19 @@ private fun PostCard(
                 }
                 if (showMetrics) {
                     Text("댓글 ${post.recommendationCount} · 일평균 ${"%.2f".format(post.dailyRate)}")
+                    rankingSummary?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                 }
                 Text(formatDate(post.postedAtEpochMillis), style = MaterialTheme.typography.bodySmall)
             }
         }
+    }
+}
+
+private fun formatRankingSummary(ranked: RankedPost, mode: RankingMode): String {
+    val observed = ranked.commentCount?.toString() ?: "관측 전"
+    return when (mode) {
+        RankingMode.POPULARITY -> "인기점수 ${"%.1f".format(ranked.popularityScore)} · 관측댓글 $observed"
+        RankingMode.TRENDING -> "급상승점수 ${"%.1f".format(ranked.trendingScore)} · 관측댓글 $observed"
     }
 }
 

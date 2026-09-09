@@ -1,11 +1,13 @@
 package com.shaterguy.fc2weeklyranker.repo
 
 import android.content.Context
+import androidx.room.withTransaction
 import com.shaterguy.fc2weeklyranker.data.AppDatabase
 import com.shaterguy.fc2weeklyranker.data.DownloadEntity
 import com.shaterguy.fc2weeklyranker.data.DownloadStatus
 import com.shaterguy.fc2weeklyranker.data.FavoriteEntity
 import com.shaterguy.fc2weeklyranker.data.PostEntity
+import com.shaterguy.fc2weeklyranker.data.RankObservationEntity
 import com.shaterguy.fc2weeklyranker.data.SettingsStore
 import com.shaterguy.fc2weeklyranker.data.VideoEntity
 import com.shaterguy.fc2weeklyranker.domain.RankCandidate
@@ -18,6 +20,7 @@ import com.shaterguy.fc2weeklyranker.network.AvseeClient
 import com.shaterguy.fc2weeklyranker.network.BaseUrlPolicy
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -87,6 +90,9 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
             }
     }
 
+    fun rankingObservations(): Flow<List<RankObservationEntity>> = settings.baseUrl.flatMapLatest { baseUrl ->
+        db.rankObservationDao().observeDataset(rankDatasetKey(baseUrl))
+    }
     fun favorites(): Flow<List<PostEntity>> = db.postDao().favorites()
     fun post(postId: String): Flow<PostEntity?> = db.postDao().observeById(postId)
     fun previousPost(postId: String): Flow<PostEntity?> = db.postDao().observePrevious(postId)
@@ -112,6 +118,7 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
     private suspend fun refreshPageForAnchor(pageIndex: Int, anchorMillis: Long, force: Boolean) {
         val anchor = Instant.ofEpochMilli(anchorMillis)
         val baseUrl = settings.baseUrl.first()
+        val datasetKey = rankDatasetKey(baseUrl)
         val coverageKey = coverageKey(baseUrl, anchorMillis, pageIndex)
         if (!force && settings.isRankingWindowCovered(coverageKey)) return
 
@@ -121,20 +128,44 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
         val remote = source.crawlWindow(baseUrl, windowFor(anchor, pageIndex), knownDates)
         val ranked = rank(anchor, remote.map { RankCandidate(it, it.postedAt, it.commentCount, it.id) })
         val now = System.currentTimeMillis()
-        if (ranked.isNotEmpty()) {
-            db.postDao().upsert(ranked.map { (candidate, rate) ->
-                val post = candidate.value
-                PostEntity(
-                    post.id,
-                    post.url,
-                    post.title,
-                    post.postedAt.toEpochMilli(),
-                    post.commentCount,
-                    rate,
-                    snapshotKey(anchorMillis, pageIndex),
-                    now,
-                )
-            })
+        val postEntities = ranked.map { (candidate, rate) ->
+            val post = candidate.value
+            PostEntity(
+                post.id,
+                post.url,
+                post.title,
+                post.postedAt.toEpochMilli(),
+                post.commentCount,
+                rate,
+                snapshotKey(anchorMillis, pageIndex),
+                now,
+            )
+        }
+        val observations = remote.mapNotNull { post ->
+            val postedAt = post.postedAt.toEpochMilli()
+            val commentCount = post.commentCount
+            if (commentCount !in 0..MAX_COMMENT_COUNT) return@mapNotNull null
+            if (now + MAX_CLOCK_SKEW_MILLIS < postedAt) return@mapNotNull null
+            RankObservationEntity(
+                datasetKey = datasetKey,
+                postId = post.id,
+                postedAtEpochMillis = postedAt,
+                commentCount = commentCount,
+                observedAtEpochMillis = now,
+                observedBucketEpochMillis = observationBucket(now),
+            )
+        }
+        db.withTransaction {
+            if (postEntities.isNotEmpty()) db.postDao().upsert(postEntities)
+            val observationDao = db.rankObservationDao()
+            observationDao.deleteOlderThan(now - OBSERVATION_RETENTION_MILLIS)
+            if (observations.isNotEmpty()) {
+                observationDao.upsertNewest(observations)
+                observations.mapTo(linkedSetOf()) { it.postId }.forEach { postId ->
+                    observationDao.trimPost(datasetKey, postId, MAX_OBSERVATIONS_PER_POST)
+                }
+            }
+            observationDao.trimDataset(datasetKey, MAX_OBSERVATIONS_TOTAL)
         }
         settings.markRankingWindowCovered(coverageKey)
     }
@@ -327,6 +358,12 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
         private val SEOUL = ZoneId.of("Asia/Seoul")
         private const val PROBE_ORDINAL_BASE = 1_000_000
         private const val PROBE_SLOT_STRIDE = 1_000
+        private const val OBSERVATION_BUCKET_MILLIS = 30L * 60L * 1_000L
+        private const val OBSERVATION_RETENTION_MILLIS = 90L * 24L * 60L * 60L * 1_000L
+        private const val MAX_OBSERVATIONS_PER_POST = 64
+        private const val MAX_OBSERVATIONS_TOTAL = 20_000
+        private const val MAX_COMMENT_COUNT = 1_000_000
+        private const val MAX_CLOCK_SKEW_MILLIS = 5L * 60L * 1_000L
 
         fun snapshotKey(anchorMillis: Long, pageIndex: Int): String = "ranking-v5-comments:$anchorMillis:$pageIndex"
 
@@ -334,6 +371,12 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
             val window = windowFor(Instant.ofEpochMilli(anchorMillis), pageIndex)
             return "ranking-window-v1:$baseUrl:${window.startDate}:${window.endDate}"
         }
+
+        internal fun rankDatasetKey(baseUrl: String): String =
+            "${baseUrl.trimEnd('/').lowercase()}|javfc2"
+
+        internal fun observationBucket(observedAtEpochMillis: Long): Long =
+            observedAtEpochMillis - observedAtEpochMillis % OBSERVATION_BUCKET_MILLIS
 
         fun stableVideoId(postId: String, url: String): String =
             MessageDigest.getInstance("SHA-256").digest("$postId|${canonicalMediaKey(url)}".toByteArray()).take(12).joinToString("") { "%02x".format(it) }

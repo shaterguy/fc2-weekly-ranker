@@ -198,7 +198,7 @@ jobs:
           con.close()
           PY
           adb shell run-as com.shaterguy.fc2weeklyranker.dev rm -f databases/ranker.db-wal databases/ranker.db-shm
-          adb shell run-as com.shaterguy.fc2weeklyranker.dev sh -c 'cat > databases/ranker.db' < "$OLD_DB"
+          adb exec-in run-as com.shaterguy.fc2weeklyranker.dev dd of=databases/ranker.db < "$OLD_DB"
 
           adb install -r "$CURRENT_APK"
           adb shell am start -W -n com.shaterguy.fc2weeklyranker.dev/com.shaterguy.fc2weeklyranker.MainActivity >/dev/null

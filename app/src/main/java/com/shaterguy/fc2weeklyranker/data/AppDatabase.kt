@@ -95,6 +95,20 @@ data class DownloadEntity(
     @ColumnInfo(defaultValue = "0") val retryCount: Int,
 )
 
+@Entity(
+    tableName = "rank_observations",
+    primaryKeys = ["datasetKey", "postId", "observedBucketEpochMillis"],
+    indices = [Index(value = ["datasetKey", "postId"]), Index(value = ["observedAtEpochMillis"])],
+)
+data class RankObservationEntity(
+    val datasetKey: String,
+    val postId: String,
+    val postedAtEpochMillis: Long,
+    val commentCount: Int,
+    val observedAtEpochMillis: Long,
+    val observedBucketEpochMillis: Long,
+)
+
 data class DownloadListItem(
     val videoId: String,
     val status: String,
@@ -172,6 +186,81 @@ interface PostDao {
 
     @Query("DELETE FROM favorites WHERE postId = :postId")
     suspend fun removeFavorite(postId: String)
+}
+
+@Dao
+interface RankObservationDao {
+    @Query("SELECT * FROM rank_observations WHERE datasetKey = :datasetKey ORDER BY observedAtEpochMillis ASC")
+    fun observeDataset(datasetKey: String): Flow<List<RankObservationEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertIgnore(observation: RankObservationEntity): Long
+
+    @Query(
+        """
+        UPDATE rank_observations
+        SET postedAtEpochMillis = :postedAtEpochMillis,
+            commentCount = :commentCount,
+            observedAtEpochMillis = :observedAtEpochMillis
+        WHERE datasetKey = :datasetKey
+          AND postId = :postId
+          AND observedBucketEpochMillis = :observedBucketEpochMillis
+          AND observedAtEpochMillis < :observedAtEpochMillis
+        """,
+    )
+    suspend fun updateIfNewer(
+        datasetKey: String,
+        postId: String,
+        observedBucketEpochMillis: Long,
+        postedAtEpochMillis: Long,
+        commentCount: Int,
+        observedAtEpochMillis: Long,
+    ): Int
+
+    @Transaction
+    suspend fun upsertNewest(observations: List<RankObservationEntity>) {
+        observations.forEach { observation ->
+            if (insertIgnore(observation) == -1L) {
+                updateIfNewer(
+                    datasetKey = observation.datasetKey,
+                    postId = observation.postId,
+                    observedBucketEpochMillis = observation.observedBucketEpochMillis,
+                    postedAtEpochMillis = observation.postedAtEpochMillis,
+                    commentCount = observation.commentCount,
+                    observedAtEpochMillis = observation.observedAtEpochMillis,
+                )
+            }
+        }
+    }
+
+    @Query("DELETE FROM rank_observations WHERE observedAtEpochMillis < :cutoffEpochMillis")
+    suspend fun deleteOlderThan(cutoffEpochMillis: Long)
+
+    @Query(
+        """
+        DELETE FROM rank_observations
+        WHERE rowid IN (
+            SELECT rowid FROM rank_observations
+            WHERE datasetKey = :datasetKey AND postId = :postId
+            ORDER BY observedAtEpochMillis DESC
+            LIMIT -1 OFFSET :keep
+        )
+        """,
+    )
+    suspend fun trimPost(datasetKey: String, postId: String, keep: Int)
+
+    @Query(
+        """
+        DELETE FROM rank_observations
+        WHERE rowid IN (
+            SELECT rowid FROM rank_observations
+            WHERE datasetKey = :datasetKey
+            ORDER BY observedAtEpochMillis DESC
+            LIMIT -1 OFFSET :keep
+        )
+        """,
+    )
+    suspend fun trimDataset(datasetKey: String, keep: Int)
 }
 
 @Dao
@@ -321,9 +410,14 @@ interface DownloadDao {
     suspend fun deleteCompletedHistory(videoId: String): Int
 }
 
-@Database(entities = [PostEntity::class, FavoriteEntity::class, VideoEntity::class, DownloadEntity::class], version = 2, exportSchema = true)
+@Database(
+    entities = [PostEntity::class, FavoriteEntity::class, VideoEntity::class, DownloadEntity::class, RankObservationEntity::class],
+    version = 3,
+    exportSchema = true,
+)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun postDao(): PostDao
+    abstract fun rankObservationDao(): RankObservationDao
     abstract fun videoDao(): VideoDao
     abstract fun downloadDao(): DownloadDao
 
@@ -333,6 +427,26 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE downloads ADD COLUMN enqueueOrder INTEGER NOT NULL DEFAULT 0")
                 db.execSQL("ALTER TABLE downloads ADD COLUMN retryCount INTEGER NOT NULL DEFAULT 0")
                 db.execSQL("UPDATE downloads SET enqueueOrder = rowid WHERE enqueueOrder = 0")
+            }
+        }
+
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS rank_observations (
+                        datasetKey TEXT NOT NULL,
+                        postId TEXT NOT NULL,
+                        postedAtEpochMillis INTEGER NOT NULL,
+                        commentCount INTEGER NOT NULL,
+                        observedAtEpochMillis INTEGER NOT NULL,
+                        observedBucketEpochMillis INTEGER NOT NULL,
+                        PRIMARY KEY(datasetKey, postId, observedBucketEpochMillis)
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_rank_observations_datasetKey_postId ON rank_observations (datasetKey, postId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_rank_observations_observedAtEpochMillis ON rank_observations (observedAtEpochMillis)")
             }
         }
 

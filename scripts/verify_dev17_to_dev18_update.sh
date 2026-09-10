@@ -125,6 +125,13 @@ if [[ "$(adb shell getprop sys.boot_completed | tr -d '\r')" != '1' ]]; then
   exit 1
 fi
 
+STABLE_APK="$RUNNER_TEMP/fc2-weekly-ranker-v0.1.0.apk"
+if [[ ! -s "$STABLE_APK" ]]; then
+  curl --fail --silent --show-error --location --retry 3 \
+    --output "$STABLE_APK" \
+    "https://github.com/shaterguy/fc2-weekly-ranker/releases/download/v0.1.0/fc2-weekly-ranker-v0.1.0.apk"
+fi
+adb install "$STABLE_APK" >/dev/null
 adb shell dumpsys package "$STABLE_PACKAGE" | grep -Fq 'versionName=0.1.0'
 adb uninstall "$DEV_PACKAGE" >/dev/null
 adb install "$DEV17_APK" >/dev/null

@@ -18,7 +18,10 @@ DEV17_ARTIFACT_DIGEST='sha256:a879a9b6a4d4fead6aee847f3312be5740fd0355e748f62ca1
 PINNED_TEST_CERT_SHA256='ff32473e516ff59ca24ada94fe22e8282ce70fd66bd94fb0975340106d981cfd'
 
 CURRENT_BADGING="$("$BT/aapt" dump badging "$CURRENT_APK")"
-grep -Fq "package: name='$DEV_PACKAGE' versionCode='42' versionName='0.2.0-dev18'" <<<"$CURRENT_BADGING"
+if ! grep -Fq "package: name='$DEV_PACKAGE' versionCode='42' versionName='0.2.0-dev18'" <<<"$CURRENT_BADGING"; then
+  echo 'ERROR: current TEST APK identity is not DEV18/versionCode 42.' >&2
+  exit 1
+fi
 
 META="$RUNNER_TEMP/fc2-dev17-artifact.json"
 DEV17_APK="$RUNNER_TEMP/$DEV17_ARTIFACT_NAME"
@@ -59,17 +62,40 @@ curl --fail --silent --show-error --location --retry 3 \
   "https://api.github.com/repos/shaterguy/fc2-weekly-ranker/actions/artifacts/$DEV17_ARTIFACT_ID/zip" \
   --output "$DEV17_APK"
 
-test -s "$DEV17_APK"
+if [[ ! -s "$DEV17_APK" ]]; then
+  echo 'ERROR: pinned DEV17 artifact download is empty.' >&2
+  exit 1
+fi
+ACTUAL_DEV17_DIGEST="sha256:$(sha256sum "$DEV17_APK" | awk '{print $1}')"
+if [[ "$ACTUAL_DEV17_DIGEST" != "$DEV17_ARTIFACT_DIGEST" ]]; then
+  echo "ERROR: pinned DEV17 artifact byte digest mismatch: $ACTUAL_DEV17_DIGEST" >&2
+  exit 1
+fi
 
 DEV17_BADGING="$("$BT/aapt" dump badging "$DEV17_APK")"
-grep -Fq "package: name='$DEV_PACKAGE' versionCode='41' versionName='0.2.0-dev17'" <<<"$DEV17_BADGING"
+if ! grep -Fq "package: name='$DEV_PACKAGE' versionCode='41' versionName='0.2.0-dev17'" <<<"$DEV17_BADGING"; then
+  echo 'ERROR: pinned DEV17 APK identity is not DEV17/versionCode 41.' >&2
+  exit 1
+fi
 "$BT/apksigner" verify --min-sdk-version 29 "$DEV17_APK"
 DEV17_CERT_SHA256="$("$BT/apksigner" verify --print-certs "$DEV17_APK" | awk -F': ' '/Signer #1 certificate SHA-256 digest:/{print $2; exit}' | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
-[[ "$DEV17_CERT_SHA256" == "$PINNED_TEST_CERT_SHA256" ]]
+if [[ "$DEV17_CERT_SHA256" != "$PINNED_TEST_CERT_SHA256" ]]; then
+  echo "ERROR: pinned DEV17 signer mismatch: $DEV17_CERT_SHA256" >&2
+  exit 1
+fi
 
-AVD_NAME='fc2-compat'
-export ANDROID_AVD_HOME="$RUNNER_TEMP/android-avd"
-"$ANDROID_HOME/emulator/emulator" -list-avds | grep -Fxq "$AVD_NAME"
+echo 'DEV17 baseline artifact identity, digest, and signer verified.'
+
+AVD_NAME='fc2-dev17-update'
+export ANDROID_AVD_HOME="$RUNNER_TEMP/android-avd-dev17-update"
+rm -rf "$ANDROID_AVD_HOME"
+mkdir -p "$ANDROID_AVD_HOME"
+sdkmanager "platform-tools" "emulator" "system-images;android-29;google_apis;x86_64" >/dev/null
+echo no | avdmanager create avd --force --name "$AVD_NAME" --package "system-images;android-29;google_apis;x86_64" --device pixel --path "$ANDROID_AVD_HOME/$AVD_NAME.avd" >/dev/null
+if ! "$ANDROID_HOME/emulator/emulator" -list-avds | grep -Fxq "$AVD_NAME"; then
+  echo 'ERROR: isolated DEV17 update AVD was not created.' >&2
+  exit 1
+fi
 trap 'adb emu kill >/dev/null 2>&1 || true' EXIT
 "$ANDROID_HOME/emulator/emulator" -avd "$AVD_NAME" -no-window -noaudio -no-boot-anim -no-snapshot -gpu swiftshader_indirect >"$RUNNER_TEMP/fc2-dev17-update-emulator.log" 2>&1 &
 if ! timeout 180s adb wait-for-device; then

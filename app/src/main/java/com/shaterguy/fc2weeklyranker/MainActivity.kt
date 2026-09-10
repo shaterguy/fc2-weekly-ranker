@@ -61,8 +61,10 @@ import com.shaterguy.fc2weeklyranker.domain.RankedPost
 import com.shaterguy.fc2weeklyranker.domain.RankingMode
 import com.shaterguy.fc2weeklyranker.domain.windowFor
 import com.shaterguy.fc2weeklyranker.download.VideoDownloadWorker
-import com.shaterguy.fc2weeklyranker.media.NativeVideoPlayer
+import com.shaterguy.fc2weeklyranker.media.CoordinatedNativeVideoPlayer
+import com.shaterguy.fc2weeklyranker.media.NativeVideoSessionController
 import com.shaterguy.fc2weeklyranker.media.RestrictedIframePlayer
+import com.shaterguy.fc2weeklyranker.media.rememberNativeVideoSessionController
 import com.shaterguy.fc2weeklyranker.repo.AppRepository
 import com.shaterguy.fc2weeklyranker.ui.DownloadScreen
 import com.shaterguy.fc2weeklyranker.ui.MainViewModel
@@ -332,6 +334,7 @@ private fun VideoDetailScreen(
     val loading by vm.isLoading.collectAsState()
     val message by vm.message.collectAsState()
     val uriHandler = LocalUriHandler.current
+    val nativeVideoController = rememberNativeVideoSessionController(postId)
     var refreshStartedAt by remember(postId) { mutableStateOf<Long?>(null) }
     var syncFinished by remember(postId) { mutableStateOf(false) }
     var syncSucceeded by remember(postId) { mutableStateOf(false) }
@@ -459,7 +462,7 @@ private fun VideoDetailScreen(
                 contentPadding = PaddingValues(bottom = 24.dp),
             ) {
                 itemsIndexed(directVideos, key = { _, video -> video.id }) { index, video ->
-                    VideoCard(vm, index, video)
+                    VideoCard(vm, index, video, nativeVideoController)
                 }
             }
         } else if (syncFinished && syncSucceeded && activeMediaExpected) {
@@ -488,103 +491,158 @@ internal fun visibleDetailResolvers(videos: List<VideoEntity>, refreshStartedAtE
 }
 
 @Composable
-private fun VideoCard(vm: MainViewModel, index: Int, video: VideoEntity) {
+private fun VideoCard(
+    vm: MainViewModel,
+    index: Int,
+    video: VideoEntity,
+    nativeVideoController: NativeVideoSessionController,
+) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("영상 ${index + 1}", fontWeight = FontWeight.SemiBold)
-            NativeVideoPlayer(video)
-            DownloadControls(vm, video, index)
+            CoordinatedNativeVideoPlayer(video, nativeVideoController)
+            DownloadControls(vm, video, index) {
+                nativeVideoController.openFullscreen(video, autoPlay = true)
+            }
         }
     }
 }
 
 @Composable
-private fun DownloadControls(vm: MainViewModel, video: VideoEntity, index: Int) {
+private fun DownloadControls(
+    vm: MainViewModel,
+    video: VideoEntity,
+    index: Int,
+    onOpenNativePlayer: () -> Unit,
+) {
     val download by remember(video.id) { vm.download(video.id) }.collectAsState(initial = null)
     val state = download
     when {
         !VideoDownloadWorker.supportsFileDownload(video.url) -> {
             Text("스트리밍 주소는 동영상 파일로 저장할 수 없습니다.", style = MaterialTheme.typography.bodySmall)
+            NativePlayerButton(index, onOpenNativePlayer, Modifier.fillMaxWidth())
         }
         state?.status == DownloadStatus.QUEUED -> {
             Text("다운로드 대기 중", style = MaterialTheme.typography.bodySmall)
             state.errorCode?.let { Text("재시도 대기: $it", style = MaterialTheme.typography.bodySmall) }
-            OutlinedButton(
-                onClick = { vm.stopDownload(video.id) },
-                modifier = Modifier.semantics { contentDescription = "영상 ${index + 1} 다운로드 정지" },
-            ) { Text("정지") }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = { vm.stopDownload(video.id) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .semantics { contentDescription = "영상 ${index + 1} 다운로드 정지" },
+                ) { Text("정지") }
+                NativePlayerButton(index, onOpenNativePlayer, Modifier.weight(1f))
+            }
         }
         state?.status == DownloadStatus.RUNNING -> {
             DownloadProgress(state.downloadedBytes, state.totalBytes)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(
                     onClick = { vm.pauseDownload(video.id) },
-                    modifier = Modifier.semantics { contentDescription = "영상 ${index + 1} 다운로드 일시정지" },
+                    modifier = Modifier
+                        .weight(1f)
+                        .semantics { contentDescription = "영상 ${index + 1} 다운로드 일시정지" },
                 ) { Text("일시정지") }
                 OutlinedButton(
                     onClick = { vm.stopDownload(video.id) },
-                    modifier = Modifier.semantics { contentDescription = "영상 ${index + 1} 다운로드 정지" },
+                    modifier = Modifier
+                        .weight(1f)
+                        .semantics { contentDescription = "영상 ${index + 1} 다운로드 정지" },
                 ) { Text("정지") }
             }
+            NativePlayerButton(index, onOpenNativePlayer, Modifier.fillMaxWidth())
         }
         state?.status == DownloadStatus.PAUSED -> {
             DownloadProgress(state.downloadedBytes, state.totalBytes, prefix = "일시정지")
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = { vm.queueDownload(video.id) },
-                    modifier = Modifier.semantics { contentDescription = "영상 ${index + 1} 다운로드 계속" },
+                    modifier = Modifier
+                        .weight(1f)
+                        .semantics { contentDescription = "영상 ${index + 1} 다운로드 계속" },
                 ) { Text("계속 다운로드") }
-                OutlinedButton(
-                    onClick = { vm.stopDownload(video.id) },
-                    modifier = Modifier.semantics { contentDescription = "영상 ${index + 1} 다운로드 정지" },
-                ) { Text("정지") }
+                NativePlayerButton(index, onOpenNativePlayer, Modifier.weight(1f))
             }
+            OutlinedButton(
+                onClick = { vm.stopDownload(video.id) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .semantics { contentDescription = "영상 ${index + 1} 다운로드 정지" },
+            ) { Text("정지") }
         }
         state?.status == DownloadStatus.FINALIZING -> {
             LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
             Text("다운로드 파일 저장을 마무리하고 있습니다…", style = MaterialTheme.typography.bodySmall)
+            NativePlayerButton(index, onOpenNativePlayer, Modifier.fillMaxWidth())
         }
         state?.status == DownloadStatus.COMPLETED -> {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = { vm.queueDownload(video.id) },
-                    modifier = Modifier.semantics { contentDescription = "영상 ${index + 1} 다운로드" },
+                    modifier = Modifier
+                        .weight(1f)
+                        .semantics { contentDescription = "영상 ${index + 1} 다운로드" },
                 ) { Text("다운로드") }
-                Text(
-                    "다운로드 기록 ${formatDateTime(state.updatedAtEpochMillis)}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.primary,
-                )
+                NativePlayerButton(index, onOpenNativePlayer, Modifier.weight(1f))
             }
+            Text(
+                "다운로드 기록 ${formatDateTime(state.updatedAtEpochMillis)}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
         }
         state?.status == DownloadStatus.FAILED -> {
             Text("다운로드 실패: ${state.errorCode ?: "알 수 없는 오류"}", color = MaterialTheme.colorScheme.error)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(
                     onClick = { vm.queueDownload(video.id) },
-                    modifier = Modifier.semantics { contentDescription = "영상 ${index + 1} 다운로드 다시 시도" },
+                    modifier = Modifier
+                        .weight(1f)
+                        .semantics { contentDescription = "영상 ${index + 1} 다운로드 다시 시도" },
                 ) { Text("다시 다운로드") }
-                if (state.contentUri != null) {
-                    TextButton(
-                        onClick = { vm.stopDownload(video.id) },
-                        modifier = Modifier.semantics { contentDescription = "영상 ${index + 1} 부분 다운로드 삭제" },
-                    ) { Text("부분 파일 삭제") }
-                }
+                NativePlayerButton(index, onOpenNativePlayer, Modifier.weight(1f))
+            }
+            if (state.contentUri != null) {
+                TextButton(
+                    onClick = { vm.stopDownload(video.id) },
+                    modifier = Modifier.semantics { contentDescription = "영상 ${index + 1} 부분 다운로드 삭제" },
+                ) { Text("부분 파일 삭제") }
             }
         }
         state?.status == DownloadStatus.STOPPED -> {
             Text("다운로드를 정지했습니다.", style = MaterialTheme.typography.bodySmall)
-            Button(
-                onClick = { vm.queueDownload(video.id) },
-                modifier = Modifier.semantics { contentDescription = "영상 ${index + 1} 다운로드 새로 시작" },
-            ) { Text("다운로드") }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = { vm.queueDownload(video.id) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .semantics { contentDescription = "영상 ${index + 1} 다운로드 새로 시작" },
+                ) { Text("다운로드") }
+                NativePlayerButton(index, onOpenNativePlayer, Modifier.weight(1f))
+            }
         }
         else -> {
-            Button(
-                onClick = { vm.queueDownload(video.id) },
-                modifier = Modifier.semantics { contentDescription = "영상 ${index + 1} 다운로드" },
-            ) { Text("다운로드") }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = { vm.queueDownload(video.id) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .semantics { contentDescription = "영상 ${index + 1} 다운로드" },
+                ) { Text("다운로드") }
+                NativePlayerButton(index, onOpenNativePlayer, Modifier.weight(1f))
+            }
         }
+    }
+}
+
+@Composable
+private fun NativePlayerButton(index: Int, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    OutlinedButton(
+        onClick = onClick,
+        modifier = modifier.semantics { contentDescription = "영상 ${index + 1} 내장플레이어 열기" },
+    ) {
+        Text("내장플레이어 열기", maxLines = 1, style = MaterialTheme.typography.labelSmall)
     }
 }
 

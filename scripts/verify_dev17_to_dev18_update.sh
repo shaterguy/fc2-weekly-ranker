@@ -78,7 +78,19 @@ if ! grep -Fq "package: name='$DEV_PACKAGE' versionCode='41' versionName='0.2.0-
   exit 1
 fi
 "$BT/apksigner" verify --min-sdk-version 29 "$DEV17_APK"
-DEV17_CERT_SHA256="$("$BT/apksigner" verify --print-certs "$DEV17_APK" | awk -F': ' '/Signer #1 certificate SHA-256 digest:/{print $2; exit}' | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+DEV17_CERT_OUTPUT="$RUNNER_TEMP/fc2-dev17-cert.txt"
+DEV17_CERT_PEM="$RUNNER_TEMP/fc2-dev17-signer.pem"
+"$BT/apksigner" verify --min-sdk-version 29 --print-certs-pem "$DEV17_APK" > "$DEV17_CERT_OUTPUT"
+awk '/-----BEGIN CERTIFICATE-----/{capture=1} capture{print} /-----END CERTIFICATE-----/{exit}' "$DEV17_CERT_OUTPUT" > "$DEV17_CERT_PEM"
+if [[ ! -s "$DEV17_CERT_PEM" ]]; then
+  echo 'ERROR: pinned DEV17 signer certificate PEM was not emitted.' >&2
+  exit 1
+fi
+DEV17_CERT_SHA256="$(openssl x509 -in "$DEV17_CERT_PEM" -outform DER | sha256sum | awk '{print $1}' | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+if [[ ! "$DEV17_CERT_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "ERROR: pinned DEV17 signer digest is malformed: $DEV17_CERT_SHA256" >&2
+  exit 1
+fi
 if [[ "$DEV17_CERT_SHA256" != "$PINNED_TEST_CERT_SHA256" ]]; then
   echo "ERROR: pinned DEV17 signer mismatch: $DEV17_CERT_SHA256" >&2
   exit 1

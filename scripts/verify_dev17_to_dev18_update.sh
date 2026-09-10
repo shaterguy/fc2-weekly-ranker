@@ -21,8 +21,7 @@ CURRENT_BADGING="$("$BT/aapt" dump badging "$CURRENT_APK")"
 grep -Fq "package: name='$DEV_PACKAGE' versionCode='42' versionName='0.2.0-dev18'" <<<"$CURRENT_BADGING"
 
 META="$RUNNER_TEMP/fc2-dev17-artifact.json"
-ARCHIVE="$RUNNER_TEMP/fc2-dev17-artifact.zip"
-EXTRACT_DIR="$RUNNER_TEMP/fc2-dev17-artifact"
+DEV17_APK="$RUNNER_TEMP/$DEV17_ARTIFACT_NAME"
 
 curl --fail --silent --show-error --location --retry 3 \
   -H "Authorization: Bearer $GH_TOKEN" \
@@ -58,15 +57,8 @@ curl --fail --silent --show-error --location --retry 3 \
   -H 'Accept: application/vnd.github+json' \
   -H 'X-GitHub-Api-Version: 2022-11-28' \
   "https://api.github.com/repos/shaterguy/fc2-weekly-ranker/actions/artifacts/$DEV17_ARTIFACT_ID/zip" \
-  --output "$ARCHIVE"
+  --output "$DEV17_APK"
 
-test -s "$ARCHIVE"
-rm -rf "$EXTRACT_DIR"
-mkdir -p "$EXTRACT_DIR"
-unzip -q "$ARCHIVE" -d "$EXTRACT_DIR"
-mapfile -t DEV17_APKS < <(find "$EXTRACT_DIR" -type f -name "$DEV17_ARTIFACT_NAME" -print)
-[[ "${#DEV17_APKS[@]}" -eq 1 ]]
-DEV17_APK="${DEV17_APKS[0]}"
 test -s "$DEV17_APK"
 
 DEV17_BADGING="$("$BT/aapt" dump badging "$DEV17_APK")"

@@ -133,7 +133,6 @@ if [[ ! -s "$STABLE_APK" ]]; then
 fi
 adb install "$STABLE_APK" >/dev/null
 adb shell dumpsys package "$STABLE_PACKAGE" | grep -Fq 'versionName=0.1.0'
-adb uninstall "$DEV_PACKAGE" >/dev/null
 adb install "$DEV17_APK" >/dev/null
 adb shell am start -W -n "$DEV_PACKAGE/com.shaterguy.fc2weeklyranker.MainActivity" >/dev/null
 sleep 4

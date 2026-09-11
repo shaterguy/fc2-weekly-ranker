@@ -69,6 +69,7 @@ import com.shaterguy.fc2weeklyranker.download.VideoDownloadWorker
 import com.shaterguy.fc2weeklyranker.media.CoordinatedNativeVideoPlayer
 import com.shaterguy.fc2weeklyranker.media.NativeVideoSessionController
 import com.shaterguy.fc2weeklyranker.media.RestrictedIframePlayer
+import com.shaterguy.fc2weeklyranker.media.createExternalVideoPlayerRequest
 import com.shaterguy.fc2weeklyranker.media.rememberNativeVideoSessionController
 import com.shaterguy.fc2weeklyranker.repo.AppRepository
 import com.shaterguy.fc2weeklyranker.ui.DownloadScreen
@@ -126,19 +127,27 @@ internal fun isExternalPlayerUrl(url: String): Boolean = runCatching {
         !uri.host.isNullOrBlank()
 }.getOrDefault(false)
 
-private fun openExternalPlayer(context: Context, url: String) {
-    if (!isExternalPlayerUrl(url)) {
+private fun openExternalPlayer(context: Context, video: VideoEntity) {
+    if (!isExternalPlayerUrl(video.url)) {
         Toast.makeText(context, "외부 플레이어로 열 수 없는 주소입니다.", Toast.LENGTH_SHORT).show()
         return
     }
-    val intent = Intent(Intent.ACTION_VIEW).apply {
-        setDataAndType(Uri.parse(url), "video/*")
+    val request = runCatching {
+        createExternalVideoPlayerRequest(context, video)
+    }.getOrElse {
+        Toast.makeText(context, "외부 플레이어용 스트림을 준비할 수 없습니다.", Toast.LENGTH_SHORT).show()
+        return
     }
     try {
-        context.startActivity(intent)
+        context.startActivity(request.intent)
     } catch (_: ActivityNotFoundException) {
+        request.close()
         Toast.makeText(context, "외부 플레이어 앱을 찾을 수 없습니다.", Toast.LENGTH_SHORT).show()
     } catch (_: SecurityException) {
+        request.close()
+        Toast.makeText(context, "외부 플레이어로 영상을 열 수 없습니다.", Toast.LENGTH_SHORT).show()
+    } catch (_: RuntimeException) {
+        request.close()
         Toast.makeText(context, "외부 플레이어로 영상을 열 수 없습니다.", Toast.LENGTH_SHORT).show()
     }
 }
@@ -532,7 +541,7 @@ private fun VideoCard(
             Text("영상 ${index + 1}", fontWeight = FontWeight.SemiBold)
             CoordinatedNativeVideoPlayer(video, nativeVideoController)
             DownloadControls(vm, video, index) {
-                openExternalPlayer(context, video.url)
+                openExternalPlayer(context, video)
             }
         }
     }

@@ -58,7 +58,7 @@ public final class ExternalStreamReceiverActivity extends Activity {
             if (throwable instanceof ErrnoException) {
                 ErrnoException errnoException = (ErrnoException) throwable;
                 errno = errnoException.errno;
-                errorFunction = safeText(errnoException.functionName);
+                errorFunction = "pread";
                 errorMessage = safeText(errnoException.getMessage());
             } else if (throwable instanceof IllegalArgumentException) {
                 errorMessage = safeKnownMessage(throwable.getMessage());

@@ -31,9 +31,9 @@ class ExternalVideoStreamProviderInstrumentedTest {
         val url = "$base/progressive.mp4?signature=opaque-test"
         preflightProgressiveTransport(url)
         preflightSeekableOnProxyThread(url, "progressive", 96L)
-        val handle = createHandle(url, "progressive")
-        handle.use {
-            val result = runReceiver(handle, "progressive")
+        val request = createRequest(url, "progressive")
+        request.use {
+            val result = runReceiver(request, "progressive")
             assertTrue(describeResult(result), result.getBoolean(EXTRA_OK))
         }
     }
@@ -44,9 +44,9 @@ class ExternalVideoStreamProviderInstrumentedTest {
         val url = "$base/master.m3u8?signature=opaque-test"
         val segmentUrl = preflightHlsTransport(url)
         preflightSeekableOnProxyThread(segmentUrl, "hls", 0L)
-        val handle = createHandle(url, "hls")
-        handle.use {
-            val result = runReceiver(handle, "hls")
+        val request = createRequest(url, "hls")
+        request.use {
+            val result = runReceiver(request, "hls")
             assertTrue(describeResult(result), result.getBoolean(EXTRA_OK))
         }
     }
@@ -122,9 +122,40 @@ class ExternalVideoStreamProviderInstrumentedTest {
         }
     }
 
-    private fun createHandle(url: String, suffix: String): ExternalVideoStreamHandle {
+    private fun createRequest(url: String, suffix: String): ExternalVideoPlayerRequest {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        return ExternalVideoStreamSessions.create(context, fixtureVideo(url, suffix))
+        val video = fixtureVideo(url, suffix)
+        return createExternalVideoPlayerRequest(context, video).also { request ->
+            assertOpaqueExternalPlayerRequest(context, request, video)
+        }
+    }
+
+    private fun assertOpaqueExternalPlayerRequest(
+        context: Context,
+        request: ExternalVideoPlayerRequest,
+        video: VideoEntity,
+    ) {
+        val intent = request.intent
+        val data = intent.data
+        assertNotNull("external player intent has no data URI", data)
+        assertTrue("external player intent must use content URI, got $data", data?.scheme == "content")
+        assertTrue(
+            "external player intent authority must stay app-scoped, got ${data?.authority}",
+            data?.authority == context.packageName + ".externalstream",
+        )
+        assertTrue("external player intent MIME is missing", !intent.type.isNullOrBlank())
+        assertTrue(
+            "external player intent missing read grant",
+            intent.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION != 0,
+        )
+        assertTrue(
+            "external player intent missing prefix grant",
+            intent.flags and Intent.FLAG_GRANT_PREFIX_URI_PERMISSION != 0,
+        )
+        val serialized = intent.toUri(Intent.URI_INTENT_SCHEME)
+        listOf(video.url, video.referer, video.userAgent, "signature=opaque-test").forEach { secret ->
+            assertFalse("external player intent leaked protected value: $secret", serialized.contains(secret))
+        }
     }
 
     private fun requestContext(suffix: String): ExternalVideoRequestContext = ExternalVideoRequestContext(
@@ -143,7 +174,7 @@ class ExternalVideoStreamProviderInstrumentedTest {
         discoveredAtEpochMillis = 1L,
     )
 
-    private fun runReceiver(handle: ExternalVideoStreamHandle, scenario: String): Bundle {
+    private fun runReceiver(request: ExternalVideoPlayerRequest, scenario: String): Bundle {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val latch = CountDownLatch(1)
         val result = AtomicReference<Bundle?>()
@@ -162,10 +193,9 @@ class ExternalVideoStreamProviderInstrumentedTest {
             ContextCompat.RECEIVER_EXPORTED,
         )
         try {
-            val intent = Intent(Intent.ACTION_VIEW).apply {
+            val intent = Intent(request.intent).apply {
                 component = ComponentName(RECEIVER_PACKAGE, RECEIVER_ACTIVITY)
-                setDataAndType(handle.uri, handle.mimeType)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or handle.intentFlags)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 putExtra(EXTRA_SCENARIO, scenario)
                 putExtra(EXTRA_RESULT_PACKAGE, context.packageName)
             }

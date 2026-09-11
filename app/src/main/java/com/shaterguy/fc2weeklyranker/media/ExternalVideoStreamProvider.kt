@@ -198,6 +198,7 @@ private object ExternalVideoStreamRegistry {
             }
             if (!accepted) {
                 resource.descriptorClosed()
+                resource.releaseTransientStateIfIdle()
                 throw FileNotFoundException("External stream session is closed")
             }
         }
@@ -302,16 +303,23 @@ private object ExternalVideoStreamRegistry {
             activeDescriptors += 1
         }
 
+        @Synchronized
         fun descriptorClosed() {
-            val shouldRelease = synchronized(this) {
-                if (activeDescriptors <= 0) {
-                    false
+            if (activeDescriptors > 0) activeDescriptors -= 1
+        }
+
+        fun releaseTransientStateIfIdle() {
+            val seekableToClose = synchronized(this) {
+                if (activeDescriptors != 0) {
+                    null
                 } else {
-                    activeDescriptors -= 1
-                    activeDescriptors == 0
+                    val existing = seekable
+                    seekable = null
+                    playlistBytes = null
+                    existing
                 }
             }
-            if (shouldRelease) releaseTransientState()
+            seekableToClose?.close()
         }
 
         fun releaseTransientState() {
@@ -431,6 +439,9 @@ class ExternalVideoStreamProvider : ContentProvider() {
 
             override fun onRelease() {
                 resolved.session.descriptorClosed(resolved.resource)
+                proxyHandler.post {
+                    resolved.resource.releaseTransientStateIfIdle()
+                }
             }
         }
         return try {
@@ -441,6 +452,7 @@ class ExternalVideoStreamProvider : ContentProvider() {
             )
         } catch (throwable: Throwable) {
             resolved.session.descriptorClosed(resolved.resource)
+            resolved.resource.releaseTransientStateIfIdle()
             if (throwable is FileNotFoundException) throw throwable
             throw FileNotFoundException("Unable to open external stream").apply { initCause(throwable) }
         }

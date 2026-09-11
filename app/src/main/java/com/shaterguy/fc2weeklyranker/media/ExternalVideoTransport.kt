@@ -175,6 +175,7 @@ internal class ExternalHttpTransport(
                 .url(current)
                 .header("Referer", context.referer)
                 .header("User-Agent", context.userAgent)
+                .header("Accept-Encoding", "identity")
             cookieProvider(current)?.takeIf(String::isNotBlank)?.let { builder.header("Cookie", it) }
             range?.let { builder.header("Range", it) }
             if (method == "HEAD") builder.head() else builder.get()

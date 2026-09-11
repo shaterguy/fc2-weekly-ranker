@@ -13,6 +13,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -30,7 +31,10 @@ public final class ExternalStreamReceiverActivity extends Activity {
     private static final int NO_ERRNO = -1;
     private static final long MULTI_CHUNK_OFFSET = 600L * 1024L;
     private static final long DECODER_PREPARE_TIMEOUT_MS = 12_000L;
+    private static final long DECODER_STAGE_WATCHDOG_MS = 20_000L;
+    private static final long DECODER_WATCHDOG_POLL_MS = 250L;
 
+    private final AtomicBoolean resultSent = new AtomicBoolean(false);
     private volatile String diagnosticStage = "startup";
 
     @Override
@@ -40,6 +44,7 @@ public final class ExternalStreamReceiverActivity extends Activity {
         String scenario = incoming.getStringExtra(EXTRA_SCENARIO);
         if ("decoder".equals(scenario)) {
             new Thread(() -> executeScenario(incoming), "external-stream-receiver-decoder").start();
+            new Thread(() -> watchDecoder(incoming), "external-stream-receiver-watchdog").start();
         } else {
             executeScenario(incoming);
         }
@@ -47,7 +52,6 @@ public final class ExternalStreamReceiverActivity extends Activity {
 
     private void executeScenario(Intent incoming) {
         String scenario = incoming.getStringExtra(EXTRA_SCENARIO);
-        String resultPackage = incoming.getStringExtra(EXTRA_RESULT_PACKAGE);
         boolean ok = false;
         String errorCode = "UNKNOWN";
         int errno = NO_ERRNO;
@@ -81,19 +85,61 @@ public final class ExternalStreamReceiverActivity extends Activity {
                 errorMessage = safeKnownMessage(throwable.getMessage());
             }
         }
-        if (resultPackage != null && !resultPackage.isEmpty()) {
-            Intent result = new Intent(RESULT_ACTION)
-                    .setPackage(resultPackage)
-                    .putExtra(EXTRA_SCENARIO, scenario)
-                    .putExtra(EXTRA_OK, ok)
-                    .putExtra(EXTRA_ERROR_CODE, errorCode)
-                    .putExtra(EXTRA_ERROR_STAGE, diagnosticStage)
-                    .putExtra(EXTRA_ERRNO, errno)
-                    .putExtra(EXTRA_ERROR_FUNCTION, errorFunction)
-                    .putExtra(EXTRA_ERROR_MESSAGE, errorMessage);
-            sendBroadcast(result);
-        }
+        publishResult(incoming, ok, errorCode, diagnosticStage, errno, errorFunction, errorMessage);
         runOnUiThread(this::finish);
+    }
+
+    private void watchDecoder(Intent incoming) {
+        String lastStage = diagnosticStage;
+        long lastProgressAt = SystemClock.elapsedRealtime();
+        while (!resultSent.get()) {
+            SystemClock.sleep(DECODER_WATCHDOG_POLL_MS);
+            if (resultSent.get()) return;
+            String currentStage = diagnosticStage;
+            if (!currentStage.equals(lastStage)) {
+                lastStage = currentStage;
+                lastProgressAt = SystemClock.elapsedRealtime();
+                continue;
+            }
+            if (SystemClock.elapsedRealtime() - lastProgressAt >= DECODER_STAGE_WATCHDOG_MS) {
+                publishResult(
+                        incoming,
+                        false,
+                        "DECODER_STAGE_TIMEOUT",
+                        currentStage,
+                        NO_ERRNO,
+                        "",
+                        "decoder stage made no progress within watchdog window"
+                );
+                runOnUiThread(this::finish);
+                return;
+            }
+        }
+    }
+
+    private void publishResult(
+            Intent incoming,
+            boolean ok,
+            String errorCode,
+            String errorStage,
+            int errno,
+            String errorFunction,
+            String errorMessage
+    ) {
+        String resultPackage = incoming.getStringExtra(EXTRA_RESULT_PACKAGE);
+        if (resultPackage == null || resultPackage.isEmpty()) return;
+        if (!resultSent.compareAndSet(false, true)) return;
+        String scenario = incoming.getStringExtra(EXTRA_SCENARIO);
+        Intent result = new Intent(RESULT_ACTION)
+                .setPackage(resultPackage)
+                .putExtra(EXTRA_SCENARIO, scenario)
+                .putExtra(EXTRA_OK, ok)
+                .putExtra(EXTRA_ERROR_CODE, errorCode)
+                .putExtra(EXTRA_ERROR_STAGE, errorStage)
+                .putExtra(EXTRA_ERRNO, errno)
+                .putExtra(EXTRA_ERROR_FUNCTION, errorFunction)
+                .putExtra(EXTRA_ERROR_MESSAGE, errorMessage);
+        sendBroadcast(result);
     }
 
     private boolean verifyProgressive(Uri uri) throws Exception {
@@ -169,13 +215,16 @@ public final class ExternalStreamReceiverActivity extends Activity {
                 player.start();
                 if (!waitForPosition(player, seekTarget + 1_000, 12_000L)) return false;
             } finally {
+                diagnosticStage = "decoder-release";
                 player.release();
             }
 
             diagnosticStage = "decoder-held-after-peer-close";
             if (pread(held, MULTI_CHUNK_OFFSET, 64).length != 64) return false;
+            diagnosticStage = "decoder-close-held-descriptor";
         }
 
+        diagnosticStage = "decoder-reopen-create";
         MediaPlayer reopened = new MediaPlayer();
         try {
             if (!prepareDecoder(reopened, uri, "decoder-reopen")) return false;
@@ -183,6 +232,7 @@ public final class ExternalStreamReceiverActivity extends Activity {
             reopened.start();
             if (!waitForPosition(reopened, 800, 10_000L)) return false;
         } finally {
+            diagnosticStage = "decoder-reopen-release";
             reopened.release();
         }
         diagnosticStage = "decoder-assert";

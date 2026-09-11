@@ -44,6 +44,7 @@ class ExternalVideoTransportTest {
         assertTrue(upstream.seen.any { it.header("Referer") == referer })
         assertTrue(upstream.seen.any { it.header("User-Agent") == userAgent })
         assertTrue(upstream.seen.any { it.header("Cookie") == "session=selected" })
+        assertTrue(upstream.seen.all { it.header("Accept-Encoding") == "identity" })
     }
 
     @Test
@@ -74,6 +75,7 @@ class ExternalVideoTransportTest {
         assertTrue(rangeHeaders.contains("bytes=16-31"))
         assertTrue(rangeHeaders.contains("bytes=80-95"))
         assertFalse(upstream.seen.any { it.method == "GET" && it.header("Range") == null })
+        assertTrue(upstream.seen.all { it.header("Accept-Encoding") == "identity" })
     }
 
     @Test
@@ -121,6 +123,7 @@ class ExternalVideoTransportTest {
         assertEquals("origin=session", seen[0].header("Cookie"))
         assertEquals("cdn=session", seen[1].header("Cookie"))
         assertEquals("sig=redirected", seen[1].url.encodedQuery)
+        assertTrue(seen.all { it.header("Accept-Encoding") == "identity" })
     }
 
     @Test
@@ -204,7 +207,8 @@ class ExternalVideoTransportTest {
             if (
                 request.header("Referer") != expectedReferer ||
                 request.header("User-Agent") != expectedUserAgent ||
-                request.header("Cookie") != expectedCookie
+                request.header("Cookie") != expectedCookie ||
+                request.header("Accept-Encoding") != "identity"
             ) {
                 return testResponse(request, 403)
             }

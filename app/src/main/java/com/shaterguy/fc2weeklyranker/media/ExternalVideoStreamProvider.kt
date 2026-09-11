@@ -185,12 +185,21 @@ private object ExternalVideoStreamRegistry {
             return rootUri.buildUpon().appendPath(resourceId).build().toString()
         }
 
-        @Synchronized
         fun descriptorOpened(resource: RemoteResource) {
-            if (closed) throw FileNotFoundException("External stream session is closed")
-            activeDescriptors += 1
             resource.descriptorOpened()
-            touchLocked()
+            val accepted = synchronized(this) {
+                if (closed) {
+                    false
+                } else {
+                    activeDescriptors += 1
+                    touchLocked()
+                    true
+                }
+            }
+            if (!accepted) {
+                resource.descriptorClosed()
+                throw FileNotFoundException("External stream session is closed")
+            }
         }
 
         fun descriptorClosed(resource: RemoteResource) {

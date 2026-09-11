@@ -139,7 +139,7 @@ private object ExternalVideoStreamRegistry {
         }
     }
 
-    private class StreamSession(
+    class StreamSession(
         val token: String,
         private val rootUri: Uri,
         video: VideoEntity,
@@ -237,7 +237,7 @@ private object ExternalVideoStreamRegistry {
         }
     }
 
-    private class RemoteResource(
+    class RemoteResource(
         private val url: String,
         private val context: ExternalVideoRequestContext,
         private val transport: ExternalHttpTransport,

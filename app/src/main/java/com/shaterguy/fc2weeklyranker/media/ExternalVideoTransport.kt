@@ -2,6 +2,7 @@ package com.shaterguy.fc2weeklyranker.media
 
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.net.URI
@@ -23,6 +24,7 @@ internal data class ExternalRangeRead(
     val bytes: ByteArray,
     val totalLength: Long?,
     val finalUrl: String,
+    val rangeHonored: Boolean,
 )
 
 internal enum class ExternalMediaKind(val mimeType: String) {
@@ -56,6 +58,52 @@ internal fun inferExternalMediaKind(url: String, contentType: String? = null): E
 }
 
 private class ExternalProtocolIOException(message: String, cause: Throwable? = null) : IOException(message, cause)
+
+internal class ExternalSequentialHttpStream(
+    private val response: Response,
+    val totalLength: Long?,
+    val finalUrl: String,
+) : AutoCloseable {
+    private val input = response.body.byteStream()
+    var position: Long = 0L
+        private set
+
+    fun skipTo(targetOffset: Long) {
+        require(targetOffset >= position) { "sequential stream cannot seek backward" }
+        val scratch = ByteArray(16 * 1024)
+        while (position < targetOffset) {
+            val wanted = min(scratch.size.toLong(), targetOffset - position).toInt()
+            val read = input.read(scratch, 0, wanted)
+            if (read < 0) throw IOException("Protected media full response ended while seeking forward")
+            if (read == 0) {
+                val single = input.read()
+                if (single < 0) throw IOException("Protected media full response ended while seeking forward")
+                position += 1L
+            } else {
+                position += read.toLong()
+            }
+        }
+    }
+
+    fun readSome(maxBytes: Int): ByteArray {
+        require(maxBytes > 0)
+        val buffer = ByteArray(min(maxBytes, 64 * 1024))
+        val read = input.read(buffer)
+        if (read < 0) return ByteArray(0)
+        if (read == 0) {
+            val single = input.read()
+            if (single < 0) return ByteArray(0)
+            position += 1L
+            return byteArrayOf(single.toByte())
+        }
+        position += read.toLong()
+        return if (read == buffer.size) buffer else buffer.copyOf(read)
+    }
+
+    override fun close() {
+        response.close()
+    }
+}
 
 internal class ExternalHttpTransport(
     private val client: OkHttpClient = OkHttpClient.Builder()
@@ -92,7 +140,7 @@ internal class ExternalHttpTransport(
         if (probe.code in 200..299 && probe.contentLength != null && probe.contentLength >= 0L) {
             return ExternalResourceMetadata(probe.contentLength, probe.contentType, probe.finalUrl)
         }
-        throw ExternalProtocolIOException("Unable to determine protected media length: HTTP ${probe.code}")
+        throw httpFailure("Unable to determine protected media length", probe.code)
     }
 
     fun readRange(
@@ -112,7 +160,6 @@ internal class ExternalHttpTransport(
             context = context,
             range = "bytes=$offset-$end",
             maxBytes = size,
-            fullResponseSkipBytes = offset,
         )
         return when (response.code) {
             206 -> {
@@ -125,19 +172,48 @@ internal class ExternalHttpTransport(
                 if (response.body.size > expectedMax) {
                     throw ExternalProtocolIOException("Protected media server exceeded the requested byte range")
                 }
-                ExternalRangeRead(response.body, parsed.total, response.finalUrl)
+                ExternalRangeRead(response.body, parsed.total, response.finalUrl, rangeHonored = true)
             }
-            200 -> ExternalRangeRead(response.body, response.contentLength, response.finalUrl)
+            200 -> ExternalRangeRead(ByteArray(0), response.contentLength, response.finalUrl, rangeHonored = false)
             416 -> {
                 val parsed = parseUnsatisfiedContentRange(response.contentRange)
                 if (parsed != null && offset >= parsed) {
-                    ExternalRangeRead(ByteArray(0), parsed, response.finalUrl)
+                    ExternalRangeRead(ByteArray(0), parsed, response.finalUrl, rangeHonored = true)
                 } else {
                     throw ExternalProtocolIOException("Protected media server rejected a valid-looking range")
                 }
             }
-            else -> throw ExternalProtocolIOException("Protected media range request failed: HTTP ${response.code}")
+            else -> throw httpFailure("Protected media range request failed", response.code)
         }
+    }
+
+    fun openSequential(url: String, context: ExternalVideoRequestContext): ExternalSequentialHttpStream {
+        var current = url
+        repeat(MAX_REDIRECTS + 1) { redirectCount ->
+            requireHttpUrl(current)
+            val request = buildRequest(method = "GET", url = current, context = context, range = null)
+            val response = client.newCall(request).execute()
+            val location = response.header("Location")
+            if (response.code in 300..399 && !location.isNullOrBlank()) {
+                response.close()
+                if (redirectCount >= MAX_REDIRECTS) throw ExternalProtocolIOException("Protected media redirect limit exceeded")
+                val next = runCatching { URI(current).resolve(location).toString() }
+                    .getOrElse { throw ExternalProtocolIOException("Protected media returned an invalid redirect", it) }
+                requireHttpUrl(next)
+                current = next
+            } else if (response.code in 200..299) {
+                return ExternalSequentialHttpStream(
+                    response = response,
+                    totalLength = response.header("Content-Length")?.toLongOrNull(),
+                    finalUrl = current,
+                )
+            } else {
+                val code = response.code
+                response.close()
+                throw httpFailure("Protected media sequential request failed", code)
+            }
+        }
+        throw ExternalProtocolIOException("Protected media redirect loop")
     }
 
     fun fetchSmallText(
@@ -154,7 +230,7 @@ internal class ExternalHttpTransport(
             range = null,
             maxBytes = maxBytes + 1,
         )
-        if (response.code !in 200..299) throw ExternalProtocolIOException("Protected playlist request failed: HTTP ${response.code}")
+        if (response.code !in 200..299) throw httpFailure("Protected playlist request failed", response.code)
         if (response.body.size > maxBytes) throw ExternalProtocolIOException("Protected playlist exceeds the safe size limit")
         return response.body.toString(Charsets.UTF_8) to response.finalUrl
     }
@@ -165,21 +241,11 @@ internal class ExternalHttpTransport(
         context: ExternalVideoRequestContext,
         range: String?,
         maxBytes: Int,
-        fullResponseSkipBytes: Long = 0L,
     ): Snapshot {
         var current = url
         repeat(MAX_REDIRECTS + 1) { redirectCount ->
             requireHttpUrl(current)
-            val builder = Request.Builder()
-                .url(current)
-                .header("Referer", context.referer)
-                .header("User-Agent", context.userAgent)
-                .header("Accept-Encoding", "identity")
-            cookieProvider(current)?.takeIf(String::isNotBlank)?.let { builder.header("Cookie", it) }
-            range?.let { builder.header("Range", it) }
-            if (method == "HEAD") builder.head() else builder.get()
-
-            val response = client.newCall(builder.build()).execute()
+            val response = client.newCall(buildRequest(method, current, context, range)).execute()
             try {
                 val location = response.header("Location")
                 if (response.code in 300..399 && !location.isNullOrBlank()) {
@@ -189,11 +255,14 @@ internal class ExternalHttpTransport(
                     requireHttpUrl(next)
                     current = next
                 } else {
-                    val body = if (method == "HEAD" || maxBytes == 0) {
+                    val body = if (
+                        method == "HEAD" ||
+                        maxBytes == 0 ||
+                        (range != null && response.code == 200)
+                    ) {
                         ByteArray(0)
                     } else {
-                        val skipBytes = if (range != null && response.code == 200) fullResponseSkipBytes else 0L
-                        readWindow(response.body.byteStream(), skipBytes, maxBytes)
+                        readAtMost(response.body.byteStream(), maxBytes)
                     }
                     return Snapshot(
                         code = response.code,
@@ -211,30 +280,36 @@ internal class ExternalHttpTransport(
         throw ExternalProtocolIOException("Protected media redirect loop")
     }
 
+    private fun buildRequest(
+        method: String,
+        url: String,
+        context: ExternalVideoRequestContext,
+        range: String?,
+    ): Request {
+        val builder = Request.Builder()
+            .url(url)
+            .header("Referer", context.referer)
+            .header("User-Agent", context.userAgent)
+            .header("Accept-Encoding", "identity")
+        cookieProvider(url)?.takeIf(String::isNotBlank)?.let { builder.header("Cookie", it) }
+        range?.let { builder.header("Range", it) }
+        if (method == "HEAD") builder.head() else builder.get()
+        return builder.build()
+    }
+
+    private fun httpFailure(prefix: String, code: Int): IOException =
+        if (code in TRANSIENT_HTTP_CODES) {
+            IOException("$prefix: HTTP $code")
+        } else {
+            ExternalProtocolIOException("$prefix: HTTP $code")
+        }
+
     private fun requireHttpUrl(url: String) {
         val uri = runCatching { URI(url) }.getOrElse { throw ExternalProtocolIOException("Invalid protected media URL", it) }
         val scheme = uri.scheme?.lowercase()
         if ((scheme != "http" && scheme != "https") || uri.host.isNullOrBlank() || uri.userInfo != null) {
             throw ExternalProtocolIOException("Unsupported protected media URL")
         }
-    }
-
-    private fun readWindow(input: java.io.InputStream, skipBytes: Long, maxBytes: Int): ByteArray {
-        var remainingSkip = skipBytes
-        val scratch = ByteArray(16 * 1024)
-        while (remainingSkip > 0L) {
-            val requested = min(scratch.size.toLong(), remainingSkip).toInt()
-            val read = input.read(scratch, 0, requested)
-            if (read < 0) return ByteArray(0)
-            if (read == 0) {
-                val single = input.read()
-                if (single < 0) return ByteArray(0)
-                remainingSkip -= 1L
-            } else {
-                remainingSkip -= read.toLong()
-            }
-        }
-        return readAtMost(input, maxBytes)
     }
 
     private fun readAtMost(input: java.io.InputStream, maxBytes: Int): ByteArray {
@@ -273,6 +348,7 @@ internal class ExternalHttpTransport(
 
     companion object {
         private const val MAX_REDIRECTS = 5
+        private val TRANSIENT_HTTP_CODES = setOf(408, 425, 429, 500, 502, 503, 504)
         private val CONTENT_RANGE = Regex("bytes (\\d+)-(\\d+)/(\\d+|\\*)", RegexOption.IGNORE_CASE)
         private val UNSATISFIED_CONTENT_RANGE = Regex("bytes \\*/(\\d+)", RegexOption.IGNORE_CASE)
     }
@@ -284,7 +360,7 @@ internal class SeekableExternalHttpResource(
     private val transport: ExternalHttpTransport,
     private val chunkSize: Int = 512 * 1024,
     private val maxCachedChunks: Int = 4,
-) {
+) : AutoCloseable {
     init {
         require(chunkSize > 0)
         require(maxCachedChunks > 0)
@@ -295,6 +371,7 @@ internal class SeekableExternalHttpResource(
             size > maxCachedChunks
     }
     private var metadata: ExternalResourceMetadata? = null
+    private var sequentialFallback: ExternalSequentialHttpStream? = null
 
     @Synchronized
     fun size(): Long {
@@ -337,16 +414,25 @@ internal class SeekableExternalHttpResource(
         return output.toByteArray()
     }
 
+    @Synchronized
+    override fun close() {
+        resetSequentialFallback()
+        cache.clear()
+    }
+
     private fun loadChunk(chunkStart: Long, length: Long): ByteArray {
         val requested = min(chunkSize.toLong(), length - chunkStart).toInt()
         val output = ByteArrayOutputStream(requested)
         var cursor = chunkStart
-        var attempts = 0
+        var rangeAttempts = 0
         var consecutiveNetworkFailures = 0
 
         while (output.size() < requested) {
-            attempts += 1
-            if (attempts > MAX_RANGE_REQUESTS_PER_CHUNK) {
+            if (sequentialFallback != null) {
+                return fillFromSequentialFallback(output, cursor, requested, length)
+            }
+            rangeAttempts += 1
+            if (rangeAttempts > MAX_RANGE_REQUESTS_PER_CHUNK) {
                 throw IOException("Protected media chunk exceeded the bounded range-request budget")
             }
             val remaining = requested - output.size()
@@ -354,6 +440,9 @@ internal class SeekableExternalHttpResource(
                 val range = transport.readRange(url, context, cursor, remaining)
                 range.totalLength?.let { total ->
                     if (total != length) throw ExternalProtocolIOException("Protected media length changed during streaming")
+                }
+                if (!range.rangeHonored) {
+                    return fillFromSequentialFallback(output, cursor, requested, length)
                 }
                 if (range.bytes.isEmpty()) {
                     throw IOException("Protected media range returned no bytes before EOF")
@@ -374,6 +463,60 @@ internal class SeekableExternalHttpResource(
             }
         }
         return output.toByteArray()
+    }
+
+    private fun fillFromSequentialFallback(
+        output: ByteArrayOutputStream,
+        startCursor: Long,
+        requested: Int,
+        length: Long,
+    ): ByteArray {
+        var cursor = startCursor
+        var consecutiveFailures = 0
+        while (output.size() < requested) {
+            try {
+                val stream = sequentialStreamAt(cursor, length)
+                val piece = stream.readSome(requested - output.size())
+                if (piece.isEmpty()) {
+                    throw ExternalProtocolIOException("Protected media full response ended before the known resource length")
+                }
+                output.write(piece)
+                cursor += piece.size.toLong()
+                consecutiveFailures = 0
+            } catch (protocol: ExternalProtocolIOException) {
+                throw protocol
+            } catch (io: IOException) {
+                consecutiveFailures += 1
+                resetSequentialFallback()
+                if (consecutiveFailures >= MAX_TRANSIENT_FAILURES_PER_POSITION) {
+                    throw IOException("Protected media sequential fallback failed after bounded retries", io)
+                }
+            }
+        }
+        return output.toByteArray()
+    }
+
+    private fun sequentialStreamAt(offset: Long, length: Long): ExternalSequentialHttpStream {
+        var stream = sequentialFallback
+        if (stream == null || offset < stream.position) {
+            resetSequentialFallback()
+            stream = transport.openSequential(url, context)
+            stream.totalLength?.let { total ->
+                if (total != length) {
+                    stream.close()
+                    throw ExternalProtocolIOException("Protected media length changed during full-response fallback")
+                }
+            }
+            sequentialFallback = stream
+        }
+        if (offset > stream.position) stream.skipTo(offset)
+        if (stream.position != offset) throw ExternalProtocolIOException("Protected media sequential cursor is inconsistent")
+        return stream
+    }
+
+    private fun resetSequentialFallback() {
+        sequentialFallback?.close()
+        sequentialFallback = null
     }
 
     companion object {

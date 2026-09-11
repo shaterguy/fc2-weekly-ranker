@@ -191,6 +191,7 @@ class ExternalVideoStreamProviderInstrumentedTest {
 
     private fun runReceiver(request: ExternalVideoPlayerRequest, scenario: String): Bundle {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val resultThread = HandlerThread("external-stream-result-receiver").apply { start() }
         val latch = CountDownLatch(1)
         val result = AtomicReference<Bundle?>()
         val receiver = object : BroadcastReceiver() {
@@ -205,6 +206,8 @@ class ExternalVideoStreamProviderInstrumentedTest {
             context,
             receiver,
             filter,
+            null,
+            Handler(resultThread.looper),
             ContextCompat.RECEIVER_EXPORTED,
         )
         try {
@@ -220,6 +223,7 @@ class ExternalVideoStreamProviderInstrumentedTest {
             return result.get().also { assertNotNull("external receiver returned no result", it) }!!
         } finally {
             runCatching { context.unregisterReceiver(receiver) }
+            resultThread.quitSafely()
         }
     }
 

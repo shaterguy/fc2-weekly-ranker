@@ -1,7 +1,11 @@
 package com.shaterguy.fc2weeklyranker
 
+import android.content.ActivityNotFoundException
+import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
@@ -43,6 +47,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -70,6 +75,7 @@ import com.shaterguy.fc2weeklyranker.ui.DownloadScreen
 import com.shaterguy.fc2weeklyranker.ui.MainViewModel
 import com.shaterguy.fc2weeklyranker.ui.SEARCH_SNAPSHOT_KEY
 import com.shaterguy.fc2weeklyranker.ui.SearchScreen
+import java.net.URI
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -112,6 +118,29 @@ internal fun detailPostNeighbors(postIds: List<String>, currentPostId: String): 
         previousId = postIds[if (currentIndex == 0) lastIndex else currentIndex - 1],
         nextId = postIds[if (currentIndex == lastIndex) 0 else currentIndex + 1],
     )
+}
+
+internal fun isExternalPlayerUrl(url: String): Boolean = runCatching {
+    val uri = URI(url)
+    (uri.scheme.equals("http", ignoreCase = true) || uri.scheme.equals("https", ignoreCase = true)) &&
+        !uri.host.isNullOrBlank()
+}.getOrDefault(false)
+
+private fun openExternalPlayer(context: Context, url: String) {
+    if (!isExternalPlayerUrl(url)) {
+        Toast.makeText(context, "외부 플레이어로 열 수 없는 주소입니다.", Toast.LENGTH_SHORT).show()
+        return
+    }
+    val intent = Intent(Intent.ACTION_VIEW).apply {
+        setDataAndType(Uri.parse(url), "video/*")
+    }
+    try {
+        context.startActivity(intent)
+    } catch (_: ActivityNotFoundException) {
+        Toast.makeText(context, "외부 플레이어 앱을 찾을 수 없습니다.", Toast.LENGTH_SHORT).show()
+    } catch (_: SecurityException) {
+        Toast.makeText(context, "외부 플레이어로 영상을 열 수 없습니다.", Toast.LENGTH_SHORT).show()
+    }
 }
 
 @Composable
@@ -497,12 +526,13 @@ private fun VideoCard(
     video: VideoEntity,
     nativeVideoController: NativeVideoSessionController,
 ) {
+    val context = LocalContext.current
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("영상 ${index + 1}", fontWeight = FontWeight.SemiBold)
             CoordinatedNativeVideoPlayer(video, nativeVideoController)
             DownloadControls(vm, video, index) {
-                nativeVideoController.openFullscreen(video, autoPlay = true)
+                openExternalPlayer(context, video.url)
             }
         }
     }
@@ -513,14 +543,14 @@ private fun DownloadControls(
     vm: MainViewModel,
     video: VideoEntity,
     index: Int,
-    onOpenNativePlayer: () -> Unit,
+    onOpenExternalPlayer: () -> Unit,
 ) {
     val download by remember(video.id) { vm.download(video.id) }.collectAsState(initial = null)
     val state = download
     when {
         !VideoDownloadWorker.supportsFileDownload(video.url) -> {
             Text("스트리밍 주소는 동영상 파일로 저장할 수 없습니다.", style = MaterialTheme.typography.bodySmall)
-            NativePlayerButton(index, onOpenNativePlayer, Modifier.fillMaxWidth())
+            ExternalPlayerButton(index, onOpenExternalPlayer, Modifier.fillMaxWidth())
         }
         state?.status == DownloadStatus.QUEUED -> {
             Text("다운로드 대기 중", style = MaterialTheme.typography.bodySmall)
@@ -532,7 +562,7 @@ private fun DownloadControls(
                         .weight(1f)
                         .semantics { contentDescription = "영상 ${index + 1} 다운로드 정지" },
                 ) { Text("정지") }
-                NativePlayerButton(index, onOpenNativePlayer, Modifier.weight(1f))
+                ExternalPlayerButton(index, onOpenExternalPlayer, Modifier.weight(1f))
             }
         }
         state?.status == DownloadStatus.RUNNING -> {
@@ -551,7 +581,7 @@ private fun DownloadControls(
                         .semantics { contentDescription = "영상 ${index + 1} 다운로드 정지" },
                 ) { Text("정지") }
             }
-            NativePlayerButton(index, onOpenNativePlayer, Modifier.fillMaxWidth())
+            ExternalPlayerButton(index, onOpenExternalPlayer, Modifier.fillMaxWidth())
         }
         state?.status == DownloadStatus.PAUSED -> {
             DownloadProgress(state.downloadedBytes, state.totalBytes, prefix = "일시정지")
@@ -562,7 +592,7 @@ private fun DownloadControls(
                         .weight(1f)
                         .semantics { contentDescription = "영상 ${index + 1} 다운로드 계속" },
                 ) { Text("계속 다운로드") }
-                NativePlayerButton(index, onOpenNativePlayer, Modifier.weight(1f))
+                ExternalPlayerButton(index, onOpenExternalPlayer, Modifier.weight(1f))
             }
             OutlinedButton(
                 onClick = { vm.stopDownload(video.id) },
@@ -574,7 +604,7 @@ private fun DownloadControls(
         state?.status == DownloadStatus.FINALIZING -> {
             LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
             Text("다운로드 파일 저장을 마무리하고 있습니다…", style = MaterialTheme.typography.bodySmall)
-            NativePlayerButton(index, onOpenNativePlayer, Modifier.fillMaxWidth())
+            ExternalPlayerButton(index, onOpenExternalPlayer, Modifier.fillMaxWidth())
         }
         state?.status == DownloadStatus.COMPLETED -> {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -584,7 +614,7 @@ private fun DownloadControls(
                         .weight(1f)
                         .semantics { contentDescription = "영상 ${index + 1} 다운로드" },
                 ) { Text("다운로드") }
-                NativePlayerButton(index, onOpenNativePlayer, Modifier.weight(1f))
+                ExternalPlayerButton(index, onOpenExternalPlayer, Modifier.weight(1f))
             }
             Text(
                 "다운로드 기록 ${formatDateTime(state.updatedAtEpochMillis)}",
@@ -601,7 +631,7 @@ private fun DownloadControls(
                         .weight(1f)
                         .semantics { contentDescription = "영상 ${index + 1} 다운로드 다시 시도" },
                 ) { Text("다시 다운로드") }
-                NativePlayerButton(index, onOpenNativePlayer, Modifier.weight(1f))
+                ExternalPlayerButton(index, onOpenExternalPlayer, Modifier.weight(1f))
             }
             if (state.contentUri != null) {
                 TextButton(
@@ -619,7 +649,7 @@ private fun DownloadControls(
                         .weight(1f)
                         .semantics { contentDescription = "영상 ${index + 1} 다운로드 새로 시작" },
                 ) { Text("다운로드") }
-                NativePlayerButton(index, onOpenNativePlayer, Modifier.weight(1f))
+                ExternalPlayerButton(index, onOpenExternalPlayer, Modifier.weight(1f))
             }
         }
         else -> {
@@ -630,19 +660,19 @@ private fun DownloadControls(
                         .weight(1f)
                         .semantics { contentDescription = "영상 ${index + 1} 다운로드" },
                 ) { Text("다운로드") }
-                NativePlayerButton(index, onOpenNativePlayer, Modifier.weight(1f))
+                ExternalPlayerButton(index, onOpenExternalPlayer, Modifier.weight(1f))
             }
         }
     }
 }
 
 @Composable
-private fun NativePlayerButton(index: Int, onClick: () -> Unit, modifier: Modifier = Modifier) {
+private fun ExternalPlayerButton(index: Int, onClick: () -> Unit, modifier: Modifier = Modifier) {
     OutlinedButton(
         onClick = onClick,
-        modifier = modifier.semantics { contentDescription = "영상 ${index + 1} 내장플레이어 열기" },
+        modifier = modifier.semantics { contentDescription = "영상 ${index + 1} 외부 플레이어로 열기" },
     ) {
-        Text("내장플레이어 열기", maxLines = 1, style = MaterialTheme.typography.labelSmall)
+        Text("외부 플레이어", maxLines = 1, style = MaterialTheme.typography.labelSmall)
     }
 }
 

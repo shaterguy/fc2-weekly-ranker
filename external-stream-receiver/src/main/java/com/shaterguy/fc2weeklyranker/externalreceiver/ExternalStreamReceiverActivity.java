@@ -11,6 +11,8 @@ import android.system.ErrnoException;
 import android.system.Os;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -27,6 +29,7 @@ public final class ExternalStreamReceiverActivity extends Activity {
     private static final Pattern CONTENT_URI = Pattern.compile("content://[^\\s\\\"']+");
     private static final int NO_ERRNO = -1;
     private static final long MULTI_CHUNK_OFFSET = 600L * 1024L;
+    private static final long DECODER_PREPARE_TIMEOUT_MS = 12_000L;
 
     private volatile String diagnosticStage = "startup";
 
@@ -141,10 +144,8 @@ public final class ExternalStreamReceiverActivity extends Activity {
 
             MediaPlayer player = new MediaPlayer();
             try {
-                diagnosticStage = "decoder-prepare";
-                player.setDataSource(this, uri);
-                player.setVolume(0f, 0f);
-                player.prepare();
+                if (!prepareDecoder(player, uri, "decoder")) return false;
+                diagnosticStage = "decoder-duration";
                 int durationMs = player.getDuration();
                 if (durationMs < 8_000) return false;
 
@@ -175,18 +176,41 @@ public final class ExternalStreamReceiverActivity extends Activity {
             if (pread(held, MULTI_CHUNK_OFFSET, 64).length != 64) return false;
         }
 
-        diagnosticStage = "decoder-reopen";
         MediaPlayer reopened = new MediaPlayer();
         try {
-            reopened.setDataSource(this, uri);
-            reopened.setVolume(0f, 0f);
-            reopened.prepare();
+            if (!prepareDecoder(reopened, uri, "decoder-reopen")) return false;
+            diagnosticStage = "decoder-reopen-start";
             reopened.start();
             if (!waitForPosition(reopened, 800, 10_000L)) return false;
         } finally {
             reopened.release();
         }
         diagnosticStage = "decoder-assert";
+        return true;
+    }
+
+    private boolean prepareDecoder(MediaPlayer player, Uri uri, String stagePrefix) throws Exception {
+        CountDownLatch prepared = new CountDownLatch(1);
+        boolean[] failed = new boolean[1];
+        player.setOnPreparedListener(ignored -> prepared.countDown());
+        player.setOnErrorListener((ignored, what, extra) -> {
+            failed[0] = true;
+            prepared.countDown();
+            return true;
+        });
+        diagnosticStage = stagePrefix + "-set-data-source";
+        player.setDataSource(this, uri);
+        player.setVolume(0f, 0f);
+        diagnosticStage = stagePrefix + "-prepare";
+        player.prepareAsync();
+        if (!prepared.await(DECODER_PREPARE_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+            diagnosticStage = stagePrefix + "-prepare-timeout";
+            return false;
+        }
+        if (failed[0]) {
+            diagnosticStage = stagePrefix + "-prepare-error";
+            return false;
+        }
         return true;
     }
 

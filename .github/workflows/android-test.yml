@@ -62,7 +62,7 @@ jobs:
           APK="$(find app/build/outputs/apk/debug -maxdepth 1 -type f -name '*-unsigned.apk' -print -quit)"
           test -s "$APK"
           BADGING="$("$ANDROID_HOME/build-tools/37.0.0/aapt" dump badging "$APK")"
-          grep -Fq "package: name='com.shaterguy.fc2weeklyranker.dev' versionCode='44' versionName='0.2.0-dev20'" <<<"$BADGING"
+          grep -Fq "package: name='com.shaterguy.fc2weeklyranker.dev' versionCode='45' versionName='0.2.0-dev21'" <<<"$BADGING"
           printf '%s\n' "$GITHUB_SHA" > app/build/outputs/apk/debug/SOURCE_COMMIT.txt
           sha256sum "$APK" > app/build/outputs/apk/debug/UNSIGNED_SHA256SUMS.txt
       - name: Upload unsigned TEST provenance
@@ -97,13 +97,13 @@ jobs:
           UNSIGNED="$(find app/build/outputs/apk/debug -maxdepth 1 -type f -name '*-unsigned.apk' -print -quit)"
           OUT=app/build/outputs/fc2-weekly-ranker-test
           mkdir -p "$OUT"
-          ALIGNED="$OUT/fc2-weekly-ranker-test-v0.2.0-dev20-aligned-unsigned.apk"
-          APK="$OUT/fc2-weekly-ranker-test-v0.2.0-dev20.apk"
+          ALIGNED="$OUT/fc2-weekly-ranker-test-v0.2.0-dev21-aligned-unsigned.apk"
+          APK="$OUT/fc2-weekly-ranker-test-v0.2.0-dev21.apk"
           "$BT/zipalign" -p -f 4 "$UNSIGNED" "$ALIGNED"
           APKSIGNER="$BT/apksigner" bash tools/sign_test.sh "$ALIGNED" "$PASS_FILE" "$APK" > "$OUT/APKSIGNER_VERIFY.txt"
           "$BT/apksigner" verify --verbose --print-certs-pem --min-sdk-version 29 "$APK" > "$OUT/APK_CERT.txt"
           BADGING="$("$BT/aapt" dump badging "$APK")"
-          grep -Fq "package: name='com.shaterguy.fc2weeklyranker.dev' versionCode='44' versionName='0.2.0-dev20'" <<<"$BADGING"
+          grep -Fq "package: name='com.shaterguy.fc2weeklyranker.dev' versionCode='45' versionName='0.2.0-dev21'" <<<"$BADGING"
           PINNED_TEST_CERT_SHA256='ff32473e516ff59ca24ada94fe22e8282ce70fd66bd94fb0975340106d981cfd'
           CERT_SHA256="$(awk -F= '/^certificate_sha256=/{print $2; exit}' "$OUT/APKSIGNER_VERIFY.txt" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
           [[ "$CERT_SHA256" =~ ^[0-9a-f]{64}$ ]]
@@ -136,7 +136,7 @@ jobs:
         run: |
           set -euo pipefail
           BT="$ANDROID_HOME/build-tools/37.0.0"
-          CURRENT_APK="$GITHUB_WORKSPACE/app/build/outputs/fc2-weekly-ranker-test/fc2-weekly-ranker-test-v0.2.0-dev20.apk"
+          CURRENT_APK="$GITHUB_WORKSPACE/app/build/outputs/fc2-weekly-ranker-test/fc2-weekly-ranker-test-v0.2.0-dev21.apk"
           OLD="$RUNNER_TEMP/fc2-dev15"
           PASS_FILE="$RUNNER_TEMP/fc2-ranker-signing-pass-compat"
           AVD_NAME=fc2-compat
@@ -224,7 +224,7 @@ jobs:
           adb shell am force-stop com.shaterguy.fc2weeklyranker.dev
           sleep 1
 
-          NEW_DB_DIR="$RUNNER_TEMP/dev20-db"
+          NEW_DB_DIR="$RUNNER_TEMP/dev21-db"
           mkdir -p "$NEW_DB_DIR"
           adb exec-out run-as com.shaterguy.fc2weeklyranker.dev cat databases/ranker.db > "$NEW_DB_DIR/ranker.db"
           for suffix in -wal -shm; do
@@ -242,7 +242,7 @@ jobs:
           con = sqlite3.connect(sys.argv[1])
           version = con.execute("PRAGMA user_version").fetchone()[0]
           if version != 3:
-              raise SystemExit(f"expected DEV20 database v3, got {version}")
+              raise SystemExit(f"expected DEV21 database v3, got {version}")
           tables = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
           if "rank_observations" not in tables:
               raise SystemExit("rank_observations table missing after migration")
@@ -259,7 +259,7 @@ jobs:
           PY
 
           adb shell dumpsys package com.shaterguy.fc2weeklyranker | grep -Fq 'versionName=0.1.0'
-          adb shell dumpsys package com.shaterguy.fc2weeklyranker.dev | grep -Fq 'versionName=0.2.0-dev20'
+          adb shell dumpsys package com.shaterguy.fc2weeklyranker.dev | grep -Fq 'versionName=0.2.0-dev21'
 
           RECEIVER_APK="$(find external-stream-receiver/build/outputs/apk/debug -maxdepth 1 -type f -name '*.apk' -print -quit)"
           TEST_CANDIDATE="$(find app/build/outputs/apk/androidTest/debug -maxdepth 1 -type f -name '*.apk' -print -quit)"
@@ -280,12 +280,12 @@ jobs:
             com.shaterguy.fc2weeklyranker.dev.test/androidx.test.runner.AndroidJUnitRunner \
             | tee "$INSTRUMENTATION_OUTPUT"
           grep -Fq 'OK (2 tests)' "$INSTRUMENTATION_OUTPUT"
-      - name: Verify DEV18 in-place TEST update
+      - name: Verify DEV20 in-place TEST update
         if: steps.sign.outputs.configured == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash scripts/verify_dev18_to_dev20_update.sh app/build/outputs/fc2-weekly-ranker-test/fc2-weekly-ranker-test-v0.2.0-dev20.apk
+        run: bash scripts/verify_dev20_to_dev21_update.sh app/build/outputs/fc2-weekly-ranker-test/fc2-weekly-ranker-test-v0.2.0-dev21.apk
       - name: Upload signed TEST evidence
         if: steps.sign.outputs.configured == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -303,7 +303,7 @@ jobs:
         if: steps.sign.outputs.configured == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          path: app/build/outputs/fc2-weekly-ranker-test/fc2-weekly-ranker-test-v0.2.0-dev20.apk
+          path: app/build/outputs/fc2-weekly-ranker-test/fc2-weekly-ranker-test-v0.2.0-dev21.apk
           archive: false
           if-no-files-found: error
           retention-days: 14

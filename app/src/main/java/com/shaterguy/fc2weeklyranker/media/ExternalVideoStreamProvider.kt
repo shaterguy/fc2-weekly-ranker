@@ -185,30 +185,17 @@ private object ExternalVideoStreamRegistry {
             return rootUri.buildUpon().appendPath(resourceId).build().toString()
         }
 
-        fun descriptorOpened(resource: RemoteResource) {
-            resource.descriptorOpened()
-            val accepted = synchronized(this) {
-                if (closed) {
-                    false
-                } else {
-                    activeDescriptors += 1
-                    touchLocked()
-                    true
-                }
-            }
-            if (!accepted) {
-                resource.descriptorClosed()
-                resource.releaseTransientStateIfIdle()
-                throw FileNotFoundException("External stream session is closed")
-            }
+        @Synchronized
+        fun descriptorOpened() {
+            if (closed) throw FileNotFoundException("External stream session is closed")
+            activeDescriptors += 1
+            touchLocked()
         }
 
-        fun descriptorClosed(resource: RemoteResource) {
-            synchronized(this) {
-                if (activeDescriptors > 0) activeDescriptors -= 1
-                touchLocked()
-            }
-            resource.descriptorClosed()
+        @Synchronized
+        fun descriptorClosed() {
+            if (activeDescriptors > 0) activeDescriptors -= 1
+            touchLocked()
         }
 
         @Synchronized
@@ -257,7 +244,6 @@ private object ExternalVideoStreamRegistry {
         private var resolvedKind: ExternalMediaKind? = null
         private var seekable: SeekableExternalHttpResource? = null
         private var playlistBytes: ByteArray? = null
-        private var activeDescriptors = 0
 
         @Synchronized
         fun mimeType(): String = runCatching { kind().mimeType }
@@ -296,30 +282,6 @@ private object ExternalVideoStreamRegistry {
             } else {
                 seekable().read(offset, size)
             }
-        }
-
-        @Synchronized
-        fun descriptorOpened() {
-            activeDescriptors += 1
-        }
-
-        @Synchronized
-        fun descriptorClosed() {
-            if (activeDescriptors > 0) activeDescriptors -= 1
-        }
-
-        fun releaseTransientStateIfIdle() {
-            val seekableToClose = synchronized(this) {
-                if (activeDescriptors != 0) {
-                    null
-                } else {
-                    val existing = seekable
-                    seekable = null
-                    playlistBytes = null
-                    existing
-                }
-            }
-            seekableToClose?.close()
         }
 
         fun releaseTransientState() {
@@ -425,7 +387,7 @@ class ExternalVideoStreamProvider : ContentProvider() {
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor {
         if (mode != "r") throw FileNotFoundException("External stream provider is read-only")
         val resolved = resolve(uri) ?: throw FileNotFoundException("Unknown external stream")
-        resolved.session.descriptorOpened(resolved.resource)
+        resolved.session.descriptorOpened()
         val callback = object : ProxyFileDescriptorCallback() {
             override fun onGetSize(): Long = ioToErrno("externalStreamSize") {
                 resolved.resource.size()
@@ -438,10 +400,7 @@ class ExternalVideoStreamProvider : ContentProvider() {
             }
 
             override fun onRelease() {
-                resolved.session.descriptorClosed(resolved.resource)
-                proxyHandler.post {
-                    resolved.resource.releaseTransientStateIfIdle()
-                }
+                resolved.session.descriptorClosed()
             }
         }
         return try {
@@ -451,8 +410,7 @@ class ExternalVideoStreamProvider : ContentProvider() {
                 proxyHandler,
             )
         } catch (throwable: Throwable) {
-            resolved.session.descriptorClosed(resolved.resource)
-            resolved.resource.releaseTransientStateIfIdle()
+            resolved.session.descriptorClosed()
             if (throwable is FileNotFoundException) throw throwable
             throw FileNotFoundException("Unable to open external stream").apply { initCause(throwable) }
         }

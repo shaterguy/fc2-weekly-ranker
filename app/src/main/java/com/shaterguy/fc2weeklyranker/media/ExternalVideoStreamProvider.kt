@@ -17,6 +17,7 @@ import android.system.ErrnoException
 import android.system.OsConstants
 import android.webkit.CookieManager
 import com.shaterguy.fc2weeklyranker.data.VideoEntity
+import java.io.ByteArrayOutputStream
 import java.io.FileNotFoundException
 import java.io.IOException
 import java.security.SecureRandom
@@ -90,7 +91,14 @@ private object ExternalVideoStreamRegistry {
         if (uri.scheme != "content" || uri.authority != expectedAuthority) return null
         val segments = uri.pathSegments
         if (segments.size !in 3..4 || segments[0] != SESSION_PATH || segments[2] != ROOT_PATH) return null
-        val session = sessions[segments[1]] ?: return null
+        val sessionToken = segments[1]
+        val session = sessions[sessionToken] ?: return null
+        val now = SystemClock.elapsedRealtime()
+        if (session.canExpire(now, SESSION_IDLE_TTL_MS)) {
+            sessions.remove(sessionToken)
+            session.close()
+            return null
+        }
         val resourceId = segments.getOrNull(3) ?: ROOT_RESOURCE_ID
         val resource = session.resource(resourceId) ?: return null
         session.touch()
@@ -184,11 +192,12 @@ private object ExternalVideoStreamRegistry {
             touchLocked()
         }
 
-        @Synchronized
         fun descriptorClosed(resource: RemoteResource) {
-            if (activeDescriptors > 0) activeDescriptors -= 1
+            synchronized(this) {
+                if (activeDescriptors > 0) activeDescriptors -= 1
+                touchLocked()
+            }
             resource.releaseTransientState()
-            touchLocked()
         }
 
         @Synchronized
@@ -204,13 +213,16 @@ private object ExternalVideoStreamRegistry {
         fun canEvict(now: Long): Boolean =
             !closed && activeDescriptors == 0 && now >= lastAccessMs
 
-        @Synchronized
         fun close() {
-            if (closed) return
-            closed = true
-            resources.values.forEach(RemoteResource::releaseTransientState)
-            resources.clear()
-            resourceIdsByUrl.clear()
+            val resourcesToRelease = synchronized(this) {
+                if (closed) return
+                closed = true
+                val snapshot = resources.values.toList()
+                resources.clear()
+                resourceIdsByUrl.clear()
+                snapshot
+            }
+            resourcesToRelease.forEach(RemoteResource::releaseTransientState)
         }
 
         private fun newResource(url: String): RemoteResource = RemoteResource(

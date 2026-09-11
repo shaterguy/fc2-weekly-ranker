@@ -2,9 +2,11 @@ package com.shaterguy.fc2weeklyranker.externalreceiver;
 
 import android.app.Activity;
 import android.content.Intent;
+import android.media.MediaPlayer;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
+import android.os.SystemClock;
 import android.system.ErrnoException;
 import android.system.Os;
 import java.nio.charset.StandardCharsets;
@@ -24,13 +26,18 @@ public final class ExternalStreamReceiverActivity extends Activity {
     private static final String EXTRA_ERROR_MESSAGE = "errorMessage";
     private static final Pattern CONTENT_URI = Pattern.compile("content://[^\\s\\\"']+");
     private static final int NO_ERRNO = -1;
+    private static final long MULTI_CHUNK_OFFSET = 600L * 1024L;
 
-    private String diagnosticStage = "startup";
+    private volatile String diagnosticStage = "startup";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         Intent incoming = getIntent();
+        new Thread(() -> executeScenario(incoming), "external-stream-receiver").start();
+    }
+
+    private void executeScenario(Intent incoming) {
         String scenario = incoming.getStringExtra(EXTRA_SCENARIO);
         String resultPackage = incoming.getStringExtra(EXTRA_RESULT_PACKAGE);
         boolean ok = false;
@@ -48,6 +55,8 @@ public final class ExternalStreamReceiverActivity extends Activity {
                 ok = verifyProgressive(uri);
             } else if ("hls".equals(scenario)) {
                 ok = verifyHls(uri);
+            } else if ("decoder".equals(scenario)) {
+                ok = verifyDecoder(uri);
             } else {
                 throw new IllegalArgumentException("INVALID_SCENARIO");
             }
@@ -76,7 +85,7 @@ public final class ExternalStreamReceiverActivity extends Activity {
                     .putExtra(EXTRA_ERROR_MESSAGE, errorMessage);
             sendBroadcast(result);
         }
-        finish();
+        runOnUiThread(this::finish);
     }
 
     private boolean verifyProgressive(Uri uri) throws Exception {
@@ -116,6 +125,73 @@ public final class ExternalStreamReceiverActivity extends Activity {
             diagnosticStage = "hls-assert";
             return readable;
         }
+    }
+
+    private boolean verifyDecoder(Uri uri) throws Exception {
+        diagnosticStage = "decoder-open-held-descriptor";
+        try (ParcelFileDescriptor held = getContentResolver().openFileDescriptor(uri, "r")) {
+            if (held == null) return false;
+            diagnosticStage = "decoder-held-read-head";
+            if (pread(held, 0L, 64).length != 64) return false;
+
+            MediaPlayer player = new MediaPlayer();
+            try {
+                diagnosticStage = "decoder-prepare";
+                player.setDataSource(this, uri);
+                player.setVolume(0f, 0f);
+                player.prepare();
+                int durationMs = player.getDuration();
+                if (durationMs < 8_000) return false;
+
+                diagnosticStage = "decoder-start";
+                player.start();
+                if (!waitForPosition(player, 1_200, 10_000L)) return false;
+
+                diagnosticStage = "decoder-pause";
+                player.pause();
+                int pausedPosition = player.getCurrentPosition();
+                SystemClock.sleep(350L);
+                if (Math.abs(player.getCurrentPosition() - pausedPosition) > 700) return false;
+
+                int seekTarget = Math.min(
+                        Math.max(pausedPosition + 4_000, 5_000),
+                        durationMs - 2_500
+                );
+                if (seekTarget <= pausedPosition) return false;
+                diagnosticStage = "decoder-seek-resume";
+                player.seekTo(seekTarget);
+                player.start();
+                if (!waitForPosition(player, seekTarget + 1_000, 12_000L)) return false;
+            } finally {
+                player.release();
+            }
+
+            diagnosticStage = "decoder-held-after-peer-close";
+            if (pread(held, MULTI_CHUNK_OFFSET, 64).length != 64) return false;
+        }
+
+        diagnosticStage = "decoder-reopen";
+        MediaPlayer reopened = new MediaPlayer();
+        try {
+            reopened.setDataSource(this, uri);
+            reopened.setVolume(0f, 0f);
+            reopened.prepare();
+            reopened.start();
+            if (!waitForPosition(reopened, 800, 10_000L)) return false;
+        } finally {
+            reopened.release();
+        }
+        diagnosticStage = "decoder-assert";
+        return true;
+    }
+
+    private static boolean waitForPosition(MediaPlayer player, int targetMs, long timeoutMs) throws Exception {
+        long deadline = SystemClock.elapsedRealtime() + timeoutMs;
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (player.getCurrentPosition() >= targetMs) return true;
+            SystemClock.sleep(100L);
+        }
+        return false;
     }
 
     private static byte[] pread(ParcelFileDescriptor pfd, long offset, int maxBytes) throws Exception {

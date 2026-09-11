@@ -36,6 +36,12 @@ class ExternalVideoStreamProviderInstrumentedTest {
             val result = runReceiver(request, "progressive")
             assertTrue(describeResult(result), result.getBoolean(EXTRA_OK))
         }
+
+        val decoderRequest = createRequest(DECODER_MEDIA_URL, "decoder")
+        decoderRequest.use {
+            val result = runReceiver(decoderRequest, "decoder")
+            assertTrue(describeResult(result), result.getBoolean(EXTRA_OK))
+        }
     }
 
     @Test
@@ -111,6 +117,7 @@ class ExternalVideoStreamProviderInstrumentedTest {
                         "seekable backward seek read returned no bytes"
                     }
                 }
+                resource.close()
             } catch (throwable: Throwable) {
                 failure.set(throwable)
             } finally {
@@ -208,7 +215,8 @@ class ExternalVideoStreamProviderInstrumentedTest {
                 putExtra(EXTRA_RESULT_PACKAGE, context.packageName)
             }
             context.startActivity(intent)
-            assertTrue("external receiver result timed out", latch.await(30, TimeUnit.SECONDS))
+            val timeoutSeconds = if (scenario == "decoder") 75L else 30L
+            assertTrue("external receiver result timed out", latch.await(timeoutSeconds, TimeUnit.SECONDS))
             return result.get().also { assertNotNull("external receiver returned no result", it) }!!
         } finally {
             runCatching { context.unregisterReceiver(receiver) }
@@ -230,6 +238,8 @@ class ExternalVideoStreamProviderInstrumentedTest {
     }
 
     companion object {
+        private const val DECODER_MEDIA_URL =
+            "https://storage.googleapis.com/exoplayer-test-media-0/BigBuckBunny_320x180.mp4"
         private const val RECEIVER_PACKAGE = "com.shaterguy.fc2weeklyranker.externalreceiver"
         private const val RECEIVER_ACTIVITY = "$RECEIVER_PACKAGE.ExternalStreamReceiverActivity"
         private const val RESULT_ACTION = "com.shaterguy.fc2weeklyranker.EXTERNAL_STREAM_TEST_RESULT"

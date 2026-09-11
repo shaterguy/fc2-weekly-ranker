@@ -186,9 +186,10 @@ private object ExternalVideoStreamRegistry {
         }
 
         @Synchronized
-        fun descriptorOpened() {
+        fun descriptorOpened(resource: RemoteResource) {
             if (closed) throw FileNotFoundException("External stream session is closed")
             activeDescriptors += 1
+            resource.descriptorOpened()
             touchLocked()
         }
 
@@ -197,7 +198,7 @@ private object ExternalVideoStreamRegistry {
                 if (activeDescriptors > 0) activeDescriptors -= 1
                 touchLocked()
             }
-            resource.releaseTransientState()
+            resource.descriptorClosed()
         }
 
         @Synchronized
@@ -246,6 +247,7 @@ private object ExternalVideoStreamRegistry {
         private var resolvedKind: ExternalMediaKind? = null
         private var seekable: SeekableExternalHttpResource? = null
         private var playlistBytes: ByteArray? = null
+        private var activeDescriptors = 0
 
         @Synchronized
         fun mimeType(): String = runCatching { kind().mimeType }
@@ -287,9 +289,30 @@ private object ExternalVideoStreamRegistry {
         }
 
         @Synchronized
+        fun descriptorOpened() {
+            activeDescriptors += 1
+        }
+
+        fun descriptorClosed() {
+            val shouldRelease = synchronized(this) {
+                if (activeDescriptors <= 0) {
+                    false
+                } else {
+                    activeDescriptors -= 1
+                    activeDescriptors == 0
+                }
+            }
+            if (shouldRelease) releaseTransientState()
+        }
+
         fun releaseTransientState() {
-            seekable = null
-            playlistBytes = null
+            val seekableToClose = synchronized(this) {
+                val existing = seekable
+                seekable = null
+                playlistBytes = null
+                existing
+            }
+            seekableToClose?.close()
         }
 
         @Synchronized
@@ -385,7 +408,7 @@ class ExternalVideoStreamProvider : ContentProvider() {
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor {
         if (mode != "r") throw FileNotFoundException("External stream provider is read-only")
         val resolved = resolve(uri) ?: throw FileNotFoundException("Unknown external stream")
-        resolved.session.descriptorOpened()
+        resolved.session.descriptorOpened(resolved.resource)
         val callback = object : ProxyFileDescriptorCallback() {
             override fun onGetSize(): Long = ioToErrno("externalStreamSize") {
                 resolved.resource.size()

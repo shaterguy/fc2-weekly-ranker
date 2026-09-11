@@ -6,6 +6,7 @@ bash -n tools/sign_test.sh
 bash -n tools/sign_stable.sh
 bash -n scripts/verify_dev17_to_dev18_update.sh
 bash -n scripts/verify_dev18_to_dev19_update.sh
+bash -n scripts/verify_dev18_to_dev20_update.sh
 
 MAIN='app/src/main/java/com/shaterguy/fc2weeklyranker/MainActivity.kt'
 LAUNCHER='app/src/main/java/com/shaterguy/fc2weeklyranker/media/ExternalVideoPlayerLauncher.kt'

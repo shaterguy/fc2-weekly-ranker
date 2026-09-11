@@ -26,6 +26,12 @@
             </intent-filter>
         </activity>
 
+        <provider
+            android:name=".media.ExternalVideoStreamProvider"
+            android:authorities="${applicationId}.externalstream"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+
         <service
             android:name=".download.VideoDownloadJobService"
             android:permission="android.permission.BIND_JOB_SERVICE"

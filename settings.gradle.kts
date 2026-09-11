@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "FC2WeeklyRanker"
 include(":app")
+include(":external-stream-receiver")

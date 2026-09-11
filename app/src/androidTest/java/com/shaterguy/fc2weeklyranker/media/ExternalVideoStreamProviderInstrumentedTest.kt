@@ -6,6 +6,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.Bundle
+import android.os.Handler
+import android.os.HandlerThread
+import android.webkit.CookieManager
 import androidx.core.content.ContextCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -27,6 +30,7 @@ class ExternalVideoStreamProviderInstrumentedTest {
         val base = fixtureBaseUrl()
         val url = "$base/progressive.mp4?signature=opaque-test"
         preflightProgressiveTransport(url)
+        preflightSeekableOnProxyThread(url, "progressive", 96L)
         val handle = createHandle(url, "progressive")
         handle.use {
             val result = runReceiver(handle, "progressive")
@@ -38,7 +42,8 @@ class ExternalVideoStreamProviderInstrumentedTest {
     fun externalReceiverCanFollowRewrittenHlsChildUri() {
         val base = fixtureBaseUrl()
         val url = "$base/master.m3u8?signature=opaque-test"
-        preflightHlsTransport(url)
+        val segmentUrl = preflightHlsTransport(url)
+        preflightSeekableOnProxyThread(segmentUrl, "hls", 0L)
         val handle = createHandle(url, "hls")
         handle.use {
             val result = runReceiver(handle, "hls")
@@ -58,7 +63,7 @@ class ExternalVideoStreamProviderInstrumentedTest {
         assertFalse("transport progressive seek returned the head bytes", first.contentEquals(later))
     }
 
-    private fun preflightHlsTransport(url: String) {
+    private fun preflightHlsTransport(url: String): String {
         val transport = ExternalHttpTransport()
         val context = requestContext("hls")
         val (playlist, finalUrl) = transport.fetchSmallText(url, context)
@@ -68,6 +73,53 @@ class ExternalVideoStreamProviderInstrumentedTest {
         assertTrue("transport HLS child metadata length=${metadata.length}", metadata.length >= 16L)
         val child = transport.readRange(segmentUrl, context, 0L, 16).bytes
         assertTrue("transport HLS child bytes=${child.size}", child.isNotEmpty())
+        return segmentUrl
+    }
+
+    private fun preflightSeekableOnProxyThread(url: String, suffix: String, seekOffset: Long) {
+        val thread = HandlerThread("external-stream-seekable-preflight").apply { start() }
+        val latch = CountDownLatch(1)
+        val failure = AtomicReference<Throwable?>()
+        Handler(thread.looper).post {
+            try {
+                val transport = ExternalHttpTransport(
+                    cookieProvider = { targetUrl ->
+                        CookieManager.getInstance().getCookie(targetUrl)?.takeIf(String::isNotBlank)
+                    },
+                )
+                val resource = SeekableExternalHttpResource(
+                    url = url,
+                    context = requestContext(suffix),
+                    transport = transport,
+                    maxCachedChunks = 1,
+                )
+                val length = resource.size()
+                check(length > 0L) { "seekable metadata returned empty resource" }
+                check(resource.read(0L, minOf(24L, length).toInt()).isNotEmpty()) {
+                    "seekable first read returned no bytes"
+                }
+                if (seekOffset > 0L && seekOffset < length) {
+                    check(resource.read(seekOffset, minOf(24L, length - seekOffset).toInt()).isNotEmpty()) {
+                        "seekable seek read returned no bytes"
+                    }
+                }
+            } catch (throwable: Throwable) {
+                failure.set(throwable)
+            } finally {
+                latch.countDown()
+            }
+        }
+        try {
+            assertTrue("seekable proxy-thread preflight timed out", latch.await(30, TimeUnit.SECONDS))
+            failure.get()?.let { throwable ->
+                throw AssertionError(
+                    "seekable proxy-thread preflight failed: ${throwable.javaClass.simpleName}: ${throwable.message.orEmpty()}",
+                    throwable,
+                )
+            }
+        } finally {
+            thread.quitSafely()
+        }
     }
 
     private fun createHandle(url: String, suffix: String): ExternalVideoStreamHandle {

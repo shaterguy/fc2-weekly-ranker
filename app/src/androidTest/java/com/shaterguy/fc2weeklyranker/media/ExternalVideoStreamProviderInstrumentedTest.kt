@@ -5,8 +5,8 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.os.Build
 import android.os.Bundle
+import androidx.core.content.ContextCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.shaterguy.fc2weeklyranker.data.VideoEntity
@@ -67,12 +67,12 @@ class ExternalVideoStreamProviderInstrumentedTest {
             }
         }
         val filter = IntentFilter(RESULT_ACTION)
-        if (Build.VERSION.SDK_INT >= 33) {
-            context.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
-        } else {
-            @Suppress("DEPRECATION")
-            context.registerReceiver(receiver, filter)
-        }
+        ContextCompat.registerReceiver(
+            context,
+            receiver,
+            filter,
+            ContextCompat.RECEIVER_EXPORTED,
+        )
         try {
             val intent = Intent(Intent.ACTION_VIEW).apply {
                 component = ComponentName(RECEIVER_PACKAGE, RECEIVER_ACTIVITY)

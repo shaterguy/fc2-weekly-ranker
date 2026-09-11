@@ -260,6 +260,26 @@ jobs:
 
           adb shell dumpsys package com.shaterguy.fc2weeklyranker | grep -Fq 'versionName=0.1.0'
           adb shell dumpsys package com.shaterguy.fc2weeklyranker.dev | grep -Fq 'versionName=0.2.0-dev19'
+
+          RECEIVER_APK="$(find external-stream-receiver/build/outputs/apk/debug -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          TEST_CANDIDATE="$(find app/build/outputs/apk/androidTest/debug -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          test -s "$RECEIVER_APK"
+          test -s "$TEST_CANDIDATE"
+          TEST_ALIGNED="$RUNNER_TEMP/fc2-provider-androidTest-aligned.apk"
+          TEST_APK="$RUNNER_TEMP/fc2-provider-androidTest.apk"
+          "$BT/zipalign" -p -f 4 "$TEST_CANDIDATE" "$TEST_ALIGNED"
+          APKSIGNER="$BT/apksigner" bash tools/sign_test.sh "$TEST_ALIGNED" "$PASS_FILE" "$TEST_APK" >/dev/null
+          "$BT/apksigner" verify --min-sdk-version 29 "$TEST_APK"
+          adb install -r "$RECEIVER_APK"
+          adb install -r -t "$TEST_APK"
+          FIXTURE_BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/test-fixtures/external-stream"
+          INSTRUMENTATION_OUTPUT="$RUNNER_TEMP/external-stream-instrumentation.txt"
+          adb shell am instrument -w \
+            -e fixtureBaseUrl "$FIXTURE_BASE" \
+            -e class com.shaterguy.fc2weeklyranker.media.ExternalVideoStreamProviderInstrumentedTest \
+            com.shaterguy.fc2weeklyranker.dev.test/androidx.test.runner.AndroidJUnitRunner \
+            | tee "$INSTRUMENTATION_OUTPUT"
+          grep -Fq 'OK (2 tests)' "$INSTRUMENTATION_OUTPUT"
       - name: Verify DEV18 in-place TEST update
         if: steps.sign.outputs.configured == 'true'
         shell: bash

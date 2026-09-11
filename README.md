@@ -12,8 +12,8 @@ Android app for browsing the configured `javfc2` board in fixed seven-day window
 
 ## TEST channel
 
-- Historical TEST lineage starts at `v0.1.0-dev1`; the current development target is `v0.2.0-dev18`.
-- Source version: `0.2.0-dev18`, `versionCode=42`.
+- Historical TEST lineage starts at `v0.1.0-dev1`; the current development target is `v0.2.0-dev19`.
+- Source version: `0.2.0-dev19`, `versionCode=43`.
 - TEST application ID: `com.shaterguy.fc2weeklyranker.dev`.
 - The configured default origin is `https://01.avsee.is`; users can replace it in Settings after a board-and-detail parsing connection check.
 - FC2 search starts immediately when the user taps Search in a process-lifetime coroutine runner instead of waiting for an OS-scheduled job. The active token and coroutine job are tracked directly so replacement, cancellation, and foreground recovery observe the actual execution. Search session, page progress, and results remain persisted in a dedicated Room database, and transient socket aborts keep the existing bounded in-run retry behavior.
@@ -35,7 +35,7 @@ Android app for browsing the configured `javfc2` board in fixed seven-day window
 
 ## Media path
 
-The detail screen renders media only. Static `video`, `source`, media links, and `iframe` sources are parsed first. Direct sources use Media3 with the same `Referer`, user agent, and runtime WebView cookie context. Iframe-only sources use a restricted WebView player that accumulates all observed HTTPS media requests and performs a bounded series of delayed DOM probes during the first detail visit, so a second video that becomes ready after the first probe can still be discovered. Before the current detail refresh completes, cached direct rows and iframe resolvers remain inactive; after refresh, visible direct media is deduplicated by canonical media path while distinct delayed media remains separate. When a new detail entry for the same post begins, any still-pending probe registration jobs from the previous detail entry are cancelled before the refresh cutoff is captured, preventing a logically stale callback from being recorded as current media. Query variants of the same resolved media path remain deduplicated, while distinct iframe resolver URLs retain their query identity before resolution. Resolved iframe media keep stable resolver-slot identities; stale probe rows are hidden rather than deleted so repeated detail visits do not accumulate duplicate cards or cascade-delete download state. Media3 players expose full-screen viewing without recreating the playback session.
+The detail screen renders media only. Static `video`, `source`, media links, and `iframe` sources are parsed first. Direct sources use Media3 with the same `Referer`, user agent, and runtime WebView cookie context. Iframe-only sources use a restricted WebView player that accumulates all observed HTTPS media requests and performs a bounded series of delayed DOM probes during the first detail visit, so a second video that becomes ready after the first probe can still be discovered. Before the current detail refresh completes, cached direct rows and iframe resolvers remain inactive; after refresh, visible direct media is deduplicated by canonical media path while distinct delayed media remains separate. When a new detail entry for the same post begins, any still-pending probe registration jobs from the previous detail entry are cancelled before the refresh cutoff is captured, preventing a logically stale callback from being recorded as current media. Query variants of the same resolved media path remain deduplicated, while distinct iframe resolver URLs retain their query identity before resolution. Resolved iframe media keep stable resolver-slot identities; stale probe rows are hidden rather than deleted so repeated detail visits do not accumulate duplicate cards or cascade-delete download state. The inline Media3 player remains available inside the app. The detail-card `외부 플레이어` action delegates the selected validated HTTP(S) direct media URL to Android with an implicit `ACTION_VIEW` intent and MIME type `video/*`, allowing a separately installed compatible player to handle playback.
 
 Downloads are unique WorkManager jobs and write to `MediaStore.Downloads`. Download state and byte progress are persisted in Room so navigation or app background/foreground transitions reattach to the current state. File downloads support pause/resume with HTTP Range when the server returns `206`, plus explicit cancel that removes an unfinished MediaStore entry. New downloads preserve the direct source filename when it is a safe usable basename. The Download tab shows active transfers and completed history; deleting a history row does not delete the completed MediaStore file.
 
@@ -46,6 +46,7 @@ Downloads are unique WorkManager jobs and write to `MediaStore.Downloads`. Downl
 - WebView file/content access and mixed content are disabled.
 - No `addJavascriptInterface` bridge is exposed to remote pages.
 - Session cookies and full request headers are not logged or committed.
+- External player delegation sends only the validated HTTP(S) media URL and `video/*` MIME type; session cookies, `Referer`, user-agent overrides, authorization values, and full request headers are not forwarded.
 - The app requests only the existing network/background-execution permissions required by ranking, search, and scoped downloads; shared downloads use scoped storage.
 
 ## Remote verification

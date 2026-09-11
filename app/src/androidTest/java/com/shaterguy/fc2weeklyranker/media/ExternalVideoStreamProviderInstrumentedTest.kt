@@ -10,9 +10,11 @@ import androidx.core.content.ContextCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.shaterguy.fc2weeklyranker.data.VideoEntity
+import java.net.URI
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -23,37 +25,71 @@ class ExternalVideoStreamProviderInstrumentedTest {
     @Test
     fun externalReceiverCanReadAndSeekProgressiveStream() {
         val base = fixtureBaseUrl()
-        val handle = createHandle("$base/progressive.mp4?signature=opaque-test", "progressive")
+        val url = "$base/progressive.mp4?signature=opaque-test"
+        preflightProgressiveTransport(url)
+        val handle = createHandle(url, "progressive")
         handle.use {
             val result = runReceiver(handle, "progressive")
-            assertTrue(result.getString(EXTRA_ERROR_CODE).orEmpty(), result.getBoolean(EXTRA_OK))
+            assertTrue(describeResult(result), result.getBoolean(EXTRA_OK))
         }
     }
 
     @Test
     fun externalReceiverCanFollowRewrittenHlsChildUri() {
         val base = fixtureBaseUrl()
-        val handle = createHandle("$base/master.m3u8?signature=opaque-test", "hls")
+        val url = "$base/master.m3u8?signature=opaque-test"
+        preflightHlsTransport(url)
+        val handle = createHandle(url, "hls")
         handle.use {
             val result = runReceiver(handle, "hls")
-            assertTrue(result.getString(EXTRA_ERROR_CODE).orEmpty(), result.getBoolean(EXTRA_OK))
+            assertTrue(describeResult(result), result.getBoolean(EXTRA_OK))
         }
+    }
+
+    private fun preflightProgressiveTransport(url: String) {
+        val transport = ExternalHttpTransport()
+        val context = requestContext("progressive")
+        val metadata = transport.metadata(url, context)
+        assertTrue("transport progressive metadata length=${metadata.length}", metadata.length >= 120L)
+        val first = transport.readRange(url, context, 0L, 24).bytes
+        val later = transport.readRange(url, context, 96L, 24).bytes
+        assertTrue("transport progressive head bytes=${first.size}", first.size == 24)
+        assertTrue("transport progressive seek bytes=${later.size}", later.size == 24)
+        assertFalse("transport progressive seek returned the head bytes", first.contentEquals(later))
+    }
+
+    private fun preflightHlsTransport(url: String) {
+        val transport = ExternalHttpTransport()
+        val context = requestContext("hls")
+        val (playlist, finalUrl) = transport.fetchSmallText(url, context)
+        assertTrue("transport HLS playlist missing EXTM3U", playlist.startsWith("#EXTM3U"))
+        val segmentUrl = URI(finalUrl).resolve("segment.ts").toString()
+        val metadata = transport.metadata(segmentUrl, context)
+        assertTrue("transport HLS child metadata length=${metadata.length}", metadata.length >= 16L)
+        val child = transport.readRange(segmentUrl, context, 0L, 16).bytes
+        assertTrue("transport HLS child bytes=${child.size}", child.isNotEmpty())
     }
 
     private fun createHandle(url: String, suffix: String): ExternalVideoStreamHandle {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        val video = VideoEntity(
-            id = "external-stream-$suffix",
-            postId = "external-stream-post-$suffix",
-            url = url,
-            referer = "https://example.test/post/$suffix",
-            userAgent = "FC2WeeklyRankerExternalStreamTest/1.0",
-            sourceKind = "DIRECT",
-            ordinal = 0,
-            discoveredAtEpochMillis = 1L,
-        )
-        return ExternalVideoStreamSessions.create(context, video)
+        return ExternalVideoStreamSessions.create(context, fixtureVideo(url, suffix))
     }
+
+    private fun requestContext(suffix: String): ExternalVideoRequestContext = ExternalVideoRequestContext(
+        referer = "https://example.test/post/$suffix",
+        userAgent = "FC2WeeklyRankerExternalStreamTest/1.0",
+    )
+
+    private fun fixtureVideo(url: String, suffix: String): VideoEntity = VideoEntity(
+        id = "external-stream-$suffix",
+        postId = "external-stream-post-$suffix",
+        url = url,
+        referer = "https://example.test/post/$suffix",
+        userAgent = "FC2WeeklyRankerExternalStreamTest/1.0",
+        sourceKind = "DIRECT",
+        ordinal = 0,
+        discoveredAtEpochMillis = 1L,
+    )
 
     private fun runReceiver(handle: ExternalVideoStreamHandle, scenario: String): Bundle {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
@@ -89,6 +125,14 @@ class ExternalVideoStreamProviderInstrumentedTest {
         }
     }
 
+    private fun describeResult(result: Bundle): String = buildString {
+        append("code=").append(result.getString(EXTRA_ERROR_CODE).orEmpty())
+        append(" stage=").append(result.getString(EXTRA_ERROR_STAGE).orEmpty())
+        append(" errno=").append(result.getInt(EXTRA_ERRNO, -1))
+        append(" function=").append(result.getString(EXTRA_ERROR_FUNCTION).orEmpty())
+        append(" message=").append(result.getString(EXTRA_ERROR_MESSAGE).orEmpty())
+    }
+
     private fun fixtureBaseUrl(): String {
         val raw = InstrumentationRegistry.getArguments().getString("fixtureBaseUrl")
         require(!raw.isNullOrBlank()) { "fixtureBaseUrl instrumentation argument is required" }
@@ -103,5 +147,9 @@ class ExternalVideoStreamProviderInstrumentedTest {
         private const val EXTRA_RESULT_PACKAGE = "resultPackage"
         private const val EXTRA_OK = "ok"
         private const val EXTRA_ERROR_CODE = "errorCode"
+        private const val EXTRA_ERROR_STAGE = "errorStage"
+        private const val EXTRA_ERRNO = "errno"
+        private const val EXTRA_ERROR_FUNCTION = "errorFunction"
+        private const val EXTRA_ERROR_MESSAGE = "errorMessage"
     }
 }

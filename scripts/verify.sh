@@ -8,14 +8,23 @@ bash -n scripts/verify_dev17_to_dev18_update.sh
 bash -n scripts/verify_dev18_to_dev19_update.sh
 
 MAIN='app/src/main/java/com/shaterguy/fc2weeklyranker/MainActivity.kt'
+LAUNCHER='app/src/main/java/com/shaterguy/fc2weeklyranker/media/ExternalVideoPlayerLauncher.kt'
 MANIFEST='app/src/main/AndroidManifest.xml'
-grep -Fq 'Intent(Intent.ACTION_VIEW)' "$MAIN"
-grep -Fq 'setDataAndType(Uri.parse(url), "video/*")' "$MAIN"
+grep -Fq 'createExternalVideoPlayerRequest(context, video)' "$MAIN"
+grep -Fq 'context.startActivity(request.intent)' "$MAIN"
+grep -Fq 'ExternalVideoStreamSessions.create(context, video)' "$LAUNCHER"
+grep -Fq 'Intent(Intent.ACTION_VIEW)' "$LAUNCHER"
+grep -Fq 'setDataAndType(handle.uri, handle.mimeType)' "$LAUNCHER"
+grep -Fq 'addFlags(handle.intentFlags)' "$LAUNCHER"
 grep -Fq 'Text("외부 플레이어"' "$MAIN"
 grep -Fq 'contentDescription = "영상 ${index + 1} 외부 플레이어로 열기"' "$MAIN"
 grep -Fq 'android:name=".media.ExternalVideoStreamProvider"' "$MANIFEST"
 grep -Fq 'android:exported="false"' "$MANIFEST"
 grep -Fq 'android:grantUriPermissions="true"' "$MANIFEST"
+if grep -Fq 'setDataAndType(Uri.parse(url), "video/*")' "$MAIN"; then
+  echo 'ERROR: external-player action still exposes the raw upstream URL.' >&2
+  exit 1
+fi
 if grep -Fq 'Text("내장플레이어 열기"' "$MAIN"; then
   echo 'ERROR: stale internal-player button label remains.' >&2
   exit 1

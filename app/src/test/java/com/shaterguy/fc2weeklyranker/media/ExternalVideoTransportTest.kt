@@ -15,6 +15,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.IOException
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicInteger
 
 class ExternalVideoTransportTest {
     private val payload = ByteArray(96) { index -> (index and 0xff).toByte() }
@@ -79,6 +80,135 @@ class ExternalVideoTransportTest {
     }
 
     @Test
+    fun short206ResponsesAreStitchedAcrossRealChunkBoundariesWithoutPrematureEof() {
+        val largePayload = ByteArray(1024 * 1024 + 257) { index -> ((index * 31) and 0xff).toByte() }
+        val upstream = ShortRangeUpstream(largePayload, maxBodyBytes = 64 * 1024)
+        val transport = ExternalHttpTransport(
+            client = OkHttpClient.Builder().addInterceptor(upstream).build(),
+            cookieProvider = { "session=selected" },
+        )
+        val reader = SeekableExternalHttpResource(
+            url = sourceUrl,
+            context = ExternalVideoRequestContext(referer, userAgent),
+            transport = transport,
+            maxCachedChunks = 1,
+        )
+        val start = 512 * 1024 - 97
+        val size = 512 * 1024 + 160
+
+        val bytes = reader.read(start.toLong(), size)
+
+        assertEquals(size, bytes.size)
+        assertArrayEquals(largePayload.copyOfRange(start, start + size), bytes)
+        assertTrue(upstream.rangeRequestCount.get() > 2)
+        assertTrue(upstream.rangeRequestCount.get() <= 17)
+        assertFalse(upstream.seen.any { it.method == "GET" && it.header("Range") == null })
+    }
+
+    @Test
+    fun transientRangeDisconnectIsRetriedAtTheSameOffsetWithoutDuplicateOrMissingBytes() {
+        val upstream = FlakyProgressiveUpstream(payload, failOnceAtOffset = 64L)
+        val transport = ExternalHttpTransport(
+            client = OkHttpClient.Builder().addInterceptor(upstream).build(),
+            cookieProvider = { "session=selected" },
+        )
+        val reader = SeekableExternalHttpResource(
+            url = sourceUrl,
+            context = ExternalVideoRequestContext(referer, userAgent),
+            transport = transport,
+            chunkSize = 32,
+            maxCachedChunks = 1,
+        )
+
+        val bytes = reader.read(64, 24)
+
+        assertArrayEquals(payload.copyOfRange(64, 88), bytes)
+        assertEquals(1, upstream.injectedFailures.get())
+        assertTrue(upstream.rangeStarts.count { it == 64L } >= 2)
+    }
+
+    @Test
+    fun serverIgnoringSeekRangeUsesAStreamingWindowInsteadOfFailingThePlayerRead() {
+        val seen = CopyOnWriteArrayList<Request>()
+        val ignoringRange = Interceptor { chain ->
+            val request = chain.request()
+            seen += request
+            if (request.method == "HEAD") {
+                testResponse(
+                    request,
+                    code = 200,
+                    headers = mapOf("Content-Length" to payload.size.toString(), "Content-Type" to "video/mp4"),
+                )
+            } else {
+                testResponse(
+                    request,
+                    code = 200,
+                    body = payload,
+                    headers = mapOf("Content-Length" to payload.size.toString(), "Content-Type" to "video/mp4"),
+                )
+            }
+        }
+        val transport = ExternalHttpTransport(
+            client = OkHttpClient.Builder().addInterceptor(ignoringRange).build(),
+            cookieProvider = { "session=selected" },
+        )
+        val reader = SeekableExternalHttpResource(
+            url = sourceUrl,
+            context = ExternalVideoRequestContext(referer, userAgent),
+            transport = transport,
+            chunkSize = 16,
+            maxCachedChunks = 1,
+        )
+
+        val bytes = reader.read(32, 12)
+
+        assertArrayEquals(payload.copyOfRange(32, 44), bytes)
+        assertTrue(seen.any { it.header("Range") == "bytes=32-47" })
+        assertTrue(seen.all { it.header("Accept-Encoding") == "identity" })
+    }
+
+    @Test
+    fun protocolErrorsFailImmediatelyInsteadOfBeingRetriedAsTransientDisconnects() {
+        val getCount = AtomicInteger(0)
+        val invalidRange = Interceptor { chain ->
+            val request = chain.request()
+            if (request.method == "HEAD") {
+                testResponse(
+                    request,
+                    code = 200,
+                    headers = mapOf("Content-Length" to payload.size.toString(), "Content-Type" to "video/mp4"),
+                )
+            } else {
+                getCount.incrementAndGet()
+                testResponse(
+                    request,
+                    code = 206,
+                    body = payload.copyOfRange(0, 8),
+                    headers = mapOf(
+                        "Content-Range" to "bytes 0-7/${payload.size}",
+                        "Content-Length" to "8",
+                        "Content-Type" to "video/mp4",
+                    ),
+                )
+            }
+        }
+        val transport = ExternalHttpTransport(
+            client = OkHttpClient.Builder().addInterceptor(invalidRange).build(),
+            cookieProvider = { "session=selected" },
+        )
+        val reader = SeekableExternalHttpResource(
+            url = sourceUrl,
+            context = ExternalVideoRequestContext(referer, userAgent),
+            transport = transport,
+            chunkSize = 16,
+            maxCachedChunks = 1,
+        )
+
+        assertThrows(IOException::class.java) { reader.read(32, 8) }
+        assertEquals(1, getCount.get())
+    }
+
+    @Test
     fun targetCookiesAreRecomputedAfterRedirectInsteadOfForwardingOriginCookie() {
         val seen = CopyOnWriteArrayList<Request>()
         val interceptor = Interceptor { chain ->
@@ -127,7 +257,7 @@ class ExternalVideoTransportTest {
     }
 
     @Test
-    fun validEof416ReturnsEmptyButIgnoredSeekRangeFailsClosed() {
+    fun validEof416ReturnsEmpty() {
         val upstream = ProtectedProgressiveUpstream(payload, referer, userAgent, "session=selected")
         val transport = ExternalHttpTransport(
             client = OkHttpClient.Builder().addInterceptor(upstream).build(),
@@ -136,22 +266,9 @@ class ExternalVideoTransportTest {
         val context = ExternalVideoRequestContext(referer, userAgent)
 
         val eof = transport.readRange(sourceUrl, context, payload.size.toLong(), 4)
+
         assertArrayEquals(ByteArray(0), eof.bytes)
         assertEquals(payload.size.toLong(), eof.totalLength)
-
-        val ignoringRange = Interceptor { chain ->
-            testResponse(
-                chain.request(),
-                code = 200,
-                body = payload,
-                headers = mapOf("Content-Length" to payload.size.toString(), "Content-Type" to "video/mp4"),
-            )
-        }
-        val unsafe = ExternalHttpTransport(
-            client = OkHttpClient.Builder().addInterceptor(ignoringRange).build(),
-            cookieProvider = { "session=selected" },
-        )
-        assertThrows(IOException::class.java) { unsafe.readRange(sourceUrl, context, 32, 8) }
     }
 
     @Test
@@ -229,6 +346,88 @@ class ExternalVideoTransportTest {
                     416,
                     headers = mapOf("Content-Range" to "bytes */${payload.size}"),
                 )
+            }
+            val end = minOf(requestedEnd, payload.lastIndex.toLong())
+            val body = payload.copyOfRange(start.toInt(), end.toInt() + 1)
+            return testResponse(
+                request,
+                206,
+                body = body,
+                headers = mapOf(
+                    "Content-Range" to "bytes $start-$end/${payload.size}",
+                    "Content-Length" to body.size.toString(),
+                    "Content-Type" to "video/mp4",
+                ),
+            )
+        }
+    }
+
+    private class ShortRangeUpstream(
+        private val payload: ByteArray,
+        private val maxBodyBytes: Int,
+    ) : Interceptor {
+        val seen = CopyOnWriteArrayList<Request>()
+        val rangeRequestCount = AtomicInteger(0)
+
+        override fun intercept(chain: Interceptor.Chain): Response {
+            val request = chain.request()
+            seen += request
+            if (request.method == "HEAD") {
+                return testResponse(
+                    request,
+                    200,
+                    headers = mapOf("Content-Length" to payload.size.toString(), "Content-Type" to "video/mp4"),
+                )
+            }
+            rangeRequestCount.incrementAndGet()
+            val range = request.header("Range") ?: return testResponse(request, 400)
+            val match = Regex("bytes=(\\d+)-(\\d+)").matchEntire(range) ?: return testResponse(request, 400)
+            val start = match.groupValues[1].toLong()
+            val requestedEnd = match.groupValues[2].toLong()
+            if (start >= payload.size) {
+                return testResponse(request, 416, headers = mapOf("Content-Range" to "bytes */${payload.size}"))
+            }
+            val end = minOf(requestedEnd, start + maxBodyBytes - 1L, payload.lastIndex.toLong())
+            val body = payload.copyOfRange(start.toInt(), end.toInt() + 1)
+            return testResponse(
+                request,
+                206,
+                body = body,
+                headers = mapOf(
+                    "Content-Range" to "bytes $start-$end/${payload.size}",
+                    "Content-Length" to body.size.toString(),
+                    "Content-Type" to "video/mp4",
+                ),
+            )
+        }
+    }
+
+    private class FlakyProgressiveUpstream(
+        private val payload: ByteArray,
+        private val failOnceAtOffset: Long,
+    ) : Interceptor {
+        val injectedFailures = AtomicInteger(0)
+        val rangeStarts = CopyOnWriteArrayList<Long>()
+
+        override fun intercept(chain: Interceptor.Chain): Response {
+            val request = chain.request()
+            if (request.method == "HEAD") {
+                return testResponse(
+                    request,
+                    200,
+                    headers = mapOf("Content-Length" to payload.size.toString(), "Content-Type" to "video/mp4"),
+                )
+            }
+            val range = request.header("Range") ?: return testResponse(request, 400)
+            val match = Regex("bytes=(\\d+)-(\\d+)").matchEntire(range) ?: return testResponse(request, 400)
+            val start = match.groupValues[1].toLong()
+            val requestedEnd = match.groupValues[2].toLong()
+            rangeStarts += start
+            if (start == failOnceAtOffset && injectedFailures.compareAndSet(0, 1)) {
+                throw IOException("simulated upstream disconnect")
+            }
+            if (start >= payload.size) {
+                return testResponse(request, 416, headers = mapOf("Content-Range" to "bytes */${payload.size}"))
             }
             val end = minOf(requestedEnd, payload.lastIndex.toLong())
             val body = payload.copyOfRange(start.toInt(), end.toInt() + 1)

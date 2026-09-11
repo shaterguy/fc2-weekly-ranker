@@ -91,16 +91,24 @@ class ExternalVideoStreamProviderInstrumentedTest {
                     url = url,
                     context = requestContext(suffix),
                     transport = transport,
-                    maxCachedChunks = 1,
+                    chunkSize = 32,
+                    maxCachedChunks = 2,
                 )
                 val length = resource.size()
                 check(length > 0L) { "seekable metadata returned empty resource" }
-                check(resource.read(0L, minOf(24L, length).toInt()).isNotEmpty()) {
-                    "seekable first read returned no bytes"
+                var cursor = 0L
+                while (cursor < length) {
+                    val requested = minOf(37L, length - cursor).toInt()
+                    val bytes = resource.read(cursor, requested)
+                    check(bytes.size == requested) {
+                        "seekable sustained read returned ${bytes.size}/$requested bytes at offset $cursor before EOF $length"
+                    }
+                    cursor += bytes.size.toLong()
                 }
+                check(resource.read(length, 16).isEmpty()) { "seekable EOF read returned bytes" }
                 if (seekOffset > 0L && seekOffset < length) {
                     check(resource.read(seekOffset, minOf(24L, length - seekOffset).toInt()).isNotEmpty()) {
-                        "seekable seek read returned no bytes"
+                        "seekable backward seek read returned no bytes"
                     }
                 }
             } catch (throwable: Throwable) {

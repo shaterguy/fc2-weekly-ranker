@@ -9,8 +9,8 @@ import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFailsWith
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.IOException
@@ -30,7 +30,7 @@ class ExternalVideoTransportTest {
             cookieProvider = { null },
         )
         val context = ExternalVideoRequestContext(referer, userAgent)
-        assertFailsWith<IOException> { noCookie.readRange(sourceUrl, context, 0, 8) }
+        assertThrows(IOException::class.java) { noCookie.readRange(sourceUrl, context, 0, 8) }
 
         val transport = ExternalHttpTransport(
             client = OkHttpClient.Builder().addInterceptor(upstream).build(),
@@ -148,7 +148,7 @@ class ExternalVideoTransportTest {
             client = OkHttpClient.Builder().addInterceptor(ignoringRange).build(),
             cookieProvider = { "session=selected" },
         )
-        assertFailsWith<IOException> { unsafe.readRange(sourceUrl, context, 32, 8) }
+        assertThrows(IOException::class.java) { unsafe.readRange(sourceUrl, context, 32, 8) }
     }
 
     @Test

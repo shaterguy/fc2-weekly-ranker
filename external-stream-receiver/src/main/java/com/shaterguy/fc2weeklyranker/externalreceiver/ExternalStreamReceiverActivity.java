@@ -34,7 +34,12 @@ public final class ExternalStreamReceiverActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         Intent incoming = getIntent();
-        new Thread(() -> executeScenario(incoming), "external-stream-receiver").start();
+        String scenario = incoming.getStringExtra(EXTRA_SCENARIO);
+        if ("decoder".equals(scenario)) {
+            new Thread(() -> executeScenario(incoming), "external-stream-receiver-decoder").start();
+        } else {
+            executeScenario(incoming);
+        }
     }
 
     private void executeScenario(Intent incoming) {

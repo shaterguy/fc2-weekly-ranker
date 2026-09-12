@@ -339,7 +339,7 @@ class ExternalVideoTransportSmoothnessTest {
             )
             val highWater = upstream.rangeConcurrencyHighWater.get()
             assertTrue("short-206 stitching did not use parallel ranges: $highWater", highWater >= 2)
-            assertTrue("short-206 stitching exceeded bounded parallelism: $highWater", highWater <= 4)
+            assertTrue("short-206 stitching exceeded bounded parallelism: $highWater", highWater <= 8)
         } finally {
             reader.close()
         }

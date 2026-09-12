@@ -1,4 +1,4 @@
-name: SelfRun Android TEST dispatch relay
+name: SelfRun API34 dispatch relay
 
 on:
   push:
@@ -13,7 +13,7 @@ jobs:
   dispatch-exact-candidate:
     runs-on: ubuntu-latest
     steps:
-      - name: Dispatch exact candidate Android TEST
+      - name: Dispatch exact candidate API34 diagnostic
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -28,6 +28,7 @@ jobs:
           test "$REF_SHA" = "$TARGET_SOURCE_SHA"
           gh api --method POST \
             -H "Accept: application/vnd.github+json" \
-            "repos/${GITHUB_REPOSITORY}/actions/workflows/android-test.yml/dispatches" \
-            -f ref="$TARGET_REF"
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/external-playback-diagnostic.yml/dispatches" \
+            -f ref="$TARGET_REF" \
+            -f 'inputs[smoothness_profile]=candidate'
           echo "DISPATCH_REQUEST_ACCEPTED=true"

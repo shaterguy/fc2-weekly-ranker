@@ -675,40 +675,28 @@ internal class SeekableExternalHttpResource(
 internal fun rewriteHlsPlaylist(
     playlist: String,
     baseUrl: String,
-    mapChildUrl: (String) -> String,
-): String {
-    val baseUri = runCatching { URI(baseUrl) }.getOrElse { return playlist }
-    return playlist.lineSequence().joinToString("\n") { line ->
-        if (line.startsWith("#")) {
-            rewriteHlsTagUris(line, baseUri, mapChildUrl)
-        } else {
-            val trimmed = line.trim()
-            if (trimmed.isBlank()) line else rewriteHlsUri(trimmed, baseUri, mapChildUrl)
+    rewriteUrl: (String) -> String,
+): String = playlist.lineSequence().joinToString("\n") { line ->
+    when {
+        line.isBlank() -> line
+        !line.startsWith("#") -> resolveHlsHttpUrl(baseUrl, line.trim())?.let(rewriteUrl) ?: line
+        "URI=" in line -> HLS_URI_ATTRIBUTE.replace(line) { match ->
+            val raw = match.groups[1]?.value ?: match.groups[2]?.value.orEmpty()
+            val resolved = resolveHlsHttpUrl(baseUrl, raw) ?: return@replace match.value
+            "URI=\"${rewriteUrl(resolved)}\""
         }
+        else -> line
     }
 }
 
-private fun rewriteHlsTagUris(
-    line: String,
-    baseUri: URI,
-    mapChildUrl: (String) -> String,
-): String = HLS_URI_ATTRIBUTE.replace(line) { match ->
-    val original = match.groupValues[1]
-    val rewritten = rewriteHlsUri(original, baseUri, mapChildUrl)
-    "URI=\"$rewritten\""
-}
+private fun resolveHlsHttpUrl(baseUrl: String, reference: String): String? = runCatching {
+    val resolved = URI(baseUrl).resolve(reference)
+    val scheme = resolved.scheme?.lowercase()
+    if ((scheme == "http" || scheme == "https") && !resolved.host.isNullOrBlank() && resolved.userInfo == null) {
+        resolved.toString()
+    } else {
+        null
+    }
+}.getOrNull()
 
-private fun rewriteHlsUri(
-    value: String,
-    baseUri: URI,
-    mapChildUrl: (String) -> String,
-): String {
-    if (value.startsWith("data:", ignoreCase = true)) return value
-    val resolved = runCatching { baseUri.resolve(value).toString() }.getOrDefault(value)
-    val uri = runCatching { URI(resolved) }.getOrNull() ?: return value
-    val scheme = uri.scheme?.lowercase()
-    if (scheme != "http" && scheme != "https") return value
-    return mapChildUrl(resolved)
-}
-
-private val HLS_URI_ATTRIBUTE = Regex("URI=\"([^\"]+)\"")
+private val HLS_URI_ATTRIBUTE = Regex("URI=(?:\\\"([^\\\"]+)\\\"|([^,\\s]+))")

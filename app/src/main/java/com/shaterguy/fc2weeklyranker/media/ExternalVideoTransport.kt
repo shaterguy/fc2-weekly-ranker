@@ -393,7 +393,8 @@ internal class SeekableExternalHttpResource(
     private var generation = 0L
     private var lastReadEnd: Long? = null
     private var prefetch: PrefetchTask? = null
-    private var prefetchHighWater = 0
+    private val prefetchWorkerActive = AtomicInteger(0)
+    private val prefetchHighWater = AtomicInteger(0)
     private var rangeReadAheadEnabled = false
     private var closed = false
 
@@ -455,13 +456,15 @@ internal class SeekableExternalHttpResource(
         val task = prefetch
         val prefetchedBytes = if (task != null && task.future.isDone && !task.future.isCompletedExceptionally && !task.future.isCancelled) {
             runCatching { task.future.getNow(null)?.size ?: 0 }.getOrDefault(0)
+        } else if (prefetchWorkerActive.get() > 0) {
+            chunkSize
         } else {
             0
         }
         return ExternalSeekableDebugSnapshot(
             generation = generation,
-            prefetchInFlight = if (task != null && !task.future.isDone) 1 else 0,
-            prefetchInFlightHighWater = prefetchHighWater,
+            prefetchInFlight = prefetchWorkerActive.get(),
+            prefetchInFlightHighWater = prefetchHighWater.get(),
             residentBytes = cache.values.sumOf { it.size } + prefetchedBytes,
             rangeReadAheadEnabled = rangeReadAheadEnabled,
         )
@@ -503,11 +506,21 @@ internal class SeekableExternalHttpResource(
 
         val taskGeneration = generation
         val future = CompletableFuture.supplyAsync(
-            { loadRangeOnlyChunk(nextChunkStart, length) },
+            {
+                if (!prefetchWorkerActive.compareAndSet(0, 1)) {
+                    null
+                } else {
+                    prefetchHighWater.updateAndGet { maxOf(it, prefetchWorkerActive.get()) }
+                    try {
+                        loadRangeOnlyChunk(nextChunkStart, length)
+                    } finally {
+                        prefetchWorkerActive.set(0)
+                    }
+                }
+            },
             PREFETCH_EXECUTOR,
         )
         prefetch = PrefetchTask(taskGeneration, nextChunkStart, future)
-        prefetchHighWater = 1
     }
 
     private fun invalidateReadAhead() {

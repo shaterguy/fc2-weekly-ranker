@@ -1,0 +1,40 @@
+name: SelfRun range parallelism patch once
+
+on:
+  push:
+    branches:
+      - 'fix/SR-20260912-142807-C1LNMO-stream-smoothness'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-once:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: fix/SR-20260912-142807-C1LNMO-stream-smoothness
+      - name: Apply one-shot source patch and remove this workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('app/src/main/java/com/shaterguy/fc2weeklyranker/media/ExternalVideoTransport.kt')
+          text = path.read_text()
+          old = 'private const val RANGE_PARALLELISM = 4'
+          new = 'private const val RANGE_PARALLELISM = 8'
+          if text.count(old) != 1:
+              raise SystemExit(f'expected exactly one source occurrence, found {text.count(old)}')
+          path.write_text(text.replace(old, new))
+          PY
+          rm .github/workflows/selfrun-range-parallelism-once.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app/src/main/java/com/shaterguy/fc2weeklyranker/media/ExternalVideoTransport.kt .github/workflows/selfrun-range-parallelism-once.yml
+          git diff --cached --check
+          git diff --cached --exit-code --quiet && { echo 'no patch produced' >&2; exit 1; } || true
+          git commit -m 'fix(media): widen short-range request parallelism'
+          git push origin HEAD:fix/SR-20260912-142807-C1LNMO-stream-smoothness

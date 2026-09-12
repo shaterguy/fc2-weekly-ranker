@@ -286,7 +286,7 @@ private object ExternalVideoStreamRegistry {
                     bytes.copyOfRange(start, end)
                 }
             } else {
-                seekable().read(offset, minOf(size, PROXY_READ_CHUNK_BYTES))
+                seekable().read(offset, size)
             }
         }
 

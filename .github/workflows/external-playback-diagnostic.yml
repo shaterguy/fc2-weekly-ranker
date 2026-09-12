@@ -1,0 +1,195 @@
+name: External playback API 34 diagnostic
+
+on:
+  push:
+    branches:
+      - 'work/SR-20260912-111334-N8BSMT-external-12s'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  diagnose-external-playback:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407
+        with:
+          packages: ''
+          log-accepted-android-sdk-licenses: 'false'
+
+      - name: Set up Gradle 9.5
+        uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a
+        with:
+          gradle-version: '9.5.0'
+
+      - name: Install Android build and emulator packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager \
+            "platforms;android-37.0" \
+            "build-tools;37.0.0" \
+            "platform-tools" \
+            "emulator" \
+            "system-images;android-34;google_apis;x86_64"
+
+      - name: Build diagnostic app and receiver
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle --no-daemon --stacktrace :app:assembleDebug :external-stream-receiver:assembleDebug
+          test -s "$(find app/build/outputs/apk/debug -maxdepth 1 -type f -name '*-unsigned.apk' -print -quit)"
+          test -s "$(find external-stream-receiver/build/outputs/apk/debug -maxdepth 1 -type f -name '*.apk' -print -quit)"
+
+      - name: Sign diagnostic provider APK
+        id: sign
+        shell: bash
+        run: |
+          set -euo pipefail
+          BT="$ANDROID_HOME/build-tools/37.0.0"
+          UNSIGNED="$(find app/build/outputs/apk/debug -maxdepth 1 -type f -name '*-unsigned.apk' -print -quit)"
+          OUT="$RUNNER_TEMP/external-playback-diagnostic"
+          KEYSTORE="$RUNNER_TEMP/external-playback-diagnostic.jks"
+          mkdir -p "$OUT"
+          ALIGNED="$OUT/fc2-weekly-ranker-diagnostic-aligned.apk"
+          APK="$OUT/fc2-weekly-ranker-diagnostic.apk"
+          "$BT/zipalign" -p -f 4 "$UNSIGNED" "$ALIGNED"
+          keytool -genkeypair -noprompt \
+            -keystore "$KEYSTORE" \
+            -storepass android \
+            -keypass android \
+            -alias androiddebugkey \
+            -dname 'CN=FC2 External Playback Diagnostic,O=OpenAI Test,C=US' \
+            -keyalg RSA \
+            -validity 3650 >/dev/null 2>&1
+          "$BT/apksigner" sign \
+            --ks "$KEYSTORE" \
+            --ks-key-alias androiddebugkey \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            --out "$APK" \
+            "$ALIGNED"
+          "$BT/apksigner" verify --verbose --min-sdk-version 29 "$APK"
+          BADGING="$("$BT/aapt" dump badging "$APK")"
+          grep -Fq "package: name='com.shaterguy.fc2weeklyranker.dev' versionCode='46' versionName='0.2.0-dev22'" <<<"$BADGING"
+          echo "apk=$APK" >> "$GITHUB_OUTPUT"
+
+      - name: Boot Android 14 emulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          AVD_NAME=fc2-external-api34
+          export ANDROID_AVD_HOME="$RUNNER_TEMP/android-avd"
+          mkdir -p "$ANDROID_AVD_HOME"
+          echo no | avdmanager create avd \
+            --force \
+            --name "$AVD_NAME" \
+            --package "system-images;android-34;google_apis;x86_64" \
+            --device pixel \
+            --path "$ANDROID_AVD_HOME/$AVD_NAME.avd"
+          sudo chmod 666 /dev/kvm 2>/dev/null || true
+          nohup "$ANDROID_HOME/emulator/emulator" \
+            -avd "$AVD_NAME" \
+            -no-window \
+            -noaudio \
+            -no-boot-anim \
+            -no-snapshot \
+            -gpu swiftshader_indirect \
+            >"$RUNNER_TEMP/fc2-external-emulator.log" 2>&1 &
+          timeout 180s adb wait-for-device
+          for _ in $(seq 1 120); do
+            [[ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == "1" ]] && break
+            sleep 2
+          done
+          [[ "$(adb shell getprop sys.boot_completed | tr -d '\r')" == "1" ]]
+          adb shell getprop ro.build.version.release
+          adb shell getprop ro.build.version.sdk
+
+      - name: Reproduce ordinary-process external playback
+        shell: bash
+        env:
+          DIAGNOSTIC_APK: ${{ steps.sign.outputs.apk }}
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/external-playback-diagnostic"
+          RECEIVER_APK="$(find external-stream-receiver/build/outputs/apk/debug -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          APP_PACKAGE=com.shaterguy.fc2weeklyranker.dev
+          RECEIVER_PACKAGE=com.shaterguy.fc2weeklyranker.externalreceiver
+          mkdir -p "$OUT"
+          adb install -r "$DIAGNOSTIC_APK"
+          adb install -r "$RECEIVER_APK"
+          adb shell am force-stop "$APP_PACKAGE" || true
+          adb shell am force-stop "$RECEIVER_PACKAGE" || true
+          adb logcat -c
+          adb shell am start -W \
+            -n "$APP_PACKAGE/com.shaterguy.fc2weeklyranker.media.ExternalStreamDiagnosticActivity" \
+            | tee "$OUT/launch.txt"
+
+          APP_UID="$(adb shell dumpsys package "$APP_PACKAGE" | sed -n 's/.*userId=\([0-9][0-9]*\).*/\1/p' | head -n 1 | tr -d '\r')"
+          test -n "$APP_UID"
+          : > "$OUT/process-state.txt"
+          : > "$OUT/filtered-logcat.txt"
+
+          RESULT_FOUND=0
+          for second in $(seq 0 170); do
+            {
+              printf 't=%ss uid=%s uidState=' "$second" "$APP_UID"
+              adb shell cmd activity get-uid-state "$APP_UID" 2>/dev/null | tr -d '\r' || true
+              adb shell dumpsys activity lru 2>/dev/null | grep -F "$APP_PACKAGE" | head -n 2 || true
+              adb shell dumpsys activity processes 2>/dev/null | grep -F -A 16 -B 2 "$APP_PACKAGE" | head -n 24 || true
+              printf '\n'
+            } >> "$OUT/process-state.txt"
+
+            adb logcat -d -v monotonic \
+              -s FC2ExternalLaunch:I FC2ExternalTest:I '*:S' \
+              > "$OUT/filtered-logcat.txt" || true
+            if grep -Fq 'result scenario=long-decoder' "$OUT/filtered-logcat.txt"; then
+              RESULT_FOUND=1
+              break
+            fi
+            sleep 1
+          done
+
+          cat "$OUT/filtered-logcat.txt"
+          echo '--- provider process state samples ---'
+          cat "$OUT/process-state.txt"
+          [[ "$RESULT_FOUND" == '1' ]]
+          RESULT_LINE="$(grep -F 'result scenario=long-decoder' "$OUT/filtered-logcat.txt" | tail -n 1)"
+          printf '%s\n' "$RESULT_LINE" > "$OUT/result.txt"
+          if grep -Fq 'ok=false' <<<"$RESULT_LINE"; then
+            printf 'REPRODUCED_FAILURE\n' > "$OUT/outcome.txt"
+          elif grep -Fq 'ok=true' <<<"$RESULT_LINE"; then
+            printf 'PLAYED_120S\n' > "$OUT/outcome.txt"
+          else
+            printf 'UNCLASSIFIED_RESULT\n' > "$OUT/outcome.txt"
+            exit 1
+          fi
+          cat "$OUT/outcome.txt"
+
+      - name: Upload diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: external-playback-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/external-playback-diagnostic/launch.txt
+            ${{ runner.temp }}/external-playback-diagnostic/process-state.txt
+            ${{ runner.temp }}/external-playback-diagnostic/filtered-logcat.txt
+            ${{ runner.temp }}/external-playback-diagnostic/result.txt
+            ${{ runner.temp }}/external-playback-diagnostic/outcome.txt
+            ${{ runner.temp }}/fc2-external-emulator.log
+          if-no-files-found: warn
+          retention-days: 14

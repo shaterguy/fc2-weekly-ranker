@@ -9,15 +9,20 @@ import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
 import android.system.ErrnoException;
 import android.system.Os;
+import android.util.Log;
+import android.view.SurfaceHolder;
+import android.view.SurfaceView;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public final class ExternalStreamReceiverActivity extends Activity {
+    private static final String TAG = "FC2ExternalTest";
     private static final String RESULT_ACTION = "com.shaterguy.fc2weeklyranker.EXTERNAL_STREAM_TEST_RESULT";
     private static final String EXTRA_SCENARIO = "scenario";
     private static final String EXTRA_RESULT_PACKAGE = "resultPackage";
@@ -27,26 +32,68 @@ public final class ExternalStreamReceiverActivity extends Activity {
     private static final String EXTRA_ERRNO = "errno";
     private static final String EXTRA_ERROR_FUNCTION = "errorFunction";
     private static final String EXTRA_ERROR_MESSAGE = "errorMessage";
+    private static final String EXTRA_DECODER_WHAT = "decoderWhat";
+    private static final String EXTRA_DECODER_EXTRA = "decoderExtra";
+    private static final String EXTRA_POSITION_MS = "positionMs";
+    private static final String EXTRA_ELAPSED_MS = "elapsedMs";
     private static final Pattern CONTENT_URI = Pattern.compile("content://[^\\s\\\"']+");
     private static final int NO_ERRNO = -1;
     private static final long MULTI_CHUNK_OFFSET = 600L * 1024L;
     private static final long DECODER_PREPARE_TIMEOUT_MS = 12_000L;
-    private static final long DECODER_STAGE_WATCHDOG_MS = 20_000L;
+    private static final long DECODER_STAGE_WATCHDOG_MS = 30_000L;
     private static final long DECODER_WATCHDOG_POLL_MS = 250L;
+    private static final long LONG_DECODER_TARGET_MS = 120_000L;
+    private static final long LONG_DECODER_TIMEOUT_MS = 155_000L;
 
     private final AtomicBoolean resultSent = new AtomicBoolean(false);
+    private final AtomicInteger decoderWhat = new AtomicInteger(0);
+    private final AtomicInteger decoderExtra = new AtomicInteger(0);
+    private final CountDownLatch surfaceReady = new CountDownLatch(1);
     private volatile String diagnosticStage = "startup";
+    private volatile int lastPositionMs = -1;
+    private volatile long scenarioStartedAtMs;
+    private volatile SurfaceHolder videoSurfaceHolder;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        scenarioStartedAtMs = SystemClock.elapsedRealtime();
         Intent incoming = getIntent();
         String scenario = incoming.getStringExtra(EXTRA_SCENARIO);
-        if ("decoder".equals(scenario)) {
+        if ("decoder".equals(scenario) || "long-decoder".equals(scenario)) {
+            setUpVideoSurface();
             new Thread(() -> executeScenario(incoming), "external-stream-receiver-decoder").start();
             new Thread(() -> watchDecoder(incoming), "external-stream-receiver-watchdog").start();
         } else {
             executeScenario(incoming);
+        }
+    }
+
+    private void setUpVideoSurface() {
+        SurfaceView surfaceView = new SurfaceView(this);
+        setContentView(surfaceView);
+        SurfaceHolder holder = surfaceView.getHolder();
+        holder.addCallback(new SurfaceHolder.Callback() {
+            @Override
+            public void surfaceCreated(SurfaceHolder createdHolder) {
+                videoSurfaceHolder = createdHolder;
+                surfaceReady.countDown();
+            }
+
+            @Override
+            public void surfaceChanged(SurfaceHolder changedHolder, int format, int width, int height) {
+                videoSurfaceHolder = changedHolder;
+                surfaceReady.countDown();
+            }
+
+            @Override
+            public void surfaceDestroyed(SurfaceHolder destroyedHolder) {
+                if (videoSurfaceHolder == destroyedHolder) videoSurfaceHolder = null;
+            }
+        });
+        if (holder.getSurface() != null && holder.getSurface().isValid()) {
+            videoSurfaceHolder = holder;
+            surfaceReady.countDown();
         }
     }
 
@@ -69,6 +116,8 @@ public final class ExternalStreamReceiverActivity extends Activity {
                 ok = verifyHls(uri);
             } else if ("decoder".equals(scenario)) {
                 ok = verifyDecoder(uri);
+            } else if ("long-decoder".equals(scenario)) {
+                ok = verifyLongDecoder(uri);
             } else {
                 throw new IllegalArgumentException("INVALID_SCENARIO");
             }
@@ -91,13 +140,16 @@ public final class ExternalStreamReceiverActivity extends Activity {
 
     private void watchDecoder(Intent incoming) {
         String lastStage = diagnosticStage;
+        int observedPositionMs = lastPositionMs;
         long lastProgressAt = SystemClock.elapsedRealtime();
         while (!resultSent.get()) {
             SystemClock.sleep(DECODER_WATCHDOG_POLL_MS);
             if (resultSent.get()) return;
             String currentStage = diagnosticStage;
-            if (!currentStage.equals(lastStage)) {
+            int currentPositionMs = lastPositionMs;
+            if (!currentStage.equals(lastStage) || currentPositionMs > observedPositionMs) {
                 lastStage = currentStage;
+                observedPositionMs = currentPositionMs;
                 lastProgressAt = SystemClock.elapsedRealtime();
                 continue;
             }
@@ -109,7 +161,7 @@ public final class ExternalStreamReceiverActivity extends Activity {
                         currentStage,
                         NO_ERRNO,
                         "",
-                        "decoder stage made no progress within watchdog window"
+                        "decoder made no progress within watchdog window"
                 );
                 runOnUiThread(this::finish);
                 return;
@@ -126,10 +178,24 @@ public final class ExternalStreamReceiverActivity extends Activity {
             String errorFunction,
             String errorMessage
     ) {
+        if (!resultSent.compareAndSet(false, true)) return;
+        String scenario = safeKnownScenario(incoming.getStringExtra(EXTRA_SCENARIO));
+        long elapsedMs = Math.max(0L, SystemClock.elapsedRealtime() - scenarioStartedAtMs);
+        Log.i(
+                TAG,
+                "result scenario=" + scenario
+                        + " ok=" + ok
+                        + " code=" + safeText(errorCode)
+                        + " stage=" + safeText(errorStage)
+                        + " decoderWhat=" + decoderWhat.get()
+                        + " decoderExtra=" + decoderExtra.get()
+                        + " errno=" + errno
+                        + " positionMs=" + lastPositionMs
+                        + " elapsedMs=" + elapsedMs
+        );
+
         String resultPackage = incoming.getStringExtra(EXTRA_RESULT_PACKAGE);
         if (resultPackage == null || resultPackage.isEmpty()) return;
-        if (!resultSent.compareAndSet(false, true)) return;
-        String scenario = incoming.getStringExtra(EXTRA_SCENARIO);
         Intent result = new Intent(RESULT_ACTION)
                 .setPackage(resultPackage)
                 .putExtra(EXTRA_SCENARIO, scenario)
@@ -138,7 +204,11 @@ public final class ExternalStreamReceiverActivity extends Activity {
                 .putExtra(EXTRA_ERROR_STAGE, errorStage)
                 .putExtra(EXTRA_ERRNO, errno)
                 .putExtra(EXTRA_ERROR_FUNCTION, errorFunction)
-                .putExtra(EXTRA_ERROR_MESSAGE, errorMessage);
+                .putExtra(EXTRA_ERROR_MESSAGE, errorMessage)
+                .putExtra(EXTRA_DECODER_WHAT, decoderWhat.get())
+                .putExtra(EXTRA_DECODER_EXTRA, decoderExtra.get())
+                .putExtra(EXTRA_POSITION_MS, lastPositionMs)
+                .putExtra(EXTRA_ELAPSED_MS, elapsedMs);
         sendBroadcast(result);
     }
 
@@ -202,6 +272,7 @@ public final class ExternalStreamReceiverActivity extends Activity {
                 diagnosticStage = "decoder-pause";
                 player.pause();
                 int pausedPosition = player.getCurrentPosition();
+                lastPositionMs = pausedPosition;
                 SystemClock.sleep(350L);
                 if (Math.abs(player.getCurrentPosition() - pausedPosition) > 700) return false;
 
@@ -239,12 +310,74 @@ public final class ExternalStreamReceiverActivity extends Activity {
         return true;
     }
 
+    private boolean verifyLongDecoder(Uri uri) throws Exception {
+        MediaPlayer player = new MediaPlayer();
+        try {
+            diagnosticStage = "long-decoder-prepare";
+            if (!prepareDecoder(player, uri, "long-decoder")) return false;
+            int durationMs = player.getDuration();
+            if (durationMs < LONG_DECODER_TARGET_MS + 5_000L) {
+                diagnosticStage = "long-decoder-duration-too-short";
+                return false;
+            }
+            diagnosticStage = "long-decoder-start";
+            player.start();
+            long deadline = SystemClock.elapsedRealtime() + LONG_DECODER_TIMEOUT_MS;
+            int lastProgressSecond = -1;
+            while (SystemClock.elapsedRealtime() < deadline) {
+                if (decoderWhat.get() != 0 || decoderExtra.get() != 0) {
+                    diagnosticStage = "long-decoder-media-error";
+                    return false;
+                }
+                int positionMs = player.getCurrentPosition();
+                lastPositionMs = positionMs;
+                int progressSecond = Math.max(0, positionMs / 1000);
+                if (progressSecond != lastProgressSecond) {
+                    lastProgressSecond = progressSecond;
+                    diagnosticStage = "long-decoder-playing-" + progressSecond;
+                    if (progressSecond % 5 == 0) {
+                        Log.i(TAG, "progress scenario=long-decoder positionMs=" + positionMs
+                                + " elapsedMs=" + (SystemClock.elapsedRealtime() - scenarioStartedAtMs));
+                    }
+                }
+                if (positionMs >= LONG_DECODER_TARGET_MS) {
+                    diagnosticStage = "long-decoder-target-reached";
+                    return true;
+                }
+                SystemClock.sleep(200L);
+            }
+            diagnosticStage = "long-decoder-overall-timeout";
+            return false;
+        } finally {
+            player.release();
+        }
+    }
+
     private boolean prepareDecoder(MediaPlayer player, Uri uri, String stagePrefix) throws Exception {
+        diagnosticStage = stagePrefix + "-await-surface";
+        if (!surfaceReady.await(10L, TimeUnit.SECONDS)) {
+            diagnosticStage = stagePrefix + "-surface-timeout";
+            return false;
+        }
+        SurfaceHolder holder = videoSurfaceHolder;
+        if (holder == null || holder.getSurface() == null || !holder.getSurface().isValid()) {
+            diagnosticStage = stagePrefix + "-surface-invalid";
+            return false;
+        }
+        player.setDisplay(holder);
+
         CountDownLatch prepared = new CountDownLatch(1);
-        boolean[] failed = new boolean[1];
+        AtomicBoolean failed = new AtomicBoolean(false);
         player.setOnPreparedListener(ignored -> prepared.countDown());
         player.setOnErrorListener((ignored, what, extra) -> {
-            failed[0] = true;
+            decoderWhat.set(what);
+            decoderExtra.set(extra);
+            failed.set(true);
+            Log.i(TAG, "media-error scenario=" + safeKnownScenario(getIntent().getStringExtra(EXTRA_SCENARIO))
+                    + " what=" + what
+                    + " extra=" + extra
+                    + " positionMs=" + lastPositionMs
+                    + " elapsedMs=" + (SystemClock.elapsedRealtime() - scenarioStartedAtMs));
             prepared.countDown();
             return true;
         });
@@ -257,17 +390,20 @@ public final class ExternalStreamReceiverActivity extends Activity {
             diagnosticStage = stagePrefix + "-prepare-timeout";
             return false;
         }
-        if (failed[0]) {
+        if (failed.get()) {
             diagnosticStage = stagePrefix + "-prepare-error";
             return false;
         }
         return true;
     }
 
-    private static boolean waitForPosition(MediaPlayer player, int targetMs, long timeoutMs) throws Exception {
+    private boolean waitForPosition(MediaPlayer player, int targetMs, long timeoutMs) throws Exception {
         long deadline = SystemClock.elapsedRealtime() + timeoutMs;
         while (SystemClock.elapsedRealtime() < deadline) {
-            if (player.getCurrentPosition() >= targetMs) return true;
+            if (decoderWhat.get() != 0 || decoderExtra.get() != 0) return false;
+            int positionMs = player.getCurrentPosition();
+            lastPositionMs = positionMs;
+            if (positionMs >= targetMs) return true;
             SystemClock.sleep(100L);
         }
         return false;
@@ -283,6 +419,16 @@ public final class ExternalStreamReceiverActivity extends Activity {
     private static String safeKnownMessage(String message) {
         if ("INVALID_URI".equals(message) || "INVALID_SCENARIO".equals(message)) return message;
         return "";
+    }
+
+    private static String safeKnownScenario(String scenario) {
+        if ("progressive".equals(scenario)
+                || "hls".equals(scenario)
+                || "decoder".equals(scenario)
+                || "long-decoder".equals(scenario)) {
+            return scenario;
+        }
+        return "unknown";
     }
 
     private static String safeText(String value) {

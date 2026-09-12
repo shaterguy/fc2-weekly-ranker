@@ -1,0 +1,70 @@
+name: SelfRun tail hot-set patch once
+
+on:
+  push:
+    branches:
+      - 'fix/SR-20260912-142807-C1LNMO-stream-smoothness'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-once:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: fix/SR-20260912-142807-C1LNMO-stream-smoothness
+      - name: Preserve decoder tail hot-set inside production cache bound
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          source_path = Path('app/src/main/java/com/shaterguy/fc2weeklyranker/media/ExternalVideoTransport.kt')
+          source = source_path.read_text()
+
+          replacements = [
+              (
+                  '''            val chunk = cache[chunkStart]\n                ?: takePrefetchedChunk(chunkStart)\n                ?: loadChunk(chunkStart, length).also { cache[chunkStart] = it }''',
+                  '''            val chunk = cache[chunkStart]\n                ?: takePrefetchedChunk(chunkStart, length)\n                ?: loadChunk(chunkStart, length).also { cacheChunk(chunkStart, it, length) }''',
+              ),
+              (
+                  '''    private fun takePrefetchedChunk(chunkStart: Long): ByteArray? {''',
+                  '''    private fun takePrefetchedChunk(chunkStart: Long, length: Long): ByteArray? {''',
+              ),
+              (
+                  '''        if (prefetch === task) prefetch = null\n        if (bytes != null) cache[chunkStart] = bytes\n        return bytes\n    }\n\n    private fun scheduleReadAhead''',
+                  '''        if (prefetch === task) prefetch = null\n        if (bytes != null) cacheChunk(chunkStart, bytes, length)\n        return bytes\n    }\n\n    private fun cacheChunk(chunkStart: Long, bytes: ByteArray, length: Long) {\n        touchPinnedTailChunks(length)\n        cache[chunkStart] = bytes\n    }\n\n    private fun touchPinnedTailChunks(length: Long) {\n        if (length <= 0L || maxCachedChunks < TAIL_HOT_CHUNKS + 2) return\n        val lastChunkStart = ((length - 1L) / chunkSize) * chunkSize.toLong()\n        val pinnedSpan = (TAIL_HOT_CHUNKS - 1).toLong() * chunkSize.toLong()\n        val pinnedStart = (lastChunkStart - pinnedSpan).coerceAtLeast(0L)\n        val pinnedKeys = cache.keys.filter { it >= pinnedStart }\n        pinnedKeys.forEach { cache[it] }\n    }\n\n    private fun scheduleReadAhead''',
+              ),
+              (
+                  '''        private const val PREFETCH_MIN_CHUNK_SIZE = 64 * 1024\n        private const val MIN_PARALLEL_SEGMENT_BYTES = 8 * 1024''',
+                  '''        private const val PREFETCH_MIN_CHUNK_SIZE = 64 * 1024\n        private const val TAIL_HOT_CHUNKS = 6\n        private const val MIN_PARALLEL_SEGMENT_BYTES = 8 * 1024''',
+              ),
+          ]
+          for old, new in replacements:
+              count = source.count(old)
+              if count != 1:
+                  raise SystemExit(f'source replacement expected once, found {count}: {old[:80]!r}')
+              source = source.replace(old, new)
+          source_path.write_text(source)
+
+          test_path = Path('app/src/test/java/com/shaterguy/fc2weeklyranker/media/ExternalVideoTransportSmoothnessTest.kt')
+          test = test_path.read_text()
+          old_test = '''            val headAdvance = 6 * chunkSize\n            assertArrayEquals(\n                payload.copyOfRange(headAdvance, headAdvance + chunkSize),\n                reader.read(headAdvance.toLong(), chunkSize),\n            )\n            Thread.sleep(120L)\n            assertTrue("head advance read-ahead did not settle", upstream.awaitRangeIdle(2_000L))'''
+          new_test = '''            repeat(24) { index ->\n                val headAdvance = (6 + index) * chunkSize\n                assertArrayEquals(\n                    payload.copyOfRange(headAdvance, headAdvance + chunkSize),\n                    reader.read(headAdvance.toLong(), chunkSize),\n                )\n            }\n            Thread.sleep(120L)\n            assertTrue("head advance read-ahead did not settle", upstream.awaitRangeIdle(2_000L))'''
+          count = test.count(old_test)
+          if count != 1:
+              raise SystemExit(f'test replacement expected once, found {count}')
+          test_path.write_text(test.replace(old_test, new_test))
+          PY
+          rm .github/workflows/selfrun-tail-hotset-once.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app/src/main/java/com/shaterguy/fc2weeklyranker/media/ExternalVideoTransport.kt app/src/test/java/com/shaterguy/fc2weeklyranker/media/ExternalVideoTransportSmoothnessTest.kt .github/workflows/selfrun-tail-hotset-once.yml
+          git diff --cached --check
+          git diff --cached --exit-code --quiet && { echo 'no patch produced' >&2; exit 1; } || true
+          git commit -m 'fix(media): retain decoder tail hot set'
+          git push origin HEAD:fix/SR-20260912-142807-C1LNMO-stream-smoothness

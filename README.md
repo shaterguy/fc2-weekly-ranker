@@ -12,8 +12,8 @@ Android app for browsing the configured `javfc2` board in fixed seven-day window
 
 ## TEST channel
 
-- Historical TEST lineage starts at `v0.1.0-dev1`; the current development target is `v0.2.0-dev21`.
-- Source version: `0.2.0-dev21`, `versionCode=45`.
+- Historical TEST lineage starts at `v0.1.0-dev1`; the current development target is `v0.2.0-dev22`.
+- Source version: `0.2.0-dev22`, `versionCode=46`.
 - TEST application ID: `com.shaterguy.fc2weeklyranker.dev`.
 - The configured default origin is `https://01.avsee.is`; users can replace it in Settings after a board-and-detail parsing connection check.
 - FC2 search starts immediately when the user taps Search in a process-lifetime coroutine runner instead of waiting for an OS-scheduled job. The active token and coroutine job are tracked directly so replacement, cancellation, and foreground recovery observe the actual execution. Search session, page progress, and results remain persisted in a dedicated Room database, and transient socket aborts keep the existing bounded in-run retry behavior.

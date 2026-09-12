@@ -42,3 +42,20 @@ gradle --no-daemon --stacktrace \
   :app:lintDebug \
   :app:assembleDebugAndroidTest \
   :external-stream-receiver:assembleDebug
+
+SMOOTHNESS_TEST='app/src/test/java/com/shaterguy/fc2weeklyranker/media/ExternalVideoTransportSmoothnessTest.kt'
+if [[ -f "$SMOOTHNESS_TEST" ]]; then
+  shopt -s nullglob
+  smoothness_xml=(app/build/test-results/testDebugUnitTest/TEST-*.xml)
+  shopt -u nullglob
+  if (( ${#smoothness_xml[@]} == 0 )); then
+    echo 'ERROR: smoothness test result XML is missing.' >&2
+    exit 1
+  fi
+  smoothness_metric="$(grep -h -o 'FC2_SMOOTHNESS_METRIC[^<]*' "${smoothness_xml[@]}" | tail -n 1 || true)"
+  if [[ -z "$smoothness_metric" ]]; then
+    echo 'ERROR: FC2_SMOOTHNESS_METRIC was not emitted by the smoothness fixture.' >&2
+    exit 1
+  fi
+  printf '%s\n' "$smoothness_metric"
+fi

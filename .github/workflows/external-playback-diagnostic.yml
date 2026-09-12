@@ -1,9 +1,6 @@
 name: External playback API 34 diagnostic
 
 on:
-  push:
-    branches:
-      - 'fix/SR-20260912-111334-N8BSMT-external-lifecycle'
   workflow_dispatch:
 
 permissions:
@@ -84,7 +81,7 @@ jobs:
             "$ALIGNED"
           "$BT/apksigner" verify --verbose --min-sdk-version 29 "$APK"
           BADGING="$("$BT/aapt" dump badging "$APK")"
-          grep -Fq "package: name='com.shaterguy.fc2weeklyranker.dev' versionCode='46' versionName='0.2.0-dev22'" <<<"$BADGING"
+          grep -Fq "package: name='com.shaterguy.fc2weeklyranker.dev' versionCode='47' versionName='0.2.0-dev23'" <<<"$BADGING"
           echo "apk=$APK" >> "$GITHUB_OUTPUT"
 
       - name: Boot Android 14 emulator

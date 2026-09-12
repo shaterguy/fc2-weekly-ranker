@@ -23,6 +23,7 @@ internal fun createExternalVideoPlayerRequest(
             setDataAndType(handle.uri, handle.mimeType)
             addFlags(handle.intentFlags)
         }
+        ExternalVideoStreamKeepAliveService.startFromUserVisibleContext(context)
         ExternalVideoPlayerRequest(handle, intent)
     } catch (throwable: Throwable) {
         handle.close()

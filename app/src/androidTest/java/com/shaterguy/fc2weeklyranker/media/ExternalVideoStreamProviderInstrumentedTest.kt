@@ -26,6 +26,39 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class ExternalVideoStreamProviderInstrumentedTest {
     @Test
+    fun keepAlivePolicyRequiresNoActiveDescriptorAndFullIdleWindow() {
+        val lastActivityMs = 10_000L
+        assertFalse(
+            shouldStopExternalStreamKeepAlive(
+                activeDescriptors = 1,
+                lastActivityMs = lastActivityMs,
+                nowMs = lastActivityMs + EXTERNAL_STREAM_KEEP_ALIVE_IDLE_TIMEOUT_MS * 2,
+            ),
+        )
+        assertFalse(
+            shouldStopExternalStreamKeepAlive(
+                activeDescriptors = 0,
+                lastActivityMs = lastActivityMs,
+                nowMs = lastActivityMs + EXTERNAL_STREAM_KEEP_ALIVE_IDLE_TIMEOUT_MS - 1,
+            ),
+        )
+        assertTrue(
+            shouldStopExternalStreamKeepAlive(
+                activeDescriptors = 0,
+                lastActivityMs = lastActivityMs,
+                nowMs = lastActivityMs + EXTERNAL_STREAM_KEEP_ALIVE_IDLE_TIMEOUT_MS,
+            ),
+        )
+        assertFalse(
+            shouldStopExternalStreamKeepAlive(
+                activeDescriptors = 0,
+                lastActivityMs = 0L,
+                nowMs = EXTERNAL_STREAM_KEEP_ALIVE_IDLE_TIMEOUT_MS,
+            ),
+        )
+    }
+
+    @Test
     fun externalReceiverCanReadAndSeekProgressiveStream() {
         val base = fixtureBaseUrl()
         val url = "$base/progressive.mp4?signature=opaque-test"

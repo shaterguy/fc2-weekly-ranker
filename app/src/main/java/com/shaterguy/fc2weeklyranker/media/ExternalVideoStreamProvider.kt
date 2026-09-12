@@ -190,11 +190,15 @@ private object ExternalVideoStreamRegistry {
             if (closed) throw FileNotFoundException("External stream session is closed")
             activeDescriptors += 1
             touchLocked()
+            ExternalVideoStreamKeepAliveState.descriptorOpened()
         }
 
         @Synchronized
         fun descriptorClosed() {
-            if (activeDescriptors > 0) activeDescriptors -= 1
+            if (activeDescriptors > 0) {
+                activeDescriptors -= 1
+                ExternalVideoStreamKeepAliveState.descriptorClosed()
+            }
             touchLocked()
         }
 
@@ -390,10 +394,12 @@ class ExternalVideoStreamProvider : ContentProvider() {
         resolved.session.descriptorOpened()
         val callback = object : ProxyFileDescriptorCallback() {
             override fun onGetSize(): Long = ioToErrno("externalStreamSize") {
+                ExternalVideoStreamKeepAliveState.streamActivity()
                 resolved.resource.size()
             }
 
             override fun onRead(offset: Long, size: Int, data: ByteArray): Int = ioToErrno("externalStreamRead") {
+                ExternalVideoStreamKeepAliveState.streamActivity()
                 val bytes = resolved.resource.read(offset, size)
                 bytes.copyInto(data, endIndex = bytes.size)
                 bytes.size

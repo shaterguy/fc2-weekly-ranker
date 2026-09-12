@@ -47,7 +47,7 @@ private object ExternalVideoStreamRegistry {
     private const val SESSION_IDLE_TTL_MS = 60L * 60L * 1000L
     private const val SESSION_TOKEN_BYTES = 24
     private const val RESOURCE_TOKEN_BYTES = 12
-    private const val PROXY_READ_CHUNK_BYTES = 16 * 1024
+    private const val PROXY_READ_CHUNK_BYTES = 64 * 1024
     private const val PROXY_MAX_CACHED_CHUNKS = 8
 
     private val random = SecureRandom()

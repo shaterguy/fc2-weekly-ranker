@@ -27,7 +27,7 @@ class ExternalVideoTransportSmoothnessTest {
 
     @Test
     fun delayedShort206PlaybackReadsMeetLockedSmoothnessContract() {
-        val upstream = DelayedShortRangeUpstream(payload, maxBodyBytes = 8 * 1024, rangeDelayMs = 6L)
+        val upstream = DelayedShortRangeUpstream(payload, maxBodyBytes = 8 * 1024, rangeDelayMs = 12L)
         val transport = ExternalHttpTransport(
             client = OkHttpClient.Builder().addInterceptor(upstream).build(),
             cookieProvider = { "session=smoothness" },
@@ -36,7 +36,8 @@ class ExternalVideoTransportSmoothnessTest {
             url = sourceUrl,
             context = context,
             transport = transport,
-            maxCachedChunks = 1,
+            chunkSize = 64 * 1024,
+            maxCachedChunks = 8,
         )
 
         val latencyMs = mutableListOf<Double>()
@@ -127,8 +128,8 @@ class ExternalVideoTransportSmoothnessTest {
 
     @Test
     fun sequentialBoundaryReadAheadMovesShortRangeDelayOffForeground() {
-        val chunkSize = 128 * 1024
-        val upstream = DelayedShortRangeUpstream(payload, maxBodyBytes = 8 * 1024, rangeDelayMs = 6L)
+        val chunkSize = 64 * 1024
+        val upstream = DelayedShortRangeUpstream(payload, maxBodyBytes = 8 * 1024, rangeDelayMs = 12L)
         val transport = ExternalHttpTransport(
             client = OkHttpClient.Builder().addInterceptor(upstream).build(),
             cookieProvider = { "session=read-ahead" },
@@ -138,7 +139,7 @@ class ExternalVideoTransportSmoothnessTest {
             context = context,
             transport = transport,
             chunkSize = chunkSize,
-            maxCachedChunks = 1,
+            maxCachedChunks = 8,
         )
 
         try {
@@ -147,8 +148,8 @@ class ExternalVideoTransportSmoothnessTest {
             val candidate = firstDebug != null
             if (candidate) {
                 assertTrue(
-                    "candidate read-ahead did not fetch the next 128 KiB chunk in the background",
-                    upstream.awaitBackgroundRangeCount(expected = 16, timeoutMs = 2_000L),
+                    "candidate read-ahead did not fetch the next 64 KiB chunk in the background",
+                    upstream.awaitBackgroundRangeCount(expected = 8, timeoutMs = 2_000L),
                 )
             }
 
@@ -180,11 +181,37 @@ class ExternalVideoTransportSmoothnessTest {
                 assertEquals("candidate boundary read unexpectedly issued foreground range requests", 0, foregroundDelta)
                 assertTrue("candidate did not keep range read-ahead enabled", finalDebug?.rangeReadAheadEnabled == true)
                 assertTrue("candidate read-ahead exceeded single-flight", (finalDebug?.prefetchHighWater ?: Int.MAX_VALUE) <= 1)
-                assertTrue("candidate read-ahead did not issue background short-range requests", upstream.backgroundRangeCount.get() >= 16)
+                assertTrue("candidate read-ahead did not issue background short-range requests", upstream.backgroundRangeCount.get() >= 8)
             } else {
-                assertTrue("baseline boundary read must issue short-range requests on the foreground path", foregroundDelta >= 16)
+                assertTrue("baseline boundary read must issue short-range requests on the foreground path", foregroundDelta >= 8)
                 assertEquals("baseline unexpectedly issued background range requests", 0, upstream.backgroundRangeCount.get())
             }
+        } finally {
+            reader.close()
+        }
+    }
+
+    @Test
+    fun delayedShort206ChunkStitchingUsesBoundedParallelRanges() {
+        val upstream = DelayedShortRangeUpstream(payload, maxBodyBytes = 8 * 1024, rangeDelayMs = 12L)
+        val transport = ExternalHttpTransport(
+            client = OkHttpClient.Builder().addInterceptor(upstream).build(),
+            cookieProvider = { "session=parallel-short-range" },
+        )
+        val reader = SeekableExternalHttpResource(
+            url = sourceUrl,
+            context = context,
+            transport = transport,
+            chunkSize = 64 * 1024,
+            maxCachedChunks = 8,
+        )
+
+        try {
+            val actual = reader.read(0L, 64 * 1024)
+            assertArrayEquals(payload.copyOfRange(0, 64 * 1024), actual)
+            val highWater = upstream.rangeConcurrencyHighWater.get()
+            assertTrue("short-206 stitching did not use parallel ranges: $highWater", highWater >= 2)
+            assertTrue("short-206 stitching exceeded bounded parallelism: $highWater", highWater <= 4)
         } finally {
             reader.close()
         }
@@ -229,6 +256,8 @@ class ExternalVideoTransportSmoothnessTest {
     ) : Interceptor {
         val foregroundRangeCount = AtomicInteger(0)
         val backgroundRangeCount = AtomicInteger(0)
+        val activeRangeRequests = AtomicInteger(0)
+        val rangeConcurrencyHighWater = AtomicInteger(0)
         private val seen = CopyOnWriteArrayList<Request>()
 
         override fun intercept(chain: Interceptor.Chain): Response {
@@ -252,39 +281,45 @@ class ExternalVideoTransportSmoothnessTest {
             } else {
                 foregroundRangeCount.incrementAndGet()
             }
-            if (rangeDelayMs > 0L) {
-                try {
-                    Thread.sleep(rangeDelayMs)
-                } catch (interrupted: InterruptedException) {
-                    Thread.currentThread().interrupt()
-                    throw IOException("fixture range request interrupted", interrupted)
+            val active = activeRangeRequests.incrementAndGet()
+            rangeConcurrencyHighWater.updateAndGet { maxOf(it, active) }
+            try {
+                if (rangeDelayMs > 0L) {
+                    try {
+                        Thread.sleep(rangeDelayMs)
+                    } catch (interrupted: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        throw IOException("fixture range request interrupted", interrupted)
+                    }
                 }
-            }
 
-            val requestedStart = range.groupValues[1].toLong()
-            val requestedEnd = range.groupValues[2].toLong()
-            if (requestedStart >= payload.size) {
+                val requestedStart = range.groupValues[1].toLong()
+                val requestedEnd = range.groupValues[2].toLong()
+                if (requestedStart >= payload.size) {
+                    return response(
+                        request,
+                        code = 416,
+                        headers = mapOf("Content-Range" to "bytes */${payload.size}"),
+                    )
+                }
+                val start = requestedStart.toInt()
+                val requestedLength = (requestedEnd - requestedStart + 1L).coerceAtLeast(1L)
+                val bodyLength = min(min(requestedLength, maxBodyBytes.toLong()), payload.size.toLong() - requestedStart).toInt()
+                val endExclusive = start + bodyLength
+                val body = payload.copyOfRange(start, endExclusive)
                 return response(
                     request,
-                    code = 416,
-                    headers = mapOf("Content-Range" to "bytes */${payload.size}"),
+                    code = 206,
+                    body = body,
+                    headers = mapOf(
+                        "Content-Range" to "bytes $start-${endExclusive - 1}/${payload.size}",
+                        "Content-Length" to body.size.toString(),
+                        "Content-Type" to "video/mp4",
+                    ),
                 )
+            } finally {
+                activeRangeRequests.decrementAndGet()
             }
-            val start = requestedStart.toInt()
-            val requestedLength = (requestedEnd - requestedStart + 1L).coerceAtLeast(1L)
-            val bodyLength = min(min(requestedLength, maxBodyBytes.toLong()), payload.size.toLong() - requestedStart).toInt()
-            val endExclusive = start + bodyLength
-            val body = payload.copyOfRange(start, endExclusive)
-            return response(
-                request,
-                code = 206,
-                body = body,
-                headers = mapOf(
-                    "Content-Range" to "bytes $start-${endExclusive - 1}/${payload.size}",
-                    "Content-Length" to body.size.toString(),
-                    "Content-Type" to "video/mp4",
-                ),
-            )
         }
 
         fun awaitBackgroundRangeCount(expected: Int, timeoutMs: Long): Boolean {

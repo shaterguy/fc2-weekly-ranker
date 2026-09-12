@@ -8,6 +8,7 @@ import java.io.IOException
 import java.net.URI
 import java.util.LinkedHashMap
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
 import java.util.concurrent.ThreadFactory
 import java.util.concurrent.atomic.AtomicInteger
@@ -396,6 +397,8 @@ internal class SeekableExternalHttpResource(
     private val prefetchWorkerActive = AtomicInteger(0)
     private val prefetchHighWater = AtomicInteger(0)
     private var rangeReadAheadEnabled = false
+    @Volatile
+    private var shortRangeSegmentBytes: Int? = null
     private var closed = false
 
     @Synchronized
@@ -478,6 +481,7 @@ internal class SeekableExternalHttpResource(
         lastReadEnd = null
         cancelPrefetch()
         resetSequentialFallback()
+        shortRangeSegmentBytes = null
         cache.clear()
     }
 
@@ -539,10 +543,12 @@ internal class SeekableExternalHttpResource(
         val output = ByteArrayOutputStream(requested)
         var cursor = chunkStart
         var consecutiveNetworkFailures = 0
+        var parallelRangesEnabled = true
 
         while (output.size() < requested) {
             if (sequentialFallback != null) {
                 rangeReadAheadEnabled = false
+                shortRangeSegmentBytes = null
                 return fillFromSequentialFallback(output, cursor, requested, length)
             }
             val remaining = requested - output.size()
@@ -554,6 +560,7 @@ internal class SeekableExternalHttpResource(
                 if (!range.rangeHonored) {
                     rangeReadAheadEnabled = false
                     cancelPrefetch()
+                    shortRangeSegmentBytes = null
                     return fillFromSequentialFallback(output, cursor, requested, length)
                 }
                 rangeReadAheadEnabled = true
@@ -566,6 +573,36 @@ internal class SeekableExternalHttpResource(
                 output.write(range.bytes)
                 cursor += range.bytes.size.toLong()
                 consecutiveNetworkFailures = 0
+
+                if (range.bytes.size < remaining) {
+                    rememberShortRangeSegment(range.bytes.size)
+                    val parallelRemaining = requested - output.size()
+                    val segmentBytes = shortRangeSegmentBytes
+                    if (parallelRangesEnabled && segmentBytes != null && parallelRemaining > segmentBytes) {
+                        try {
+                            val parallelBytes = loadParallelRangeRemainder(
+                                startOffset = cursor,
+                                byteCount = parallelRemaining,
+                                length = length,
+                                segmentBytes = segmentBytes,
+                                executor = RANGE_EXECUTOR,
+                            )
+                            if (parallelBytes == null) {
+                                rangeReadAheadEnabled = false
+                                cancelPrefetch()
+                                shortRangeSegmentBytes = null
+                                return fillFromSequentialFallback(output, cursor, requested, length)
+                            }
+                            output.write(parallelBytes)
+                            cursor += parallelBytes.size.toLong()
+                        } catch (protocol: ExternalProtocolIOException) {
+                            throw protocol
+                        } catch (_: IOException) {
+                            parallelRangesEnabled = false
+                            consecutiveNetworkFailures = 0
+                        }
+                    }
+                }
             } catch (protocol: ExternalProtocolIOException) {
                 throw protocol
             } catch (io: IOException) {
@@ -583,6 +620,7 @@ internal class SeekableExternalHttpResource(
         val output = ByteArrayOutputStream(requested)
         var cursor = chunkStart
         var consecutiveNetworkFailures = 0
+        var parallelRangesEnabled = true
 
         while (output.size() < requested && !Thread.currentThread().isInterrupted) {
             val remaining = requested - output.size()
@@ -599,6 +637,30 @@ internal class SeekableExternalHttpResource(
                 output.write(range.bytes)
                 cursor += range.bytes.size.toLong()
                 consecutiveNetworkFailures = 0
+
+                if (range.bytes.size < remaining) {
+                    rememberShortRangeSegment(range.bytes.size)
+                    val parallelRemaining = requested - output.size()
+                    val segmentBytes = shortRangeSegmentBytes
+                    if (parallelRangesEnabled && segmentBytes != null && parallelRemaining > segmentBytes) {
+                        try {
+                            val parallelBytes = loadParallelRangeRemainder(
+                                startOffset = cursor,
+                                byteCount = parallelRemaining,
+                                length = length,
+                                segmentBytes = segmentBytes,
+                                executor = PREFETCH_RANGE_EXECUTOR,
+                            ) ?: return null
+                            output.write(parallelBytes)
+                            cursor += parallelBytes.size.toLong()
+                        } catch (protocol: ExternalProtocolIOException) {
+                            throw protocol
+                        } catch (_: IOException) {
+                            parallelRangesEnabled = false
+                            consecutiveNetworkFailures = 0
+                        }
+                    }
+                }
             } catch (protocol: ExternalProtocolIOException) {
                 throw protocol
             } catch (io: IOException) {
@@ -608,6 +670,104 @@ internal class SeekableExternalHttpResource(
         }
         if (Thread.currentThread().isInterrupted) return null
         return output.toByteArray()
+    }
+
+    private fun loadParallelRangeRemainder(
+        startOffset: Long,
+        byteCount: Int,
+        length: Long,
+        segmentBytes: Int,
+        executor: java.util.concurrent.Executor,
+    ): ByteArray? {
+        if (byteCount <= 0) return ByteArray(0)
+        val futures = mutableListOf<CompletableFuture<ByteArray?>>()
+        var cursor = startOffset
+        var remaining = byteCount
+        while (remaining > 0) {
+            val requested = min(segmentBytes, remaining)
+            val segmentOffset = cursor
+            futures += CompletableFuture.supplyAsync(
+                { loadRangeSegment(segmentOffset, requested, length) },
+                executor,
+            )
+            cursor += requested.toLong()
+            remaining -= requested
+        }
+
+        val output = ByteArrayOutputStream(byteCount)
+        try {
+            futures.forEach { future ->
+                val bytes = try {
+                    future.get()
+                } catch (execution: ExecutionException) {
+                    val cause = execution.cause
+                    when (cause) {
+                        is ExternalProtocolIOException -> throw cause
+                        is IOException -> throw cause
+                        else -> throw IOException("Protected media parallel range failed", cause)
+                    }
+                }
+                if (bytes == null) {
+                    futures.forEach { it.cancel(true) }
+                    return null
+                }
+                output.write(bytes)
+            }
+        } catch (interrupted: InterruptedException) {
+            futures.forEach { it.cancel(true) }
+            Thread.currentThread().interrupt()
+            throw IOException("Protected media parallel range interrupted", interrupted)
+        } catch (failure: IOException) {
+            futures.forEach { it.cancel(true) }
+            throw failure
+        }
+        return output.toByteArray()
+    }
+
+    private fun loadRangeSegment(offset: Long, size: Int, length: Long): ByteArray? {
+        val output = ByteArrayOutputStream(size)
+        var cursor = offset
+        var consecutiveNetworkFailures = 0
+        while (output.size() < size && !Thread.currentThread().isInterrupted) {
+            val remaining = size - output.size()
+            try {
+                val range = transport.readRange(url, context, cursor, remaining)
+                range.totalLength?.let { total ->
+                    if (total != length) throw ExternalProtocolIOException("Protected media length changed during parallel range read")
+                }
+                if (!range.rangeHonored) return null
+                if (range.bytes.isEmpty()) {
+                    throw IOException("Protected media parallel range returned no bytes before EOF")
+                }
+                if (range.bytes.size > remaining) {
+                    throw ExternalProtocolIOException("Protected media parallel range exceeded the requested segment")
+                }
+                if (range.bytes.size < remaining) rememberShortRangeSegment(range.bytes.size)
+                output.write(range.bytes)
+                cursor += range.bytes.size.toLong()
+                consecutiveNetworkFailures = 0
+            } catch (protocol: ExternalProtocolIOException) {
+                throw protocol
+            } catch (io: IOException) {
+                consecutiveNetworkFailures += 1
+                if (consecutiveNetworkFailures >= MAX_TRANSIENT_FAILURES_PER_POSITION) {
+                    throw IOException("Protected media parallel range failed after bounded retries", io)
+                }
+            }
+        }
+        if (Thread.currentThread().isInterrupted) {
+            throw IOException("Protected media parallel range interrupted")
+        }
+        return output.toByteArray()
+    }
+
+    private fun rememberShortRangeSegment(observedBytes: Int) {
+        if (observedBytes <= 0) return
+        val candidate = observedBytes.coerceAtLeast(MIN_PARALLEL_SEGMENT_BYTES).coerceAtMost(chunkSize)
+        val current = shortRangeSegmentBytes
+        if (current == null || candidate < current) {
+            shortRangeSegmentBytes = candidate
+        }
     }
 
     private fun fillFromSequentialFallback(
@@ -671,13 +831,33 @@ internal class SeekableExternalHttpResource(
     companion object {
         private const val DEFAULT_CHUNK_SIZE = 128 * 1024
         private const val PREFETCH_MIN_CHUNK_SIZE = 64 * 1024
+        private const val MIN_PARALLEL_SEGMENT_BYTES = 8 * 1024
+        private const val SHORT_RANGE_PARALLELISM = 4
         private const val MAX_METADATA_ATTEMPTS = 3
         private const val MAX_TRANSIENT_FAILURES_PER_POSITION = 3
         private val PREFETCH_THREAD_ID = AtomicInteger(0)
+        private val RANGE_THREAD_ID = AtomicInteger(0)
+        private val PREFETCH_RANGE_THREAD_ID = AtomicInteger(0)
         private val PREFETCH_EXECUTOR = Executors.newFixedThreadPool(
             2,
             ThreadFactory { runnable ->
                 Thread(runnable, "external-media-read-ahead-${PREFETCH_THREAD_ID.incrementAndGet()}").apply {
+                    isDaemon = true
+                }
+            },
+        )
+        private val RANGE_EXECUTOR = Executors.newFixedThreadPool(
+            SHORT_RANGE_PARALLELISM,
+            ThreadFactory { runnable ->
+                Thread(runnable, "external-media-range-${RANGE_THREAD_ID.incrementAndGet()}").apply {
+                    isDaemon = true
+                }
+            },
+        )
+        private val PREFETCH_RANGE_EXECUTOR = Executors.newFixedThreadPool(
+            SHORT_RANGE_PARALLELISM,
+            ThreadFactory { runnable ->
+                Thread(runnable, "external-media-read-ahead-range-${PREFETCH_RANGE_THREAD_ID.incrementAndGet()}").apply {
                     isDaemon = true
                 }
             },

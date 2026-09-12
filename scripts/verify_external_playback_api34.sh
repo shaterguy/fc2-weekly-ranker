@@ -187,14 +187,40 @@ python3 - "$FIXTURE_LOG" <<'PY'
 import re
 import sys
 from pathlib import Path
+
 text = Path(sys.argv[1]).read_text(errors='replace')
 rows = re.findall(r"requested=(\d+)-(\d+) returned=(\d+)-(\d+)", text)
 if len(rows) < 32:
     raise SystemExit(f"expected at least 32 delayed range responses, got {len(rows)}")
-short = sum(1 for rs, re_, ss, se in rows if int(se) - int(ss) < int(re_) - int(rs))
-if short < 16:
-    raise SystemExit(f"short-206 behavior was not exercised enough: {short}")
-print(f"FC2_SHORT206_METRIC range_responses={len(rows)} short_responses={short}")
+
+returned_lengths = []
+for rs, re_, ss, se in rows:
+    requested_start = int(rs)
+    requested_end = int(re_)
+    returned_start = int(ss)
+    returned_end = int(se)
+    if returned_start != requested_start:
+        raise SystemExit(
+            f"range response started at unexpected offset: requested={requested_start}-{requested_end} "
+            f"returned={returned_start}-{returned_end}"
+        )
+    if returned_end > requested_end:
+        raise SystemExit(
+            f"range response exceeded request: requested={requested_start}-{requested_end} "
+            f"returned={returned_start}-{returned_end}"
+        )
+    returned_bytes = returned_end - returned_start + 1
+    if returned_bytes <= 0 or returned_bytes > 8192:
+        raise SystemExit(f"expected bounded delayed range response <=8192 bytes, got {returned_bytes}")
+    returned_lengths.append(returned_bytes)
+
+capped = sum(1 for length in returned_lengths if length == 8192)
+if capped < 16:
+    raise SystemExit(f"expected at least 16 bounded 8192-byte range responses, got {capped}")
+print(
+    f"FC2_SHORT206_METRIC range_responses={len(rows)} "
+    f"capped_responses={capped} max_returned_bytes={max(returned_lengths)}"
+)
 PY
 
 if [[ "$PROFILE" == 'baseline' ]]; then

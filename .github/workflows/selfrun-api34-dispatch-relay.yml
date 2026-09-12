@@ -1,0 +1,34 @@
+name: SelfRun API34 dispatch relay
+
+on:
+  push:
+    branches:
+      - ci/SR-20260912-185344-92XVZW-api34-safe-trigger
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  dispatch-exact-candidate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch exact candidate diagnostic
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_REF: v0.2.0-dev24
+          TARGET_SOURCE_SHA: 79b7abd38f638ab577cdb80ca32d4832bd553548
+        run: |
+          set -euo pipefail
+          echo "TRIGGER_SHA=$GITHUB_SHA"
+          echo "TARGET_SOURCE_SHA=$TARGET_SOURCE_SHA"
+          REF_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${TARGET_REF}" --jq '.object.sha')"
+          echo "TARGET_REF_SHA=$REF_SHA"
+          test "$REF_SHA" = "$TARGET_SOURCE_SHA"
+          gh api --method POST \
+            -H "Accept: application/vnd.github+json" \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/external-playback-diagnostic.yml/dispatches" \
+            -f ref="$TARGET_REF" \
+            -f 'inputs[smoothness_profile]=candidate'
+          echo "DISPATCH_REQUEST_ACCEPTED=true"

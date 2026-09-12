@@ -161,12 +161,13 @@ jobs:
 
           adb install -r "$DIAGNOSTIC_APK"
           adb install -r "$RECEIVER_APK"
+          adb reverse tcp:18080 tcp:18080
           adb shell am force-stop "$APP_PACKAGE" || true
           adb shell am force-stop "$RECEIVER_PACKAGE" || true
           adb logcat -c
           adb shell am start -W \
             -n "$APP_PACKAGE/com.shaterguy.fc2weeklyranker.media.ExternalStreamDiagnosticActivity" \
-            --es sourceUrl 'http://10.0.2.2:18080/video.mp4' \
+            --es sourceUrl 'http://localhost:18080/video.mp4' \
             | tee "$OUT/launch.txt"
 
           CURRENT_USER="$(adb shell am get-current-user | tr -d '\r')"

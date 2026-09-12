@@ -24,8 +24,8 @@ jobs:
           from pathlib import Path
           path = Path('app/src/main/java/com/shaterguy/fc2weeklyranker/media/ExternalVideoTransport.kt')
           text = path.read_text()
-          old = 'private const val RANGE_PARALLELISM = 4'
-          new = 'private const val RANGE_PARALLELISM = 8'
+          old = 'private const val SHORT_RANGE_PARALLELISM = 4'
+          new = 'private const val SHORT_RANGE_PARALLELISM = 8'
           if text.count(old) != 1:
               raise SystemExit(f'expected exactly one source occurrence, found {text.count(old)}')
           path.write_text(text.replace(old, new))

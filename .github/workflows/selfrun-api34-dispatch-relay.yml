@@ -18,7 +18,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TARGET_REF: v0.2.0-dev24
-          TARGET_SOURCE_SHA: 79b7abd38f638ab577cdb80ca32d4832bd553548
+          TARGET_SOURCE_SHA: f744e1ce7c799a45bb6fe28a59f4f2dfd19f69e3
         run: |
           set -euo pipefail
           echo "TRIGGER_SHA=$GITHUB_SHA"

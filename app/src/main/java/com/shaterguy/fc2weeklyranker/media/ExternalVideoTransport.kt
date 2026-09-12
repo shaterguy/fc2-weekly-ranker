@@ -7,6 +7,10 @@ import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.net.URI
 import java.util.LinkedHashMap
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.Executors
+import java.util.concurrent.ThreadFactory
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.min
 
 internal data class ExternalVideoRequestContext(
@@ -354,11 +358,19 @@ internal class ExternalHttpTransport(
     }
 }
 
+internal data class ExternalSeekableDebugSnapshot(
+    val generation: Long,
+    val prefetchInFlight: Int,
+    val prefetchInFlightHighWater: Int,
+    val residentBytes: Int,
+    val rangeReadAheadEnabled: Boolean,
+)
+
 internal class SeekableExternalHttpResource(
     private val url: String,
     private val context: ExternalVideoRequestContext,
     private val transport: ExternalHttpTransport,
-    private val chunkSize: Int = 512 * 1024,
+    private val chunkSize: Int = DEFAULT_CHUNK_SIZE,
     private val maxCachedChunks: Int = 4,
 ) : AutoCloseable {
     init {
@@ -366,15 +378,28 @@ internal class SeekableExternalHttpResource(
         require(maxCachedChunks > 0)
     }
 
+    private data class PrefetchTask(
+        val generation: Long,
+        val chunkStart: Long,
+        val future: CompletableFuture<ByteArray?>,
+    )
+
     private val cache = object : LinkedHashMap<Long, ByteArray>(maxCachedChunks, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, ByteArray>?): Boolean =
             size > maxCachedChunks
     }
     private var metadata: ExternalResourceMetadata? = null
     private var sequentialFallback: ExternalSequentialHttpStream? = null
+    private var generation = 0L
+    private var lastReadEnd: Long? = null
+    private var prefetch: PrefetchTask? = null
+    private var prefetchHighWater = 0
+    private var rangeReadAheadEnabled = false
+    private var closed = false
 
     @Synchronized
     fun size(): Long {
+        ensureOpen()
         val existing = metadata
         if (existing != null) return existing.length
         var lastFailure: IOException? = null
@@ -394,14 +419,22 @@ internal class SeekableExternalHttpResource(
     fun read(offset: Long, size: Int): ByteArray {
         require(offset >= 0L)
         require(size > 0)
+        ensureOpen()
         val length = size()
         if (offset >= length) return ByteArray(0)
+
+        if (lastReadEnd != null && lastReadEnd != offset) {
+            invalidateReadAhead()
+        }
+
         val wanted = min(size.toLong(), length - offset).toInt()
         val output = ByteArrayOutputStream(wanted)
         var cursor = offset
         while (output.size() < wanted) {
             val chunkStart = (cursor / chunkSize) * chunkSize
-            val chunk = cache[chunkStart] ?: loadChunk(chunkStart, length).also { cache[chunkStart] = it }
+            val chunk = cache[chunkStart]
+                ?: takePrefetchedChunk(chunkStart)
+                ?: loadChunk(chunkStart, length).also { cache[chunkStart] = it }
             val inChunk = (cursor - chunkStart).toInt()
             if (inChunk >= chunk.size) {
                 throw IOException("Protected media chunk ended before the known resource length")
@@ -411,13 +444,81 @@ internal class SeekableExternalHttpResource(
             output.write(chunk, inChunk, copy)
             cursor += copy.toLong()
         }
+
+        lastReadEnd = cursor
+        scheduleReadAhead(cursor, length)
         return output.toByteArray()
     }
 
     @Synchronized
+    internal fun debugSnapshot(): ExternalSeekableDebugSnapshot {
+        val task = prefetch
+        val prefetchedBytes = if (task != null && task.future.isDone && !task.future.isCompletedExceptionally && !task.future.isCancelled) {
+            runCatching { task.future.getNow(null)?.size ?: 0 }.getOrDefault(0)
+        } else {
+            0
+        }
+        return ExternalSeekableDebugSnapshot(
+            generation = generation,
+            prefetchInFlight = if (task != null && !task.future.isDone) 1 else 0,
+            prefetchInFlightHighWater = prefetchHighWater,
+            residentBytes = cache.values.sumOf { it.size } + prefetchedBytes,
+            rangeReadAheadEnabled = rangeReadAheadEnabled,
+        )
+    }
+
+    @Synchronized
     override fun close() {
+        if (closed) return
+        closed = true
+        generation += 1L
+        lastReadEnd = null
+        cancelPrefetch()
         resetSequentialFallback()
         cache.clear()
+    }
+
+    private fun takePrefetchedChunk(chunkStart: Long): ByteArray? {
+        val task = prefetch ?: return null
+        if (task.generation != generation || task.chunkStart != chunkStart) return null
+        val bytes = try {
+            task.future.get()
+        } catch (_: Exception) {
+            null
+        }
+        if (prefetch === task) prefetch = null
+        if (bytes != null) cache[chunkStart] = bytes
+        return bytes
+    }
+
+    private fun scheduleReadAhead(cursor: Long, length: Long) {
+        if (!rangeReadAheadEnabled || chunkSize < PREFETCH_MIN_CHUNK_SIZE || cursor >= length || closed) return
+        val currentChunkStart = ((cursor - 1L).coerceAtLeast(0L) / chunkSize) * chunkSize
+        val nextChunkStart = currentChunkStart + chunkSize.toLong()
+        if (nextChunkStart >= length) return
+
+        val existing = prefetch
+        if (existing != null && existing.generation == generation && existing.chunkStart == nextChunkStart) return
+        cancelPrefetch()
+
+        val taskGeneration = generation
+        val future = CompletableFuture.supplyAsync(
+            { loadRangeOnlyChunk(nextChunkStart, length) },
+            PREFETCH_EXECUTOR,
+        )
+        prefetch = PrefetchTask(taskGeneration, nextChunkStart, future)
+        prefetchHighWater = 1
+    }
+
+    private fun invalidateReadAhead() {
+        generation += 1L
+        lastReadEnd = null
+        cancelPrefetch()
+    }
+
+    private fun cancelPrefetch() {
+        prefetch?.future?.cancel(true)
+        prefetch = null
     }
 
     private fun loadChunk(chunkStart: Long, length: Long): ByteArray {
@@ -428,6 +529,7 @@ internal class SeekableExternalHttpResource(
 
         while (output.size() < requested) {
             if (sequentialFallback != null) {
+                rangeReadAheadEnabled = false
                 return fillFromSequentialFallback(output, cursor, requested, length)
             }
             val remaining = requested - output.size()
@@ -437,8 +539,11 @@ internal class SeekableExternalHttpResource(
                     if (total != length) throw ExternalProtocolIOException("Protected media length changed during streaming")
                 }
                 if (!range.rangeHonored) {
+                    rangeReadAheadEnabled = false
+                    cancelPrefetch()
                     return fillFromSequentialFallback(output, cursor, requested, length)
                 }
+                rangeReadAheadEnabled = true
                 if (range.bytes.isEmpty()) {
                     throw IOException("Protected media range returned no bytes before EOF")
                 }
@@ -457,6 +562,38 @@ internal class SeekableExternalHttpResource(
                 }
             }
         }
+        return output.toByteArray()
+    }
+
+    private fun loadRangeOnlyChunk(chunkStart: Long, length: Long): ByteArray? {
+        val requested = min(chunkSize.toLong(), length - chunkStart).toInt()
+        val output = ByteArrayOutputStream(requested)
+        var cursor = chunkStart
+        var consecutiveNetworkFailures = 0
+
+        while (output.size() < requested && !Thread.currentThread().isInterrupted) {
+            val remaining = requested - output.size()
+            try {
+                val range = transport.readRange(url, context, cursor, remaining)
+                range.totalLength?.let { total ->
+                    if (total != length) throw ExternalProtocolIOException("Protected media length changed during read-ahead")
+                }
+                if (!range.rangeHonored) return null
+                if (range.bytes.isEmpty()) return null
+                if (range.bytes.size > remaining) {
+                    throw ExternalProtocolIOException("Protected media read-ahead exceeded the remaining chunk size")
+                }
+                output.write(range.bytes)
+                cursor += range.bytes.size.toLong()
+                consecutiveNetworkFailures = 0
+            } catch (protocol: ExternalProtocolIOException) {
+                throw protocol
+            } catch (io: IOException) {
+                consecutiveNetworkFailures += 1
+                if (consecutiveNetworkFailures >= MAX_TRANSIENT_FAILURES_PER_POSITION) return null
+            }
+        }
+        if (Thread.currentThread().isInterrupted) return null
         return output.toByteArray()
     }
 
@@ -514,37 +651,64 @@ internal class SeekableExternalHttpResource(
         sequentialFallback = null
     }
 
+    private fun ensureOpen() {
+        if (closed) throw IOException("Protected media resource is closed")
+    }
+
     companion object {
+        private const val DEFAULT_CHUNK_SIZE = 128 * 1024
+        private const val PREFETCH_MIN_CHUNK_SIZE = 64 * 1024
         private const val MAX_METADATA_ATTEMPTS = 3
         private const val MAX_TRANSIENT_FAILURES_PER_POSITION = 3
+        private val PREFETCH_THREAD_ID = AtomicInteger(0)
+        private val PREFETCH_EXECUTOR = Executors.newFixedThreadPool(
+            2,
+            ThreadFactory { runnable ->
+                Thread(runnable, "external-media-read-ahead-${PREFETCH_THREAD_ID.incrementAndGet()}").apply {
+                    isDaemon = true
+                }
+            },
+        )
     }
 }
 
 internal fun rewriteHlsPlaylist(
     playlist: String,
     baseUrl: String,
-    rewriteUrl: (String) -> String,
-): String = playlist.lineSequence().joinToString("\n") { line ->
-    when {
-        line.isBlank() -> line
-        !line.startsWith("#") -> resolveHlsHttpUrl(baseUrl, line.trim())?.let(rewriteUrl) ?: line
-        "URI=" in line -> HLS_URI_ATTRIBUTE.replace(line) { match ->
-            val raw = match.groups[1]?.value ?: match.groups[2]?.value.orEmpty()
-            val resolved = resolveHlsHttpUrl(baseUrl, raw) ?: return@replace match.value
-            "URI=\"${rewriteUrl(resolved)}\""
+    mapChildUrl: (String) -> String,
+): String {
+    val baseUri = runCatching { URI(baseUrl) }.getOrElse { return playlist }
+    return playlist.lineSequence().joinToString("\n") { line ->
+        if (line.startsWith("#")) {
+            rewriteHlsTagUris(line, baseUri, mapChildUrl)
+        } else {
+            val trimmed = line.trim()
+            if (trimmed.isBlank()) line else rewriteHlsUri(trimmed, baseUri, mapChildUrl)
         }
-        else -> line
     }
 }
 
-private fun resolveHlsHttpUrl(baseUrl: String, reference: String): String? = runCatching {
-    val resolved = URI(baseUrl).resolve(reference)
-    val scheme = resolved.scheme?.lowercase()
-    if ((scheme == "http" || scheme == "https") && !resolved.host.isNullOrBlank() && resolved.userInfo == null) {
-        resolved.toString()
-    } else {
-        null
-    }
-}.getOrNull()
+private fun rewriteHlsTagUris(
+    line: String,
+    baseUri: URI,
+    mapChildUrl: (String) -> String,
+): String = HLS_URI_ATTRIBUTE.replace(line) { match ->
+    val original = match.groupValues[1]
+    val rewritten = rewriteHlsUri(original, baseUri, mapChildUrl)
+    "URI=\"$rewritten\""
+}
 
-private val HLS_URI_ATTRIBUTE = Regex("URI=(?:\\\"([^\\\"]+)\\\"|([^,\\s]+))")
+private fun rewriteHlsUri(
+    value: String,
+    baseUri: URI,
+    mapChildUrl: (String) -> String,
+): String {
+    if (value.startsWith("data:", ignoreCase = true)) return value
+    val resolved = runCatching { baseUri.resolve(value).toString() }.getOrDefault(value)
+    val uri = runCatching { URI(resolved) }.getOrNull() ?: return value
+    val scheme = uri.scheme?.lowercase()
+    if (scheme != "http" && scheme != "https") return value
+    return mapChildUrl(resolved)
+}
+
+private val HLS_URI_ATTRIBUTE = Regex("URI=\"([^\"]+)\"")

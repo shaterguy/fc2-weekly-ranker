@@ -18,7 +18,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TARGET_REF: v0.2.0-dev24
-          TARGET_SOURCE_SHA: 8e19e4ff5c1ca3988205a5d07654baffcb3d3723
+          TARGET_SOURCE_SHA: 1938fb068a1be4f51c2bfa8175d338a633a1a5c4
         run: |
           set -euo pipefail
           REF_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${TARGET_REF}" --jq '.object.sha')"

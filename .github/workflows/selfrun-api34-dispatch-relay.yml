@@ -1,4 +1,4 @@
-name: SelfRun API34 dispatch relay
+name: SelfRun API34 source patch relay
 
 on:
   push:
@@ -6,29 +6,233 @@ on:
       - ci/SR-20260912-185344-92XVZW-api34-safe-trigger
 
 permissions:
-  contents: read
-  actions: write
+  contents: write
 
 jobs:
-  dispatch-exact-candidate:
+  patch-exact-candidate:
     runs-on: ubuntu-latest
     steps:
-      - name: Dispatch exact candidate diagnostic
+      - name: Checkout exact candidate
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: v0.2.0-dev24
+          fetch-depth: 0
+      - name: Apply learned short-range fast path
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
-          TARGET_REF: v0.2.0-dev24
           TARGET_SOURCE_SHA: f744e1ce7c799a45bb6fe28a59f4f2dfd19f69e3
         run: |
           set -euo pipefail
-          echo "TRIGGER_SHA=$GITHUB_SHA"
-          echo "TARGET_SOURCE_SHA=$TARGET_SOURCE_SHA"
-          REF_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${TARGET_REF}" --jq '.object.sha')"
-          echo "TARGET_REF_SHA=$REF_SHA"
-          test "$REF_SHA" = "$TARGET_SOURCE_SHA"
-          gh api --method POST \
-            -H "Accept: application/vnd.github+json" \
-            "repos/${GITHUB_REPOSITORY}/actions/workflows/external-playback-diagnostic.yml/dispatches" \
-            -f ref="$TARGET_REF" \
-            -f 'inputs[smoothness_profile]=candidate'
-          echo "DISPATCH_REQUEST_ACCEPTED=true"
+          test "$(git rev-parse HEAD)" = "$TARGET_SOURCE_SHA"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          transport_path = Path('app/src/main/java/com/shaterguy/fc2weeklyranker/media/ExternalVideoTransport.kt')
+          transport = transport_path.read_text()
+
+          old_foreground = '''            val remaining = requested - output.size()
+            try {
+                val range = transport.readRange(url, context, cursor, remaining)
+                range.totalLength?.let { total ->
+                    if (total != length) throw ExternalProtocolIOException("Protected media length changed during streaming")
+                }
+'''
+          new_foreground = '''            val remaining = requested - output.size()
+            val learnedSegmentBytes = shortRangeSegmentBytes
+            if (parallelRangesEnabled && learnedSegmentBytes != null && remaining > learnedSegmentBytes) {
+                try {
+                    val parallelBytes = loadParallelRangeRemainder(
+                        startOffset = cursor,
+                        byteCount = remaining,
+                        length = length,
+                        segmentBytes = learnedSegmentBytes,
+                        executor = RANGE_EXECUTOR,
+                    )
+                    if (parallelBytes == null) {
+                        rangeReadAheadEnabled = false
+                        cancelPrefetch()
+                        shortRangeSegmentBytes = null
+                        return fillFromSequentialFallback(output, cursor, requested, length)
+                    }
+                    rangeReadAheadEnabled = true
+                    output.write(parallelBytes)
+                    cursor += parallelBytes.size.toLong()
+                    consecutiveNetworkFailures = 0
+                    continue
+                } catch (protocol: ExternalProtocolIOException) {
+                    throw protocol
+                } catch (_: IOException) {
+                    parallelRangesEnabled = false
+                    consecutiveNetworkFailures = 0
+                }
+            }
+            try {
+                val range = transport.readRange(url, context, cursor, remaining)
+                range.totalLength?.let { total ->
+                    if (total != length) throw ExternalProtocolIOException("Protected media length changed during streaming")
+                }
+'''
+          if transport.count(old_foreground) != 1:
+              raise SystemExit(f'foreground patch anchor count={transport.count(old_foreground)}')
+          transport = transport.replace(old_foreground, new_foreground, 1)
+
+          old_readahead = '''            val remaining = requested - output.size()
+            try {
+                val range = transport.readRange(url, context, cursor, remaining)
+                range.totalLength?.let { total ->
+                    if (total != length) throw ExternalProtocolIOException("Protected media length changed during read-ahead")
+                }
+'''
+          new_readahead = '''            val remaining = requested - output.size()
+            val learnedSegmentBytes = shortRangeSegmentBytes
+            if (parallelRangesEnabled && learnedSegmentBytes != null && remaining > learnedSegmentBytes) {
+                try {
+                    val parallelBytes = loadParallelRangeRemainder(
+                        startOffset = cursor,
+                        byteCount = remaining,
+                        length = length,
+                        segmentBytes = learnedSegmentBytes,
+                        executor = PREFETCH_RANGE_EXECUTOR,
+                    ) ?: return null
+                    output.write(parallelBytes)
+                    cursor += parallelBytes.size.toLong()
+                    consecutiveNetworkFailures = 0
+                    continue
+                } catch (protocol: ExternalProtocolIOException) {
+                    throw protocol
+                } catch (_: IOException) {
+                    parallelRangesEnabled = false
+                    consecutiveNetworkFailures = 0
+                }
+            }
+            try {
+                val range = transport.readRange(url, context, cursor, remaining)
+                range.totalLength?.let { total ->
+                    if (total != length) throw ExternalProtocolIOException("Protected media length changed during read-ahead")
+                }
+'''
+          if transport.count(old_readahead) != 1:
+              raise SystemExit(f'readahead patch anchor count={transport.count(old_readahead)}')
+          transport = transport.replace(old_readahead, new_readahead, 1)
+          transport_path.write_text(transport)
+
+          test_path = Path('app/src/test/java/com/shaterguy/fc2weeklyranker/media/ExternalVideoTransportSmoothnessTest.kt')
+          test = test_path.read_text()
+          old_test = '''        try {
+            val actual = reader.read(0L, 64 * 1024)
+            assertArrayEquals(payload.copyOfRange(0, 64 * 1024), actual)
+            val highWater = upstream.rangeConcurrencyHighWater.get()
+            assertTrue("short-206 stitching did not use parallel ranges: $highWater", highWater >= 2)
+            assertTrue("short-206 stitching exceeded bounded parallelism: $highWater", highWater <= 4)
+        } finally {
+            reader.close()
+        }
+'''
+          new_test = '''        try {
+            val first = reader.read(0L, 64 * 1024)
+            assertArrayEquals(payload.copyOfRange(0, 64 * 1024), first)
+            assertTrue(
+                "learned short-range read-ahead did not finish",
+                upstream.awaitBackgroundRangeCount(expected = 8, timeoutMs = 2_000L) && upstream.awaitRangeIdle(2_000L),
+            )
+            val oversizedBefore = upstream.oversizedRangeRequestCount.get()
+            assertTrue("first short-206 read did not exercise oversized discovery", oversizedBefore >= 1)
+
+            val secondOffset = 512L * 1024L
+            val second = reader.read(secondOffset, 64 * 1024)
+            assertArrayEquals(
+                payload.copyOfRange(secondOffset.toInt(), secondOffset.toInt() + 64 * 1024),
+                second,
+            )
+            assertEquals(
+                "learned short-range hint still issued an oversized discovery request",
+                oversizedBefore,
+                upstream.oversizedRangeRequestCount.get(),
+            )
+            val highWater = upstream.rangeConcurrencyHighWater.get()
+            assertTrue("short-206 stitching did not use parallel ranges: $highWater", highWater >= 2)
+            assertTrue("short-206 stitching exceeded bounded parallelism: $highWater", highWater <= 4)
+        } finally {
+            reader.close()
+        }
+'''
+          if test.count(old_test) != 1:
+              raise SystemExit(f'test patch anchor count={test.count(old_test)}')
+          test = test.replace(old_test, new_test, 1)
+
+          old_counter = '''        val activeRangeRequests = AtomicInteger(0)
+        val rangeConcurrencyHighWater = AtomicInteger(0)
+        private val seen = CopyOnWriteArrayList<Request>()
+'''
+          new_counter = '''        val activeRangeRequests = AtomicInteger(0)
+        val rangeConcurrencyHighWater = AtomicInteger(0)
+        val oversizedRangeRequestCount = AtomicInteger(0)
+        private val seen = CopyOnWriteArrayList<Request>()
+'''
+          if test.count(old_counter) != 1:
+              raise SystemExit(f'counter patch anchor count={test.count(old_counter)}')
+          test = test.replace(old_counter, new_counter, 1)
+
+          old_length = '''                val requestedLength = (requestedEnd - requestedStart + 1L).coerceAtLeast(1L)
+                val bodyLength = min(min(requestedLength, maxBodyBytes.toLong()), payload.size.toLong() - requestedStart).toInt()
+'''
+          new_length = '''                val requestedLength = (requestedEnd - requestedStart + 1L).coerceAtLeast(1L)
+                if (requestedLength > maxBodyBytes.toLong()) {
+                    oversizedRangeRequestCount.incrementAndGet()
+                }
+                val bodyLength = min(min(requestedLength, maxBodyBytes.toLong()), payload.size.toLong() - requestedStart).toInt()
+'''
+          if test.count(old_length) != 1:
+              raise SystemExit(f'length patch anchor count={test.count(old_length)}')
+          test = test.replace(old_length, new_length, 1)
+
+          old_wait = '''        fun awaitBackgroundRangeCount(expected: Int, timeoutMs: Long): Boolean {
+            val deadline = System.nanoTime() + timeoutMs * 1_000_000L
+            while (System.nanoTime() < deadline) {
+                if (backgroundRangeCount.get() >= expected) return true
+                Thread.sleep(5L)
+            }
+            return backgroundRangeCount.get() >= expected
+        }
+'''
+          new_wait = '''        fun awaitBackgroundRangeCount(expected: Int, timeoutMs: Long): Boolean {
+            val deadline = System.nanoTime() + timeoutMs * 1_000_000L
+            while (System.nanoTime() < deadline) {
+                if (backgroundRangeCount.get() >= expected) return true
+                Thread.sleep(5L)
+            }
+            return backgroundRangeCount.get() >= expected
+        }
+
+        fun awaitRangeIdle(timeoutMs: Long): Boolean {
+            val deadline = System.nanoTime() + timeoutMs * 1_000_000L
+            while (System.nanoTime() < deadline) {
+                if (activeRangeRequests.get() == 0) return true
+                Thread.sleep(5L)
+            }
+            return activeRangeRequests.get() == 0
+        }
+'''
+          if test.count(old_wait) != 1:
+              raise SystemExit(f'wait patch anchor count={test.count(old_wait)}')
+          test = test.replace(old_wait, new_wait, 1)
+          test_path.write_text(test)
+          PY
+
+          git diff --check
+          mapfile -t CHANGED < <(git diff --name-only)
+          printf 'CHANGED=%s\n' "${CHANGED[*]}"
+          test "${#CHANGED[@]}" -eq 2
+          test "${CHANGED[0]}" = 'app/src/main/java/com/shaterguy/fc2weeklyranker/media/ExternalVideoTransport.kt'
+          test "${CHANGED[1]}" = 'app/src/test/java/com/shaterguy/fc2weeklyranker/media/ExternalVideoTransportSmoothnessTest.kt'
+          grep -Fq 'private const val SHORT_RANGE_PARALLELISM = 4' app/src/main/java/com/shaterguy/fc2weeklyranker/media/ExternalVideoTransport.kt
+          grep -Fq 'rangeDelayMs = 12L' app/src/test/java/com/shaterguy/fc2weeklyranker/media/ExternalVideoTransportSmoothnessTest.kt
+          grep -Fq 'maxBodyBytes = 8 * 1024' app/src/test/java/com/shaterguy/fc2weeklyranker/media/ExternalVideoTransportSmoothnessTest.kt
+
+          git config user.name 'SHatergUY'
+          git config user.email '108107617+shaterguy@users.noreply.github.com'
+          git add app/src/main/java/com/shaterguy/fc2weeklyranker/media/ExternalVideoTransport.kt \
+                  app/src/test/java/com/shaterguy/fc2weeklyranker/media/ExternalVideoTransportSmoothnessTest.kt
+          git commit -m 'fix: reuse learned short-range hint'
+          git push origin HEAD:v0.2.0-dev24
+          echo "NEW_SOURCE_SHA=$(git rev-parse HEAD)"

@@ -176,6 +176,8 @@ jobs:
           printf '%s\n' "$RESULT_LINE" > "$OUT/result.txt"
           if grep -Fq 'ok=false' <<<"$RESULT_LINE"; then
             printf 'REPRODUCED_FAILURE\n' > "$OUT/outcome.txt"
+            cat "$OUT/outcome.txt"
+            exit 1
           elif grep -Fq 'ok=true' <<<"$RESULT_LINE"; then
             printf 'PLAYED_120S\n' > "$OUT/outcome.txt"
           else

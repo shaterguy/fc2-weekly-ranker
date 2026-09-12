@@ -424,16 +424,11 @@ internal class SeekableExternalHttpResource(
         val requested = min(chunkSize.toLong(), length - chunkStart).toInt()
         val output = ByteArrayOutputStream(requested)
         var cursor = chunkStart
-        var rangeAttempts = 0
         var consecutiveNetworkFailures = 0
 
         while (output.size() < requested) {
             if (sequentialFallback != null) {
                 return fillFromSequentialFallback(output, cursor, requested, length)
-            }
-            rangeAttempts += 1
-            if (rangeAttempts > MAX_RANGE_REQUESTS_PER_CHUNK) {
-                throw IOException("Protected media chunk exceeded the bounded range-request budget")
             }
             val remaining = requested - output.size()
             try {
@@ -522,7 +517,6 @@ internal class SeekableExternalHttpResource(
     companion object {
         private const val MAX_METADATA_ATTEMPTS = 3
         private const val MAX_TRANSIENT_FAILURES_PER_POSITION = 3
-        private const val MAX_RANGE_REQUESTS_PER_CHUNK = 32
     }
 }
 

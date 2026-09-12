@@ -270,11 +270,13 @@ class ExternalVideoTransportSmoothnessTest {
             }
             assertTrue("warm-up range activity did not settle", upstream.awaitRangeIdle(2_000L))
 
-            val headAdvance = 6 * chunkSize
-            assertArrayEquals(
-                payload.copyOfRange(headAdvance, headAdvance + chunkSize),
-                reader.read(headAdvance.toLong(), chunkSize),
-            )
+            repeat(24) { index ->
+                val headAdvance = (6 + index) * chunkSize
+                assertArrayEquals(
+                    payload.copyOfRange(headAdvance, headAdvance + chunkSize),
+                    reader.read(headAdvance.toLong(), chunkSize),
+                )
+            }
             Thread.sleep(120L)
             assertTrue("head advance read-ahead did not settle", upstream.awaitRangeIdle(2_000L))
 

@@ -438,8 +438,8 @@ internal class SeekableExternalHttpResource(
         while (output.size() < wanted) {
             val chunkStart = (cursor / chunkSize) * chunkSize
             val chunk = cache[chunkStart]
-                ?: takePrefetchedChunk(chunkStart)
-                ?: loadChunk(chunkStart, length).also { cache[chunkStart] = it }
+                ?: takePrefetchedChunk(chunkStart, length)
+                ?: loadChunk(chunkStart, length).also { cacheChunk(chunkStart, it, length) }
             val inChunk = (cursor - chunkStart).toInt()
             if (inChunk >= chunk.size) {
                 throw IOException("Protected media chunk ended before the known resource length")
@@ -486,7 +486,7 @@ internal class SeekableExternalHttpResource(
         cache.clear()
     }
 
-    private fun takePrefetchedChunk(chunkStart: Long): ByteArray? {
+    private fun takePrefetchedChunk(chunkStart: Long, length: Long): ByteArray? {
         val task = prefetch ?: return null
         if (task.generation != generation || task.chunkStart != chunkStart) return null
         val bytes = try {
@@ -495,8 +495,22 @@ internal class SeekableExternalHttpResource(
             null
         }
         if (prefetch === task) prefetch = null
-        if (bytes != null) cache[chunkStart] = bytes
+        if (bytes != null) cacheChunk(chunkStart, bytes, length)
         return bytes
+    }
+
+    private fun cacheChunk(chunkStart: Long, bytes: ByteArray, length: Long) {
+        touchPinnedTailChunks(length)
+        cache[chunkStart] = bytes
+    }
+
+    private fun touchPinnedTailChunks(length: Long) {
+        if (length <= 0L || maxCachedChunks < TAIL_HOT_CHUNKS + 2) return
+        val lastChunkStart = ((length - 1L) / chunkSize) * chunkSize.toLong()
+        val pinnedSpan = (TAIL_HOT_CHUNKS - 1).toLong() * chunkSize.toLong()
+        val pinnedStart = (lastChunkStart - pinnedSpan).coerceAtLeast(0L)
+        val pinnedKeys = cache.keys.filter { it >= pinnedStart }
+        pinnedKeys.forEach { cache[it] }
     }
 
     private fun scheduleReadAhead(cursor: Long, length: Long) {
@@ -893,6 +907,7 @@ internal class SeekableExternalHttpResource(
     companion object {
         private const val DEFAULT_CHUNK_SIZE = 128 * 1024
         private const val PREFETCH_MIN_CHUNK_SIZE = 64 * 1024
+        private const val TAIL_HOT_CHUNKS = 6
         private const val MIN_PARALLEL_SEGMENT_BYTES = 8 * 1024
         private const val SHORT_RANGE_PARALLELISM = 8
         private const val MAX_METADATA_ATTEMPTS = 3

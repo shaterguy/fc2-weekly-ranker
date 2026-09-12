@@ -47,6 +47,8 @@ private object ExternalVideoStreamRegistry {
     private const val SESSION_IDLE_TTL_MS = 60L * 60L * 1000L
     private const val SESSION_TOKEN_BYTES = 24
     private const val RESOURCE_TOKEN_BYTES = 12
+    private const val PROXY_READ_CHUNK_BYTES = 16 * 1024
+    private const val PROXY_MAX_CACHED_CHUNKS = 8
 
     private val random = SecureRandom()
     private val sessions = linkedMapOf<String, StreamSession>()
@@ -284,7 +286,7 @@ private object ExternalVideoStreamRegistry {
                     bytes.copyOfRange(start, end)
                 }
             } else {
-                seekable().read(offset, size)
+                seekable().read(offset, minOf(size, PROXY_READ_CHUNK_BYTES))
             }
         }
 
@@ -335,7 +337,8 @@ private object ExternalVideoStreamRegistry {
             url = url,
             context = context,
             transport = transport,
-            maxCachedChunks = 1,
+            chunkSize = PROXY_READ_CHUNK_BYTES,
+            maxCachedChunks = PROXY_MAX_CACHED_CHUNKS,
         ).also { seekable = it }
 
         @Synchronized

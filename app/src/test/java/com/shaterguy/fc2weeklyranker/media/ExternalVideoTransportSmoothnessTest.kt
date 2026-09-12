@@ -192,6 +192,116 @@ class ExternalVideoTransportSmoothnessTest {
     }
 
     @Test
+    fun cachedNextChunkDoesNotTriggerDuplicateReadAhead() {
+        val chunkSize = 64 * 1024
+        val upstream = DelayedShortRangeUpstream(payload, maxBodyBytes = 8 * 1024, rangeDelayMs = 12L)
+        val transport = ExternalHttpTransport(
+            client = OkHttpClient.Builder().addInterceptor(upstream).build(),
+            cookieProvider = { "session=cached-next" },
+        )
+        val reader = SeekableExternalHttpResource(
+            url = sourceUrl,
+            context = context,
+            transport = transport,
+            chunkSize = chunkSize,
+            maxCachedChunks = 14,
+        )
+
+        try {
+            assertArrayEquals(payload.copyOfRange(0, chunkSize), reader.read(0L, chunkSize))
+            assertTrue(
+                "first read-ahead did not finish",
+                upstream.awaitBackgroundRangeCount(expected = 8, timeoutMs = 2_000L) && upstream.awaitRangeIdle(2_000L),
+            )
+            assertArrayEquals(
+                payload.copyOfRange(chunkSize, chunkSize * 2),
+                reader.read(chunkSize.toLong(), chunkSize),
+            )
+            assertTrue(
+                "second read-ahead did not finish",
+                upstream.awaitBackgroundRangeCount(expected = 16, timeoutMs = 2_000L) && upstream.awaitRangeIdle(2_000L),
+            )
+
+            val rangesBeforeCachedRevisit = upstream.totalRangeCount()
+            assertArrayEquals(payload.copyOfRange(0, chunkSize), reader.read(0L, chunkSize))
+            Thread.sleep(120L)
+            assertTrue("range fixture did not become idle", upstream.awaitRangeIdle(2_000L))
+            assertEquals(
+                "cache-resident next chunk was fetched again by read-ahead",
+                rangesBeforeCachedRevisit,
+                upstream.totalRangeCount(),
+            )
+        } finally {
+            reader.close()
+        }
+    }
+
+    @Test
+    fun decoderStyleHeadTailWorkingSetFitsProductionBound() {
+        val chunkSize = 64 * 1024
+        val upstream = DelayedShortRangeUpstream(payload, maxBodyBytes = 8 * 1024, rangeDelayMs = 12L)
+        val transport = ExternalHttpTransport(
+            client = OkHttpClient.Builder().addInterceptor(upstream).build(),
+            cookieProvider = { "session=head-tail-working-set" },
+        )
+        val reader = SeekableExternalHttpResource(
+            url = sourceUrl,
+            context = context,
+            transport = transport,
+            chunkSize = chunkSize,
+            maxCachedChunks = 14,
+        )
+        val tailStart = payload.size - 6 * chunkSize
+
+        try {
+            repeat(6) { index ->
+                val offset = index * chunkSize
+                assertArrayEquals(
+                    payload.copyOfRange(offset, offset + chunkSize),
+                    reader.read(offset.toLong(), chunkSize),
+                )
+            }
+            repeat(6) { index ->
+                val offset = tailStart + index * chunkSize
+                assertArrayEquals(
+                    payload.copyOfRange(offset, offset + chunkSize),
+                    reader.read(offset.toLong(), chunkSize),
+                )
+            }
+            assertTrue("warm-up range activity did not settle", upstream.awaitRangeIdle(2_000L))
+
+            val headAdvance = 6 * chunkSize
+            assertArrayEquals(
+                payload.copyOfRange(headAdvance, headAdvance + chunkSize),
+                reader.read(headAdvance.toLong(), chunkSize),
+            )
+            Thread.sleep(120L)
+            assertTrue("head advance read-ahead did not settle", upstream.awaitRangeIdle(2_000L))
+
+            val rangesBeforeTailRevisit = upstream.totalRangeCount()
+            repeat(6) { index ->
+                val offset = tailStart + index * chunkSize
+                assertArrayEquals(
+                    payload.copyOfRange(offset, offset + chunkSize),
+                    reader.read(offset.toLong(), chunkSize),
+                )
+            }
+            Thread.sleep(120L)
+            assertTrue("tail revisit range activity did not settle", upstream.awaitRangeIdle(2_000L))
+            assertEquals(
+                "decoder-style tail hot set was re-fetched from the network",
+                rangesBeforeTailRevisit,
+                upstream.totalRangeCount(),
+            )
+            val debug = readDebugSnapshot(reader)
+            assertTrue("debug snapshot was unavailable", debug != null)
+            assertTrue("production cache/read-ahead exceeded 1 MiB", (debug?.residentBytes ?: Int.MAX_VALUE) <= 1024 * 1024)
+        } finally {
+            reader.close()
+        }
+    }
+
+    @Test
     fun delayedShort206ChunkStitchingUsesBoundedParallelRanges() {
         val upstream = DelayedShortRangeUpstream(payload, maxBodyBytes = 8 * 1024, rangeDelayMs = 12L)
         val transport = ExternalHttpTransport(
@@ -343,6 +453,8 @@ class ExternalVideoTransportSmoothnessTest {
                 activeRangeRequests.decrementAndGet()
             }
         }
+
+        fun totalRangeCount(): Int = foregroundRangeCount.get() + backgroundRangeCount.get()
 
         fun awaitBackgroundRangeCount(expected: Int, timeoutMs: Long): Boolean {
             val deadline = System.nanoTime() + timeoutMs * 1_000_000L

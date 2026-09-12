@@ -391,6 +391,7 @@ internal class SeekableExternalHttpResource(
     }
     private var metadata: ExternalResourceMetadata? = null
     private var sequentialFallback: ExternalSequentialHttpStream? = null
+    @Volatile
     private var generation = 0L
     private var lastReadEnd: Long? = null
     private var prefetch: PrefetchTask? = null
@@ -503,6 +504,10 @@ internal class SeekableExternalHttpResource(
         val currentChunkStart = ((cursor - 1L).coerceAtLeast(0L) / chunkSize) * chunkSize
         val nextChunkStart = currentChunkStart + chunkSize.toLong()
         if (nextChunkStart >= length) return
+        if (cache.containsKey(nextChunkStart)) {
+            cancelPrefetch()
+            return
+        }
 
         val existing = prefetch
         if (existing != null && existing.generation == generation && existing.chunkStart == nextChunkStart) return
@@ -516,7 +521,7 @@ internal class SeekableExternalHttpResource(
                 } else {
                     prefetchHighWater.updateAndGet { maxOf(it, prefetchWorkerActive.get()) }
                     try {
-                        loadRangeOnlyChunk(nextChunkStart, length)
+                        loadRangeOnlyChunk(nextChunkStart, length, taskGeneration)
                     } finally {
                         prefetchWorkerActive.set(0)
                     }
@@ -643,7 +648,8 @@ internal class SeekableExternalHttpResource(
         return output.toByteArray()
     }
 
-    private fun loadRangeOnlyChunk(chunkStart: Long, length: Long): ByteArray? {
+    private fun loadRangeOnlyChunk(chunkStart: Long, length: Long, expectedGeneration: Long): ByteArray? {
+        if (generation != expectedGeneration) return null
         val requested = min(chunkSize.toLong(), length - chunkStart).toInt()
         val output = ByteArrayOutputStream(requested)
         var cursor = chunkStart
@@ -651,9 +657,11 @@ internal class SeekableExternalHttpResource(
         var parallelRangesEnabled = true
 
         while (output.size() < requested && !Thread.currentThread().isInterrupted) {
+            if (generation != expectedGeneration) return null
             val remaining = requested - output.size()
             val learnedSegmentBytes = shortRangeSegmentBytes
             if (parallelRangesEnabled && learnedSegmentBytes != null && remaining > learnedSegmentBytes) {
+                if (generation != expectedGeneration) return null
                 try {
                     val parallelBytes = loadParallelRangeRemainder(
                         startOffset = cursor,
@@ -662,6 +670,7 @@ internal class SeekableExternalHttpResource(
                         segmentBytes = learnedSegmentBytes,
                         executor = PREFETCH_RANGE_EXECUTOR,
                     ) ?: return null
+                    if (generation != expectedGeneration) return null
                     output.write(parallelBytes)
                     cursor += parallelBytes.size.toLong()
                     consecutiveNetworkFailures = 0
@@ -673,8 +682,10 @@ internal class SeekableExternalHttpResource(
                     consecutiveNetworkFailures = 0
                 }
             }
+            if (generation != expectedGeneration) return null
             try {
                 val range = transport.readRange(url, context, cursor, remaining)
+                if (generation != expectedGeneration) return null
                 range.totalLength?.let { total ->
                     if (total != length) throw ExternalProtocolIOException("Protected media length changed during read-ahead")
                 }
@@ -692,6 +703,7 @@ internal class SeekableExternalHttpResource(
                     val parallelRemaining = requested - output.size()
                     val segmentBytes = shortRangeSegmentBytes
                     if (parallelRangesEnabled && segmentBytes != null && parallelRemaining > segmentBytes) {
+                        if (generation != expectedGeneration) return null
                         try {
                             val parallelBytes = loadParallelRangeRemainder(
                                 startOffset = cursor,
@@ -700,6 +712,7 @@ internal class SeekableExternalHttpResource(
                                 segmentBytes = segmentBytes,
                                 executor = PREFETCH_RANGE_EXECUTOR,
                             ) ?: return null
+                            if (generation != expectedGeneration) return null
                             output.write(parallelBytes)
                             cursor += parallelBytes.size.toLong()
                         } catch (protocol: ExternalProtocolIOException) {
@@ -717,7 +730,7 @@ internal class SeekableExternalHttpResource(
                 if (consecutiveNetworkFailures >= MAX_TRANSIENT_FAILURES_PER_POSITION) return null
             }
         }
-        if (Thread.currentThread().isInterrupted) return null
+        if (Thread.currentThread().isInterrupted || generation != expectedGeneration) return null
         return output.toByteArray()
     }
 

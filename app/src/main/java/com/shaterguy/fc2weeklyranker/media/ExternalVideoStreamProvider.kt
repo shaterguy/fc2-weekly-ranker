@@ -48,7 +48,7 @@ private object ExternalVideoStreamRegistry {
     private const val SESSION_TOKEN_BYTES = 24
     private const val RESOURCE_TOKEN_BYTES = 12
     private const val PROXY_READ_CHUNK_BYTES = 64 * 1024
-    private const val PROXY_MAX_CACHED_CHUNKS = 8
+    private const val PROXY_MAX_CACHED_CHUNKS = 14
 
     private val random = SecureRandom()
     private val sessions = linkedMapOf<String, StreamSession>()

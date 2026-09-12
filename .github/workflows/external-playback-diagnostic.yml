@@ -1,6 +1,9 @@
 name: External playback API 34 diagnostic
 
 on:
+  push:
+    branches:
+      - 'v0.2.0-dev24'
   workflow_dispatch:
     inputs:
       smoothness_profile:
@@ -128,7 +131,7 @@ jobs:
         shell: bash
         env:
           DIAGNOSTIC_APK: ${{ steps.sign.outputs.apk }}
-          SMOOTHNESS_PROFILE: ${{ inputs.smoothness_profile }}
+          SMOOTHNESS_PROFILE: ${{ inputs.smoothness_profile || 'candidate' }}
         run: |
           set -euo pipefail
           OUT="$RUNNER_TEMP/external-playback-diagnostic"
@@ -249,10 +252,38 @@ jobs:
           rows = re.findall(r"requested=(\d+)-(\d+) returned=(\d+)-(\d+)", text)
           if len(rows) < 32:
               raise SystemExit(f"expected at least 32 delayed range responses, got {len(rows)}")
-          short = sum(1 for rs, re_, ss, se in rows if int(se) - int(ss) < int(re_) - int(rs))
-          if short < 16:
-              raise SystemExit(f"short-206 behavior was not exercised enough: {short}")
-          print(f"FC2_SHORT206_METRIC range_responses={len(rows)} short_responses={short}")
+
+          parsed = []
+          for requested_start, requested_end, returned_start, returned_end in rows:
+              rs = int(requested_start)
+              re_ = int(requested_end)
+              ss = int(returned_start)
+              se = int(returned_end)
+              requested_span = re_ - rs + 1
+              returned_span = se - ss + 1
+              if ss != rs:
+                  raise SystemExit(f"returned range start mismatch: requested={rs}-{re_} returned={ss}-{se}")
+              if se > re_:
+                  raise SystemExit(f"returned range exceeded request end: requested={rs}-{re_} returned={ss}-{se}")
+              if returned_span <= 0 or returned_span > 8192:
+                  raise SystemExit(f"returned range span violated capped fixture: {returned_span}")
+              parsed.append((requested_span, returned_span))
+
+          initial_short = sum(1 for requested_span, returned_span in parsed if returned_span < requested_span)
+          learned_exact_8192 = sum(
+              1 for requested_span, returned_span in parsed
+              if requested_span == 8192 and returned_span == 8192
+          )
+          if initial_short < 1:
+              raise SystemExit("capped short-206 discovery response was not observed")
+          if learned_exact_8192 < 16:
+              raise SystemExit(f"learned exact 8192-byte 206 path was not exercised enough: {learned_exact_8192}")
+          print(
+              "FC2_SHORT206_METRIC "
+              f"range_responses={len(rows)} "
+              f"initial_short_responses={initial_short} "
+              f"learned_exact_8192={learned_exact_8192}"
+          )
           PY
 
           if [[ "$SMOOTHNESS_PROFILE" == 'candidate' ]]; then

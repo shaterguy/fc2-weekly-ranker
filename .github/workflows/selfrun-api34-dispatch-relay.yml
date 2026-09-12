@@ -13,12 +13,12 @@ jobs:
   dispatch-exact-candidate:
     runs-on: ubuntu-latest
     steps:
-      - name: Dispatch exact candidate API34 diagnostic
+      - name: Dispatch exact candidate verification
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           TARGET_REF: v0.2.0-dev24
-          TARGET_SOURCE_SHA: b794bc681aff7c9cf4e6e30b910ca2c81a098a7e
+          TARGET_SOURCE_SHA: 8e19e4ff5c1ca3988205a5d07654baffcb3d3723
         run: |
           set -euo pipefail
           REF_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${TARGET_REF}" --jq '.object.sha')"
@@ -26,6 +26,10 @@ jobs:
           echo "TARGET_REF_SHA=$REF_SHA"
           echo "TARGET_SOURCE_SHA=$TARGET_SOURCE_SHA"
           test "$REF_SHA" = "$TARGET_SOURCE_SHA"
+          gh api --method POST \
+            -H "Accept: application/vnd.github+json" \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/android-test.yml/dispatches" \
+            -f ref="$TARGET_REF"
           gh api --method POST \
             -H "Accept: application/vnd.github+json" \
             "repos/${GITHUB_REPOSITORY}/actions/workflows/external-playback-diagnostic.yml/dispatches" \

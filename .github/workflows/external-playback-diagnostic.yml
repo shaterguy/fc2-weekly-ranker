@@ -1,6 +1,10 @@
 name: External playback API 34 diagnostic
 
 on:
+  push:
+    branches:
+      - diagnostic/SR-20260912-174952-LTNRAA-api34-candidate
+      - diagnostic/SR-20260912-174952-LTNRAA-api34-baseline
   workflow_dispatch:
     inputs:
       smoothness_profile:
@@ -128,7 +132,7 @@ jobs:
         shell: bash
         env:
           DIAGNOSTIC_APK: ${{ steps.sign.outputs.apk }}
-          SMOOTHNESS_PROFILE: ${{ inputs.smoothness_profile }}
+          SMOOTHNESS_PROFILE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.smoothness_profile || github.ref_name == 'diagnostic/SR-20260912-174952-LTNRAA-api34-baseline' && 'baseline' || 'candidate' }}
         run: |
           set -euo pipefail
           OUT="$RUNNER_TEMP/external-playback-diagnostic"

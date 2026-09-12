@@ -8,6 +8,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.IOException
@@ -124,6 +125,71 @@ class ExternalVideoTransportSmoothnessTest {
         }
     }
 
+    @Test
+    fun sequentialBoundaryReadAheadMovesShortRangeDelayOffForeground() {
+        val chunkSize = 128 * 1024
+        val upstream = DelayedShortRangeUpstream(payload, maxBodyBytes = 8 * 1024, rangeDelayMs = 6L)
+        val transport = ExternalHttpTransport(
+            client = OkHttpClient.Builder().addInterceptor(upstream).build(),
+            cookieProvider = { "session=read-ahead" },
+        )
+        val reader = SeekableExternalHttpResource(
+            url = sourceUrl,
+            context = context,
+            transport = transport,
+            chunkSize = chunkSize,
+            maxCachedChunks = 1,
+        )
+
+        try {
+            assertArrayEquals(payload.copyOfRange(0, 64 * 1024), reader.read(0L, 64 * 1024))
+            val firstDebug = readDebugSnapshot(reader)
+            val candidate = firstDebug != null
+            if (candidate) {
+                assertTrue(
+                    "candidate read-ahead did not fetch the next 128 KiB chunk in the background",
+                    upstream.awaitBackgroundRangeCount(expected = 16, timeoutMs = 2_000L),
+                )
+            }
+
+            assertArrayEquals(
+                payload.copyOfRange(64 * 1024, 128 * 1024),
+                reader.read(64L * 1024L, 64 * 1024),
+            )
+
+            val foregroundBefore = upstream.foregroundRangeCount.get()
+            val started = System.nanoTime()
+            val boundary = reader.read(128L * 1024L, 64 * 1024)
+            val boundaryMs = (System.nanoTime() - started) / 1_000_000.0
+            val foregroundDelta = upstream.foregroundRangeCount.get() - foregroundBefore
+            val finalDebug = readDebugSnapshot(reader)
+
+            assertArrayEquals(payload.copyOfRange(128 * 1024, 192 * 1024), boundary)
+            println(
+                "FC2_READ_AHEAD_METRIC " +
+                    "mode=${if (candidate) "candidate" else "baseline"} " +
+                    "boundary_ms=${formatMetric(boundaryMs)} " +
+                    "foreground_ranges=$foregroundDelta " +
+                    "background_ranges=${upstream.backgroundRangeCount.get()} " +
+                    "prefetch_hwm=${finalDebug?.prefetchHighWater ?: -1} " +
+                    "resident_bytes=${finalDebug?.residentBytes ?: -1} " +
+                    "range_read_ahead=${finalDebug?.rangeReadAheadEnabled ?: false}",
+            )
+
+            if (candidate) {
+                assertEquals("candidate boundary read unexpectedly issued foreground range requests", 0, foregroundDelta)
+                assertTrue("candidate did not keep range read-ahead enabled", finalDebug?.rangeReadAheadEnabled == true)
+                assertTrue("candidate read-ahead exceeded single-flight", (finalDebug?.prefetchHighWater ?: Int.MAX_VALUE) <= 1)
+                assertTrue("candidate read-ahead did not issue background short-range requests", upstream.backgroundRangeCount.get() >= 16)
+            } else {
+                assertTrue("baseline boundary read must issue short-range requests on the foreground path", foregroundDelta >= 16)
+                assertEquals("baseline unexpectedly issued background range requests", 0, upstream.backgroundRangeCount.get())
+            }
+        } finally {
+            reader.close()
+        }
+    }
+
     private fun percentile(values: List<Double>, quantile: Double): Double {
         require(values.isNotEmpty())
         val sorted = values.sorted()
@@ -145,12 +211,15 @@ class ExternalVideoTransportSmoothnessTest {
             ?.value?.invoke(snapshot) as? Number ?: return null
         val resident = getters.entries.firstOrNull { it.key.startsWith("getResidentBytes") }
             ?.value?.invoke(snapshot) as? Number ?: return null
-        return DebugSnapshot(prefetch.toInt(), resident.toInt())
+        val enabled = getters.entries.firstOrNull { it.key.startsWith("getRangeReadAheadEnabled") }
+            ?.value?.invoke(snapshot) as? Boolean ?: return null
+        return DebugSnapshot(prefetch.toInt(), resident.toInt(), enabled)
     }
 
     private data class DebugSnapshot(
         val prefetchHighWater: Int,
         val residentBytes: Int,
+        val rangeReadAheadEnabled: Boolean,
     )
 
     private class DelayedShortRangeUpstream(
@@ -159,6 +228,7 @@ class ExternalVideoTransportSmoothnessTest {
         private val rangeDelayMs: Long,
     ) : Interceptor {
         val foregroundRangeCount = AtomicInteger(0)
+        val backgroundRangeCount = AtomicInteger(0)
         private val seen = CopyOnWriteArrayList<Request>()
 
         override fun intercept(chain: Interceptor.Chain): Response {
@@ -177,7 +247,9 @@ class ExternalVideoTransportSmoothnessTest {
 
             val range = RANGE.matchEntire(request.header("Range").orEmpty())
                 ?: return response(request, code = 400)
-            if (!Thread.currentThread().name.startsWith("external-media-read-ahead-")) {
+            if (Thread.currentThread().name.startsWith("external-media-read-ahead-")) {
+                backgroundRangeCount.incrementAndGet()
+            } else {
                 foregroundRangeCount.incrementAndGet()
             }
             if (rangeDelayMs > 0L) {
@@ -213,6 +285,15 @@ class ExternalVideoTransportSmoothnessTest {
                     "Content-Type" to "video/mp4",
                 ),
             )
+        }
+
+        fun awaitBackgroundRangeCount(expected: Int, timeoutMs: Long): Boolean {
+            val deadline = System.nanoTime() + timeoutMs * 1_000_000L
+            while (System.nanoTime() < deadline) {
+                if (backgroundRangeCount.get() >= expected) return true
+                Thread.sleep(5L)
+            }
+            return backgroundRangeCount.get() >= expected
         }
 
         private fun response(

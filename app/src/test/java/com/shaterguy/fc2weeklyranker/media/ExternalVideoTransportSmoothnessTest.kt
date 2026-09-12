@@ -88,7 +88,11 @@ class ExternalVideoTransportSmoothnessTest {
                     "resident_bytes=${debug?.residentBytes ?: -1}",
             )
 
-            val mode = System.getenv("FC2_SMOOTHNESS_MODE")?.trim()?.lowercase().orEmpty()
+            val mode = System.getenv("FC2_SMOOTHNESS_MODE")
+                ?.trim()
+                ?.lowercase()
+                ?.takeIf(String::isNotEmpty)
+                ?: if (debug == null) "baseline" else "candidate"
             when (mode) {
                 "baseline" -> {
                     assertTrue("baseline p95 must reproduce the short-range stall", p95 >= 250.0)

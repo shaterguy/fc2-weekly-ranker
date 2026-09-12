@@ -3,7 +3,7 @@ name: External playback API 34 diagnostic
 on:
   push:
     branches:
-      - 'work/SR-20260912-111334-N8BSMT-external-12s'
+      - 'fix/SR-20260912-111334-N8BSMT-external-lifecycle'
   workflow_dispatch:
 
 permissions:

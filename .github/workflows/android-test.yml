@@ -279,7 +279,7 @@ jobs:
             -e class com.shaterguy.fc2weeklyranker.media.ExternalVideoStreamProviderInstrumentedTest \
             com.shaterguy.fc2weeklyranker.dev.test/androidx.test.runner.AndroidJUnitRunner \
             | tee "$INSTRUMENTATION_OUTPUT"
-          grep -Fq 'OK (2 tests)' "$INSTRUMENTATION_OUTPUT"
+          grep -Fq 'OK (3 tests)' "$INSTRUMENTATION_OUTPUT"
       - name: Verify DEV22 in-place TEST update
         if: steps.sign.outputs.configured == 'true'
         shell: bash

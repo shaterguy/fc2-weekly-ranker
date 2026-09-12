@@ -286,6 +286,31 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash scripts/verify_dev23_to_dev24_update.sh app/build/outputs/fc2-weekly-ranker-test/fc2-weekly-ranker-test-v0.2.0-dev24.apk
+      - name: Verify external playback smoothness on Android 14
+        if: steps.sign.outputs.configured == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          CURRENT_APK="$GITHUB_WORKSPACE/app/build/outputs/fc2-weekly-ranker-test/fc2-weekly-ranker-test-v0.2.0-dev24.apk"
+          RECEIVER_APK="$(find external-stream-receiver/build/outputs/apk/debug -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          bash scripts/verify_external_playback_api34.sh "$CURRENT_APK" "$RECEIVER_APK" candidate
+      - name: Upload Android 14 external playback evidence
+        if: ${{ always() && steps.sign.outputs.configured == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: external-playback-api34-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/external-playback-diagnostic/launch.txt
+            ${{ runner.temp }}/external-playback-diagnostic/process-state.txt
+            ${{ runner.temp }}/external-playback-diagnostic/filtered-logcat.txt
+            ${{ runner.temp }}/external-playback-diagnostic/result.txt
+            ${{ runner.temp }}/external-playback-diagnostic/outcome.txt
+            ${{ runner.temp }}/external-playback-diagnostic/smoothness-metrics.txt
+            ${{ runner.temp }}/external-playback-diagnostic/fixture-source.txt
+            ${{ runner.temp }}/external-playback-diagnostic/fixture-server.log
+            ${{ runner.temp }}/fc2-external-emulator.log
+          if-no-files-found: warn
+          retention-days: 14
       - name: Upload signed TEST evidence
         if: steps.sign.outputs.configured == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

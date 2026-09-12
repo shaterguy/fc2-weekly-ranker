@@ -46,7 +46,7 @@ public final class ExternalStreamReceiverActivity extends Activity {
     private static final Pattern CONTENT_URI = Pattern.compile("content://[^\\s\\\"']+");
     private static final int NO_ERRNO = -1;
     private static final long MULTI_CHUNK_OFFSET = 600L * 1024L;
-    private static final long DECODER_PREPARE_TIMEOUT_MS = 12_000L;
+    private static final long DECODER_PREPARE_TIMEOUT_MS = 30_000L;
     private static final long DECODER_STAGE_WATCHDOG_MS = 30_000L;
     private static final long DECODER_WATCHDOG_POLL_MS = 250L;
     private static final long LONG_DECODER_TARGET_MS = 120_000L;

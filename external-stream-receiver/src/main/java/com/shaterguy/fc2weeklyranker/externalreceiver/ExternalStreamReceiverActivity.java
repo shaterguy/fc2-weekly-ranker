@@ -18,6 +18,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -36,6 +37,12 @@ public final class ExternalStreamReceiverActivity extends Activity {
     private static final String EXTRA_DECODER_EXTRA = "decoderExtra";
     private static final String EXTRA_POSITION_MS = "positionMs";
     private static final String EXTRA_ELAPSED_MS = "elapsedMs";
+    private static final String EXTRA_STARTUP_MS = "startupMs";
+    private static final String EXTRA_STALL_COUNT = "stallCount";
+    private static final String EXTRA_STALL_DURATION_MS = "stallDurationMs";
+    private static final String EXTRA_MAX_NO_PROGRESS_MS = "maxNoProgressMs";
+    private static final String EXTRA_BUFFERING_COUNT = "bufferingCount";
+    private static final String EXTRA_BUFFERING_DURATION_MS = "bufferingDurationMs";
     private static final Pattern CONTENT_URI = Pattern.compile("content://[^\\s\\\"']+");
     private static final int NO_ERRNO = -1;
     private static final long MULTI_CHUNK_OFFSET = 600L * 1024L;
@@ -44,10 +51,21 @@ public final class ExternalStreamReceiverActivity extends Activity {
     private static final long DECODER_WATCHDOG_POLL_MS = 250L;
     private static final long LONG_DECODER_TARGET_MS = 120_000L;
     private static final long LONG_DECODER_TIMEOUT_MS = 155_000L;
+    private static final long STALL_THRESHOLD_MS = 1_000L;
 
     private final AtomicBoolean resultSent = new AtomicBoolean(false);
     private final AtomicInteger decoderWhat = new AtomicInteger(0);
     private final AtomicInteger decoderExtra = new AtomicInteger(0);
+    private final AtomicInteger observedPlaybackPositionMs = new AtomicInteger(-1);
+    private final AtomicLong firstProgressAtMs = new AtomicLong(-1L);
+    private final AtomicLong lastPlaybackProgressAtMs = new AtomicLong(-1L);
+    private final AtomicLong stallStartedAtMs = new AtomicLong(-1L);
+    private final AtomicInteger stallCount = new AtomicInteger(0);
+    private final AtomicLong stallDurationMs = new AtomicLong(0L);
+    private final AtomicLong maxNoProgressMs = new AtomicLong(0L);
+    private final AtomicLong bufferingStartedAtMs = new AtomicLong(-1L);
+    private final AtomicInteger bufferingCount = new AtomicInteger(0);
+    private final AtomicLong bufferingDurationMs = new AtomicLong(0L);
     private final CountDownLatch surfaceReady = new CountDownLatch(1);
     private volatile String diagnosticStage = "startup";
     private volatile int lastPositionMs = -1;
@@ -179,8 +197,12 @@ public final class ExternalStreamReceiverActivity extends Activity {
             String errorMessage
     ) {
         if (!resultSent.compareAndSet(false, true)) return;
+        long nowMs = SystemClock.elapsedRealtime();
+        finalizePlaybackMetrics(nowMs);
         String scenario = safeKnownScenario(incoming.getStringExtra(EXTRA_SCENARIO));
-        long elapsedMs = Math.max(0L, SystemClock.elapsedRealtime() - scenarioStartedAtMs);
+        long elapsedMs = Math.max(0L, nowMs - scenarioStartedAtMs);
+        long firstProgress = firstProgressAtMs.get();
+        long startupMs = firstProgress >= 0L ? Math.max(0L, firstProgress - scenarioStartedAtMs) : -1L;
         Log.i(
                 TAG,
                 "result scenario=" + scenario
@@ -192,6 +214,12 @@ public final class ExternalStreamReceiverActivity extends Activity {
                         + " errno=" + errno
                         + " positionMs=" + lastPositionMs
                         + " elapsedMs=" + elapsedMs
+                        + " startupMs=" + startupMs
+                        + " stallCount=" + stallCount.get()
+                        + " stallDurationMs=" + stallDurationMs.get()
+                        + " maxNoProgressMs=" + maxNoProgressMs.get()
+                        + " bufferingCount=" + bufferingCount.get()
+                        + " bufferingDurationMs=" + bufferingDurationMs.get()
         );
 
         String resultPackage = incoming.getStringExtra(EXTRA_RESULT_PACKAGE);
@@ -208,7 +236,13 @@ public final class ExternalStreamReceiverActivity extends Activity {
                 .putExtra(EXTRA_DECODER_WHAT, decoderWhat.get())
                 .putExtra(EXTRA_DECODER_EXTRA, decoderExtra.get())
                 .putExtra(EXTRA_POSITION_MS, lastPositionMs)
-                .putExtra(EXTRA_ELAPSED_MS, elapsedMs);
+                .putExtra(EXTRA_ELAPSED_MS, elapsedMs)
+                .putExtra(EXTRA_STARTUP_MS, startupMs)
+                .putExtra(EXTRA_STALL_COUNT, stallCount.get())
+                .putExtra(EXTRA_STALL_DURATION_MS, stallDurationMs.get())
+                .putExtra(EXTRA_MAX_NO_PROGRESS_MS, maxNoProgressMs.get())
+                .putExtra(EXTRA_BUFFERING_COUNT, bufferingCount.get())
+                .putExtra(EXTRA_BUFFERING_DURATION_MS, bufferingDurationMs.get());
         sendBroadcast(result);
     }
 
@@ -311,6 +345,7 @@ public final class ExternalStreamReceiverActivity extends Activity {
     }
 
     private boolean verifyLongDecoder(Uri uri) throws Exception {
+        resetPlaybackMetrics();
         MediaPlayer player = new MediaPlayer();
         try {
             diagnosticStage = "long-decoder-prepare";
@@ -329,15 +364,19 @@ public final class ExternalStreamReceiverActivity extends Activity {
                     diagnosticStage = "long-decoder-media-error";
                     return false;
                 }
+                long nowMs = SystemClock.elapsedRealtime();
                 int positionMs = player.getCurrentPosition();
                 lastPositionMs = positionMs;
+                recordPlaybackPosition(positionMs, nowMs);
                 int progressSecond = Math.max(0, positionMs / 1000);
                 if (progressSecond != lastProgressSecond) {
                     lastProgressSecond = progressSecond;
                     diagnosticStage = "long-decoder-playing-" + progressSecond;
                     if (progressSecond % 5 == 0) {
                         Log.i(TAG, "progress scenario=long-decoder positionMs=" + positionMs
-                                + " elapsedMs=" + (SystemClock.elapsedRealtime() - scenarioStartedAtMs));
+                                + " elapsedMs=" + (nowMs - scenarioStartedAtMs)
+                                + " stallCount=" + stallCount.get()
+                                + " maxNoProgressMs=" + maxNoProgressMs.get());
                     }
                 }
                 if (positionMs >= LONG_DECODER_TARGET_MS) {
@@ -369,6 +408,15 @@ public final class ExternalStreamReceiverActivity extends Activity {
         CountDownLatch prepared = new CountDownLatch(1);
         AtomicBoolean failed = new AtomicBoolean(false);
         player.setOnPreparedListener(ignored -> prepared.countDown());
+        player.setOnInfoListener((ignored, what, extra) -> {
+            long nowMs = SystemClock.elapsedRealtime();
+            if (what == MediaPlayer.MEDIA_INFO_BUFFERING_START) {
+                if (bufferingStartedAtMs.compareAndSet(-1L, nowMs)) bufferingCount.incrementAndGet();
+            } else if (what == MediaPlayer.MEDIA_INFO_BUFFERING_END) {
+                finishBufferingWindow(nowMs);
+            }
+            return false;
+        });
         player.setOnErrorListener((ignored, what, extra) -> {
             decoderWhat.set(what);
             decoderExtra.set(extra);
@@ -395,6 +443,61 @@ public final class ExternalStreamReceiverActivity extends Activity {
             return false;
         }
         return true;
+    }
+
+    private void resetPlaybackMetrics() {
+        observedPlaybackPositionMs.set(-1);
+        firstProgressAtMs.set(-1L);
+        lastPlaybackProgressAtMs.set(-1L);
+        stallStartedAtMs.set(-1L);
+        stallCount.set(0);
+        stallDurationMs.set(0L);
+        maxNoProgressMs.set(0L);
+        bufferingStartedAtMs.set(-1L);
+        bufferingCount.set(0);
+        bufferingDurationMs.set(0L);
+    }
+
+    private void recordPlaybackPosition(int positionMs, long nowMs) {
+        int previous = observedPlaybackPositionMs.getAndSet(positionMs);
+        if (positionMs > 0 && positionMs > previous) {
+            if (firstProgressAtMs.compareAndSet(-1L, nowMs)) {
+                lastPlaybackProgressAtMs.set(nowMs);
+            } else {
+                long previousProgressAt = lastPlaybackProgressAtMs.getAndSet(nowMs);
+                if (previousProgressAt >= 0L) {
+                    maxNoProgressMs.accumulateAndGet(Math.max(0L, nowMs - previousProgressAt), Math::max);
+                }
+            }
+            long stallStart = stallStartedAtMs.getAndSet(-1L);
+            if (stallStart >= 0L) stallDurationMs.addAndGet(Math.max(0L, nowMs - stallStart));
+            return;
+        }
+
+        long firstProgress = firstProgressAtMs.get();
+        long lastProgress = lastPlaybackProgressAtMs.get();
+        if (firstProgress < 0L || lastProgress < 0L) return;
+        long gapMs = Math.max(0L, nowMs - lastProgress);
+        maxNoProgressMs.accumulateAndGet(gapMs, Math::max);
+        if (gapMs >= STALL_THRESHOLD_MS && stallStartedAtMs.compareAndSet(-1L, lastProgress)) {
+            stallCount.incrementAndGet();
+        }
+    }
+
+    private void finishBufferingWindow(long nowMs) {
+        long bufferingStart = bufferingStartedAtMs.getAndSet(-1L);
+        if (bufferingStart >= 0L) bufferingDurationMs.addAndGet(Math.max(0L, nowMs - bufferingStart));
+    }
+
+    private void finalizePlaybackMetrics(long nowMs) {
+        finishBufferingWindow(nowMs);
+        long firstProgress = firstProgressAtMs.get();
+        long lastProgress = lastPlaybackProgressAtMs.get();
+        if (firstProgress >= 0L && lastProgress >= 0L) {
+            maxNoProgressMs.accumulateAndGet(Math.max(0L, nowMs - lastProgress), Math::max);
+        }
+        long stallStart = stallStartedAtMs.getAndSet(-1L);
+        if (stallStart >= 0L) stallDurationMs.addAndGet(Math.max(0L, nowMs - stallStart));
     }
 
     private boolean waitForPosition(MediaPlayer player, int targetMs, long timeoutMs) throws Exception {

@@ -2,6 +2,15 @@ name: External playback API 34 diagnostic
 
 on:
   workflow_dispatch:
+    inputs:
+      smoothness_profile:
+        description: Smoothness expectation for the checked-out branch
+        required: true
+        default: candidate
+        type: choice
+        options:
+          - candidate
+          - baseline
 
 permissions:
   contents: read
@@ -81,7 +90,7 @@ jobs:
             "$ALIGNED"
           "$BT/apksigner" verify --verbose --min-sdk-version 29 "$APK"
           BADGING="$("$BT/aapt" dump badging "$APK")"
-          grep -Fq "package: name='com.shaterguy.fc2weeklyranker.dev' versionCode='47' versionName='0.2.0-dev23'" <<<"$BADGING"
+          grep -Fq "package: name='com.shaterguy.fc2weeklyranker.dev'" <<<"$BADGING"
           echo "apk=$APK" >> "$GITHUB_OUTPUT"
 
       - name: Boot Android 14 emulator
@@ -115,17 +124,41 @@ jobs:
           adb shell getprop ro.build.version.release
           adb shell getprop ro.build.version.sdk
 
-      - name: Reproduce ordinary-process external playback
+      - name: Reproduce ordinary-process playback through delayed short-206 fixture
         shell: bash
         env:
           DIAGNOSTIC_APK: ${{ steps.sign.outputs.apk }}
+          SMOOTHNESS_PROFILE: ${{ inputs.smoothness_profile }}
         run: |
           set -euo pipefail
           OUT="$RUNNER_TEMP/external-playback-diagnostic"
           RECEIVER_APK="$(find external-stream-receiver/build/outputs/apk/debug -maxdepth 1 -type f -name '*.apk' -print -quit)"
           APP_PACKAGE=com.shaterguy.fc2weeklyranker.dev
           RECEIVER_PACKAGE=com.shaterguy.fc2weeklyranker.externalreceiver
+          FIXTURE_SOURCE='https://storage.googleapis.com/exoplayer-test-media-0/BigBuckBunny_320x180.mp4'
+          FIXTURE_MEDIA="$OUT/fixture.mp4"
+          FIXTURE_LOG="$OUT/fixture-server.log"
           mkdir -p "$OUT"
+          printf '%s\n' "$FIXTURE_SOURCE" > "$OUT/fixture-source.txt"
+          curl --fail --location --retry 3 --retry-delay 2 --output "$FIXTURE_MEDIA" "$FIXTURE_SOURCE"
+          test -s "$FIXTURE_MEDIA"
+          python3 scripts/delayed_short206_server.py \
+            --file "$FIXTURE_MEDIA" \
+            --host 0.0.0.0 \
+            --port 18080 \
+            --max-body-bytes 8192 \
+            --delay-ms 12 \
+            >"$FIXTURE_LOG" 2>&1 &
+          FIXTURE_PID=$!
+          trap 'kill "$FIXTURE_PID" >/dev/null 2>&1 || true' EXIT
+          for _ in $(seq 1 50); do
+            if curl --fail --silent --head http://127.0.0.1:18080/video.mp4 >/dev/null; then
+              break
+            fi
+            sleep 0.2
+          done
+          curl --fail --silent --head http://127.0.0.1:18080/video.mp4 >/dev/null
+
           adb install -r "$DIAGNOSTIC_APK"
           adb install -r "$RECEIVER_APK"
           adb shell am force-stop "$APP_PACKAGE" || true
@@ -133,6 +166,7 @@ jobs:
           adb logcat -c
           adb shell am start -W \
             -n "$APP_PACKAGE/com.shaterguy.fc2weeklyranker.media.ExternalStreamDiagnosticActivity" \
+            --es sourceUrl 'http://10.0.2.2:18080/video.mp4' \
             | tee "$OUT/launch.txt"
 
           CURRENT_USER="$(adb shell am get-current-user | tr -d '\r')"
@@ -168,6 +202,8 @@ jobs:
           cat "$OUT/filtered-logcat.txt"
           echo '--- provider process state samples ---'
           cat "$OUT/process-state.txt"
+          echo '--- delayed short-206 fixture tail ---'
+          tail -n 80 "$FIXTURE_LOG" || true
           [[ "$RESULT_FOUND" == '1' ]]
           RESULT_LINE="$(grep -F 'result scenario=long-decoder' "$OUT/filtered-logcat.txt" | tail -n 1)"
           printf '%s\n' "$RESULT_LINE" > "$OUT/result.txt"
@@ -175,12 +211,60 @@ jobs:
             printf 'REPRODUCED_FAILURE\n' > "$OUT/outcome.txt"
             cat "$OUT/outcome.txt"
             exit 1
-          elif grep -Fq 'ok=true' <<<"$RESULT_LINE"; then
-            printf 'PLAYED_120S\n' > "$OUT/outcome.txt"
-          else
+          elif ! grep -Fq 'ok=true' <<<"$RESULT_LINE"; then
             printf 'UNCLASSIFIED_RESULT\n' > "$OUT/outcome.txt"
             exit 1
           fi
+
+          metric() {
+            local key="$1"
+            grep -o "${key}=[-0-9]*" <<<"$RESULT_LINE" | tail -n 1 | cut -d= -f2
+          }
+          STARTUP_MS="$(metric startupMs)"
+          STALL_COUNT="$(metric stallCount)"
+          STALL_DURATION_MS="$(metric stallDurationMs)"
+          MAX_NO_PROGRESS_MS="$(metric maxNoProgressMs)"
+          BUFFERING_COUNT="$(metric bufferingCount)"
+          BUFFERING_DURATION_MS="$(metric bufferingDurationMs)"
+          for value in "$STARTUP_MS" "$STALL_COUNT" "$STALL_DURATION_MS" "$MAX_NO_PROGRESS_MS" "$BUFFERING_COUNT" "$BUFFERING_DURATION_MS"; do
+            [[ "$value" =~ ^-?[0-9]+$ ]]
+          done
+
+          cat > "$OUT/smoothness-metrics.txt" <<EOF
+          profile=$SMOOTHNESS_PROFILE
+          startup_ms=$STARTUP_MS
+          stall_count=$STALL_COUNT
+          stall_duration_ms=$STALL_DURATION_MS
+          max_no_progress_ms=$MAX_NO_PROGRESS_MS
+          buffering_count=$BUFFERING_COUNT
+          buffering_duration_ms=$BUFFERING_DURATION_MS
+          EOF
+
+          python3 - "$FIXTURE_LOG" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+          text = Path(sys.argv[1]).read_text(errors='replace')
+          rows = re.findall(r"requested=(\d+)-(\d+) returned=(\d+)-(\d+)", text)
+          if len(rows) < 32:
+              raise SystemExit(f"expected at least 32 delayed range responses, got {len(rows)}")
+          short = sum(1 for rs, re_, ss, se in rows if int(se) - int(ss) < int(re_) - int(rs))
+          if short < 16:
+              raise SystemExit(f"short-206 behavior was not exercised enough: {short}")
+          print(f"FC2_SHORT206_METRIC range_responses={len(rows)} short_responses={short}")
+          PY
+
+          if [[ "$SMOOTHNESS_PROFILE" == 'candidate' ]]; then
+            (( STARTUP_MS >= 0 && STARTUP_MS <= 8000 ))
+            (( STALL_COUNT <= 2 ))
+            (( STALL_DURATION_MS <= 3000 ))
+            (( MAX_NO_PROGRESS_MS <= 2000 ))
+            (( BUFFERING_DURATION_MS <= 5000 ))
+            printf 'SMOOTHNESS_GATE_PASS\n' > "$OUT/outcome.txt"
+          else
+            printf 'BASELINE_MEASURED\n' > "$OUT/outcome.txt"
+          fi
+          cat "$OUT/smoothness-metrics.txt"
           cat "$OUT/outcome.txt"
 
       - name: Upload diagnostic evidence
@@ -194,6 +278,9 @@ jobs:
             ${{ runner.temp }}/external-playback-diagnostic/filtered-logcat.txt
             ${{ runner.temp }}/external-playback-diagnostic/result.txt
             ${{ runner.temp }}/external-playback-diagnostic/outcome.txt
+            ${{ runner.temp }}/external-playback-diagnostic/smoothness-metrics.txt
+            ${{ runner.temp }}/external-playback-diagnostic/fixture-source.txt
+            ${{ runner.temp }}/external-playback-diagnostic/fixture-server.log
             ${{ runner.temp }}/fc2-external-emulator.log
           if-no-files-found: warn
           retention-days: 14

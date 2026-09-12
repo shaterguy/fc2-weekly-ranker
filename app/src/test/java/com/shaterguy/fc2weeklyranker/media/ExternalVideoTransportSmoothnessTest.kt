@@ -207,8 +207,26 @@ class ExternalVideoTransportSmoothnessTest {
         )
 
         try {
-            val actual = reader.read(0L, 64 * 1024)
-            assertArrayEquals(payload.copyOfRange(0, 64 * 1024), actual)
+            val first = reader.read(0L, 64 * 1024)
+            assertArrayEquals(payload.copyOfRange(0, 64 * 1024), first)
+            assertTrue(
+                "learned short-range read-ahead did not finish",
+                upstream.awaitBackgroundRangeCount(expected = 8, timeoutMs = 2_000L) && upstream.awaitRangeIdle(2_000L),
+            )
+            val oversizedBefore = upstream.oversizedRangeRequestCount.get()
+            assertTrue("first short-206 read did not exercise oversized discovery", oversizedBefore >= 1)
+
+            val secondOffset = 512L * 1024L
+            val second = reader.read(secondOffset, 64 * 1024)
+            assertArrayEquals(
+                payload.copyOfRange(secondOffset.toInt(), secondOffset.toInt() + 64 * 1024),
+                second,
+            )
+            assertEquals(
+                "learned short-range hint still issued an oversized discovery request",
+                oversizedBefore,
+                upstream.oversizedRangeRequestCount.get(),
+            )
             val highWater = upstream.rangeConcurrencyHighWater.get()
             assertTrue("short-206 stitching did not use parallel ranges: $highWater", highWater >= 2)
             assertTrue("short-206 stitching exceeded bounded parallelism: $highWater", highWater <= 4)
@@ -258,6 +276,7 @@ class ExternalVideoTransportSmoothnessTest {
         val backgroundRangeCount = AtomicInteger(0)
         val activeRangeRequests = AtomicInteger(0)
         val rangeConcurrencyHighWater = AtomicInteger(0)
+        val oversizedRangeRequestCount = AtomicInteger(0)
         private val seen = CopyOnWriteArrayList<Request>()
 
         override fun intercept(chain: Interceptor.Chain): Response {
@@ -304,6 +323,9 @@ class ExternalVideoTransportSmoothnessTest {
                 }
                 val start = requestedStart.toInt()
                 val requestedLength = (requestedEnd - requestedStart + 1L).coerceAtLeast(1L)
+                if (requestedLength > maxBodyBytes.toLong()) {
+                    oversizedRangeRequestCount.incrementAndGet()
+                }
                 val bodyLength = min(min(requestedLength, maxBodyBytes.toLong()), payload.size.toLong() - requestedStart).toInt()
                 val endExclusive = start + bodyLength
                 val body = payload.copyOfRange(start, endExclusive)
@@ -329,6 +351,15 @@ class ExternalVideoTransportSmoothnessTest {
                 Thread.sleep(5L)
             }
             return backgroundRangeCount.get() >= expected
+        }
+
+        fun awaitRangeIdle(timeoutMs: Long): Boolean {
+            val deadline = System.nanoTime() + timeoutMs * 1_000_000L
+            while (System.nanoTime() < deadline) {
+                if (activeRangeRequests.get() == 0) return true
+                Thread.sleep(5L)
+            }
+            return activeRangeRequests.get() == 0
         }
 
         private fun response(

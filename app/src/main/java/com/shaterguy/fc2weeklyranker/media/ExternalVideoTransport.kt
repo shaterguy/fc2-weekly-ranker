@@ -552,6 +552,34 @@ internal class SeekableExternalHttpResource(
                 return fillFromSequentialFallback(output, cursor, requested, length)
             }
             val remaining = requested - output.size()
+            val learnedSegmentBytes = shortRangeSegmentBytes
+            if (parallelRangesEnabled && learnedSegmentBytes != null && remaining > learnedSegmentBytes) {
+                try {
+                    val parallelBytes = loadParallelRangeRemainder(
+                        startOffset = cursor,
+                        byteCount = remaining,
+                        length = length,
+                        segmentBytes = learnedSegmentBytes,
+                        executor = RANGE_EXECUTOR,
+                    )
+                    if (parallelBytes == null) {
+                        rangeReadAheadEnabled = false
+                        cancelPrefetch()
+                        shortRangeSegmentBytes = null
+                        return fillFromSequentialFallback(output, cursor, requested, length)
+                    }
+                    rangeReadAheadEnabled = true
+                    output.write(parallelBytes)
+                    cursor += parallelBytes.size.toLong()
+                    consecutiveNetworkFailures = 0
+                    continue
+                } catch (protocol: ExternalProtocolIOException) {
+                    throw protocol
+                } catch (_: IOException) {
+                    parallelRangesEnabled = false
+                    consecutiveNetworkFailures = 0
+                }
+            }
             try {
                 val range = transport.readRange(url, context, cursor, remaining)
                 range.totalLength?.let { total ->
@@ -624,6 +652,27 @@ internal class SeekableExternalHttpResource(
 
         while (output.size() < requested && !Thread.currentThread().isInterrupted) {
             val remaining = requested - output.size()
+            val learnedSegmentBytes = shortRangeSegmentBytes
+            if (parallelRangesEnabled && learnedSegmentBytes != null && remaining > learnedSegmentBytes) {
+                try {
+                    val parallelBytes = loadParallelRangeRemainder(
+                        startOffset = cursor,
+                        byteCount = remaining,
+                        length = length,
+                        segmentBytes = learnedSegmentBytes,
+                        executor = PREFETCH_RANGE_EXECUTOR,
+                    ) ?: return null
+                    output.write(parallelBytes)
+                    cursor += parallelBytes.size.toLong()
+                    consecutiveNetworkFailures = 0
+                    continue
+                } catch (protocol: ExternalProtocolIOException) {
+                    throw protocol
+                } catch (_: IOException) {
+                    parallelRangesEnabled = false
+                    consecutiveNetworkFailures = 0
+                }
+            }
             try {
                 val range = transport.readRange(url, context, cursor, remaining)
                 range.totalLength?.let { total ->

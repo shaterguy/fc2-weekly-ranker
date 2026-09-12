@@ -894,7 +894,7 @@ internal class SeekableExternalHttpResource(
         private const val DEFAULT_CHUNK_SIZE = 128 * 1024
         private const val PREFETCH_MIN_CHUNK_SIZE = 64 * 1024
         private const val MIN_PARALLEL_SEGMENT_BYTES = 8 * 1024
-        private const val SHORT_RANGE_PARALLELISM = 4
+        private const val SHORT_RANGE_PARALLELISM = 8
         private const val MAX_METADATA_ATTEMPTS = 3
         private const val MAX_TRANSIENT_FAILURES_PER_POSITION = 3
         private val PREFETCH_THREAD_ID = AtomicInteger(0)

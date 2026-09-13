@@ -32,12 +32,12 @@ jobs:
         uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a
         with:
           gradle-version: '9.5.0'
-      - name: Build benchmark APKs
+      - name: Build benchmark APKs and run unit regressions
         shell: bash
         run: |
           set -euo pipefail
           sdkmanager "platforms;android-37.0" "build-tools;37.0.0" "platform-tools" "emulator" "system-images;android-29;google_apis;x86_64"
-          gradle --no-daemon --stacktrace :app:assembleDebug :app:assembleDebugAndroidTest :external-stream-receiver:assembleDebug
+          gradle --no-daemon --stacktrace :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest :external-stream-receiver:assembleDebug
       - name: Sign target and instrumentation APKs
         shell: bash
         env:

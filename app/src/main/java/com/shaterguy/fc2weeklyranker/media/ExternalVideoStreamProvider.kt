@@ -47,8 +47,33 @@ private object ExternalVideoStreamRegistry {
     private const val SESSION_IDLE_TTL_MS = 60L * 60L * 1000L
     private const val SESSION_TOKEN_BYTES = 24
     private const val RESOURCE_TOKEN_BYTES = 12
-    private const val PROXY_READ_CHUNK_BYTES = 64 * 1024
-    private const val PROXY_MAX_CACHED_CHUNKS = 14
+    private const val PROXY_READ_CHUNK_BYTES = 512 * 1024
+    private const val PROXY_MAX_CACHED_CHUNKS = 1
+
+    private val random = SecureRandom()
+    private val sessions = linkedMapOf<String, StreamSession>()
+
+    data class Resolved(
+        val session: StreamSession,
+        val resource: RemoteResource,
+    )
+
+    @Synchronized
+    fun create(context: Context, video: VideoEntity): ExternalVideoStreamHandle =
+        ExternalVideoStreamRegistry.create(context.applicationContext, video)
+}
+
+private object ExternalVideoStreamRegistry {
+    private const val SESSION_PATH = "session"
+    private const val ROOT_PATH = "root"
+    private const val ROOT_RESOURCE_ID = "root"
+    private const val AUTHORITY_SUFFIX = ".externalstream"
+    private const val MAX_IDLE_SESSIONS = 12
+    private const val SESSION_IDLE_TTL_MS = 60L * 60L * 1000L
+    private const val SESSION_TOKEN_BYTES = 24
+    private const val RESOURCE_TOKEN_BYTES = 12
+    private const val PROXY_READ_CHUNK_BYTES = 512 * 1024
+    private const val PROXY_MAX_CACHED_CHUNKS = 1
 
     private val random = SecureRandom()
     private val sessions = linkedMapOf<String, StreamSession>()

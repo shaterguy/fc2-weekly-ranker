@@ -12,6 +12,9 @@ bash -n scripts/verify_dev22_to_dev23_update.sh
 if [[ -f scripts/verify_dev23_to_dev24_update.sh ]]; then
   bash -n scripts/verify_dev23_to_dev24_update.sh
 fi
+if [[ -f scripts/verify_dev24_to_dev25_update.sh ]]; then
+  bash -n scripts/verify_dev24_to_dev25_update.sh
+fi
 
 MAIN='app/src/main/java/com/shaterguy/fc2weeklyranker/MainActivity.kt'
 LAUNCHER='app/src/main/java/com/shaterguy/fc2weeklyranker/media/ExternalVideoPlayerLauncher.kt'
@@ -55,7 +58,7 @@ if [[ -f "$SMOOTHNESS_TEST" ]]; then
     echo 'ERROR: smoothness test result XML is missing.' >&2
     exit 1
   fi
-  for marker in FC2_SMOOTHNESS_METRIC FC2_READ_AHEAD_METRIC FC2_PRODUCTION_LATENCY_METRIC; do
+  for marker in FC2_SMOOTHNESS_METRIC FC2_READ_AHEAD_METRIC FC2_PRODUCTION_LATENCY_METRIC FC2_PRODUCTION_SHORT_RANGE_METRIC; do
     metric="$(grep -h -o "${marker}[^<]*" "${smoothness_xml[@]}" | tail -n 1 || true)"
     if [[ -z "$metric" ]]; then
       echo "ERROR: $marker was not emitted by the smoothness fixture." >&2

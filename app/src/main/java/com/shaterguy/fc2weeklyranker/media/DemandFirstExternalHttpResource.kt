@@ -83,8 +83,9 @@ internal class DemandFirstExternalHttpResource(
             return fallback
         }
 
-        lastReadEnd = offset + bytes.size.toLong()
-        scheduleReadAhead(lastReadEnd ?: offset, wanted, length)
+        val nextOffset = offset + bytes.size.toLong()
+        lastReadEnd = nextOffset
+        scheduleReadAhead(nextOffset, wanted, length)
         return bytes
     }
 
@@ -119,13 +120,18 @@ internal class DemandFirstExternalHttpResource(
         return bytes?.takeIf { it.size == requestedBytes }
     }
 
-    private fun loadExactDemand(offset: Long, requestedBytes: Int, length: Long): ByteArray? = try {
-        val range = transport.readRange(url, context, offset, requestedBytes)
-        if (range.totalLength != null && range.totalLength != length) return null
-        if (!range.rangeHonored || range.bytes.size != requestedBytes) return null
-        range.bytes
-    } catch (_: IOException) {
-        null
+    private fun loadExactDemand(offset: Long, requestedBytes: Int, length: Long): ByteArray? {
+        return try {
+            val range = transport.readRange(url, context, offset, requestedBytes)
+            when {
+                range.totalLength != null && range.totalLength != length -> null
+                !range.rangeHonored -> null
+                range.bytes.size != requestedBytes -> null
+                else -> range.bytes
+            }
+        } catch (_: IOException) {
+            null
+        }
     }
 
     private fun scheduleReadAhead(startOffset: Long, requestedBytes: Int, length: Long) {

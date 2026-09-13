@@ -109,6 +109,48 @@ internal class ExternalSequentialHttpStream(
         response.close()
     }
 }
+internal class ExternalRangeHttpStream(
+    private val call: okhttp3.Call,
+    private val response: Response,
+    startOffset: Long,
+    private val endOffsetInclusive: Long,
+    val totalLength: Long?,
+    val finalUrl: String,
+) : AutoCloseable {
+    private val input = response.body.byteStream()
+    var position: Long = startOffset
+        private set
+
+    val exhausted: Boolean
+        get() = position > endOffsetInclusive
+
+    fun readExact(maxBytes: Int): ByteArray {
+        require(maxBytes > 0)
+        if (exhausted) return ByteArray(0)
+        val wanted = min(maxBytes.toLong(), endOffsetInclusive - position + 1L).toInt()
+        val output = ByteArray(wanted)
+        var copied = 0
+        while (copied < wanted) {
+            val read = input.read(output, copied, wanted - copied)
+            if (read < 0) break
+            if (read == 0) {
+                val single = input.read()
+                if (single < 0) break
+                output[copied] = single.toByte()
+                copied += 1
+            } else {
+                copied += read
+            }
+        }
+        position += copied.toLong()
+        return if (copied == wanted) output else output.copyOf(copied)
+    }
+
+    override fun close() {
+        call.cancel()
+        response.close()
+    }
+}
 
 internal class ExternalHttpTransport(
     private val client: OkHttpClient = OkHttpClient.Builder()
@@ -190,6 +232,89 @@ internal class ExternalHttpTransport(
             }
             else -> throw httpFailure("Protected media range request failed", response.code)
         }
+    }
+    fun openRangeStream(
+        url: String,
+        context: ExternalVideoRequestContext,
+        offset: Long,
+        size: Int,
+    ): ExternalRangeHttpStream? {
+        require(offset >= 0L) { "offset must be non-negative" }
+        require(size > 0) { "size must be positive" }
+        requireHttpUrl(url)
+        val end = offset + size.toLong() - 1L
+        if (end < offset) throw ExternalProtocolIOException("Requested media range overflowed")
+
+        var current = url
+        repeat(MAX_REDIRECTS + 1) { redirectCount ->
+            requireHttpUrl(current)
+            val call = client.newCall(
+                buildRequest(
+                    method = "GET",
+                    url = current,
+                    context = context,
+                    range = "bytes=$offset-$end",
+                ),
+            )
+            val response = call.execute()
+            val location = response.header("Location")
+            if (response.code in 300..399 && !location.isNullOrBlank()) {
+                response.close()
+                if (redirectCount >= MAX_REDIRECTS) {
+                    throw ExternalProtocolIOException("Protected media redirect limit exceeded")
+                }
+                val next = runCatching { URI(current).resolve(location).toString() }
+                    .getOrElse { throw ExternalProtocolIOException("Protected media returned an invalid redirect", it) }
+                requireHttpUrl(next)
+                current = next
+            } else {
+                when (response.code) {
+                    206 -> {
+                        val parsed = parseContentRange(response.header("Content-Range"))
+                            ?: run {
+                                response.close()
+                                throw ExternalProtocolIOException("Protected media server returned 206 without Content-Range")
+                            }
+                        if (parsed.start != offset || parsed.end < parsed.start) {
+                            response.close()
+                            throw ExternalProtocolIOException("Protected media server returned a mismatched Content-Range")
+                        }
+                        if (parsed.end > end) {
+                            response.close()
+                            throw ExternalProtocolIOException("Protected media server exceeded the requested byte range")
+                        }
+                        if (parsed.end < end) {
+                            response.close()
+                            return null
+                        }
+                        return ExternalRangeHttpStream(
+                            call = call,
+                            response = response,
+                            startOffset = offset,
+                            endOffsetInclusive = parsed.end,
+                            totalLength = parsed.total,
+                            finalUrl = current,
+                        )
+                    }
+                    200 -> {
+                        response.close()
+                        return null
+                    }
+                    416 -> {
+                        val total = parseUnsatisfiedContentRange(response.header("Content-Range"))
+                        response.close()
+                        if (total != null && offset >= total) return null
+                        throw ExternalProtocolIOException("Protected media server rejected a valid-looking range")
+                    }
+                    else -> {
+                        val code = response.code
+                        response.close()
+                        throw httpFailure("Protected media streaming range request failed", code)
+                    }
+                }
+            }
+        }
+        throw ExternalProtocolIOException("Protected media redirect loop")
     }
 
     fun openSequential(url: String, context: ExternalVideoRequestContext): ExternalSequentialHttpStream {

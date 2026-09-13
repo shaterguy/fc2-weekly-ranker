@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <application
         android:allowBackup="false"
         android:label="External stream test receiver"
@@ -7,6 +9,11 @@
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
         <activity
             android:name=".ExternalStreamReceiverActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true" />
+        <activity
+            android:name=".PlaybackBenchmarkActivity"
             android:exported="true"
             android:excludeFromRecents="true"
             android:noHistory="true" />

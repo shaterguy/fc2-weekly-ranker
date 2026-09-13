@@ -248,7 +248,7 @@ private object ExternalVideoStreamRegistry {
         private val mapChildUrl: (String) -> String,
     ) {
         private var resolvedKind: ExternalMediaKind? = null
-        private var seekable: SeekableExternalHttpResource? = null
+        private var seekable: DemandFirstExternalHttpResource? = null
         private var playlistBytes: ByteArray? = null
 
         @Synchronized
@@ -333,7 +333,7 @@ private object ExternalVideoStreamRegistry {
         }
 
         @Synchronized
-        private fun seekable(): SeekableExternalHttpResource = seekable ?: SeekableExternalHttpResource(
+        private fun seekable(): DemandFirstExternalHttpResource = seekable ?: DemandFirstExternalHttpResource(
             url = url,
             context = context,
             transport = transport,

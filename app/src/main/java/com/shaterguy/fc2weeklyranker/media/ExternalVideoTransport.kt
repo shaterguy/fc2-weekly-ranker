@@ -381,8 +381,15 @@ internal class SeekableExternalHttpResource(
 
     private data class PrefetchTask(
         val generation: Long,
-        val chunkStart: Long,
+        val startOffset: Long,
+        val requestedBytes: Int,
         val future: CompletableFuture<ByteArray?>,
+    )
+
+    private data class ReadWindow(
+        val startOffset: Long,
+        val bytes: ByteArray,
+        val cacheableFullChunk: Boolean,
     )
 
     private val cache = object : LinkedHashMap<Long, ByteArray>(maxCachedChunks, 0.75f, true) {
@@ -437,16 +444,29 @@ internal class SeekableExternalHttpResource(
         var cursor = offset
         while (output.size() < wanted) {
             val chunkStart = (cursor / chunkSize) * chunkSize
-            val chunk = cache[chunkStart]
-                ?: takePrefetchedChunk(chunkStart, length)
-                ?: loadChunk(chunkStart, length).also { cacheChunk(chunkStart, it, length) }
-            val inChunk = (cursor - chunkStart).toInt()
-            if (inChunk >= chunk.size) {
-                throw IOException("Protected media chunk ended before the known resource length")
+            val cached = cache[chunkStart]
+            val window = if (cached != null) {
+                ReadWindow(chunkStart, cached, cacheableFullChunk = true)
+            } else {
+                takePrefetchedWindow(cursor, chunkStart, length)
+                    ?: loadForegroundWindow(
+                        chunkStart = chunkStart,
+                        cursor = cursor,
+                        demandBytes = min(wanted - output.size(), chunkSize),
+                        length = length,
+                    )
             }
-            val copy = min(wanted - output.size(), chunk.size - inChunk)
+            if (window.cacheableFullChunk && cache[chunkStart] !== window.bytes) {
+                cacheChunk(chunkStart, window.bytes, length)
+            }
+
+            val inWindow = (cursor - window.startOffset).toInt()
+            if (inWindow < 0 || inWindow >= window.bytes.size) {
+                throw IOException("Protected media window ended before the requested position")
+            }
+            val copy = min(wanted - output.size(), window.bytes.size - inWindow)
             if (copy <= 0) throw IOException("Protected media read made no progress")
-            output.write(chunk, inChunk, copy)
+            output.write(window.bytes, inWindow, copy)
             cursor += copy.toLong()
         }
 
@@ -460,8 +480,8 @@ internal class SeekableExternalHttpResource(
         val task = prefetch
         val prefetchedBytes = if (task != null && task.future.isDone && !task.future.isCompletedExceptionally && !task.future.isCancelled) {
             runCatching { task.future.getNow(null)?.size ?: 0 }.getOrDefault(0)
-        } else if (prefetchWorkerActive.get() > 0) {
-            chunkSize
+        } else if (task != null && prefetchWorkerActive.get() > 0) {
+            task.requestedBytes
         } else {
             0
         }
@@ -486,20 +506,24 @@ internal class SeekableExternalHttpResource(
         cache.clear()
     }
 
-    private fun takePrefetchedChunk(chunkStart: Long, length: Long): ByteArray? {
+    private fun takePrefetchedWindow(cursor: Long, chunkStart: Long, length: Long): ReadWindow? {
         val task = prefetch ?: return null
-        if (task.generation != generation || task.chunkStart != chunkStart) return null
+        if (task.generation != generation || task.startOffset != cursor) return null
         val bytes = try {
             task.future.get()
         } catch (_: Exception) {
             null
         }
         if (prefetch === task) prefetch = null
-        if (bytes != null) cacheChunk(chunkStart, bytes, length)
-        return bytes
+        if (bytes == null || bytes.isEmpty()) return null
+        val expectedFullChunk = min(chunkSize.toLong(), length - chunkStart).toInt()
+        val cacheable = task.startOffset == chunkStart && bytes.size == expectedFullChunk
+        return ReadWindow(task.startOffset, bytes, cacheableFullChunk = cacheable)
     }
 
     private fun cacheChunk(chunkStart: Long, bytes: ByteArray, length: Long) {
+        val expected = min(chunkSize.toLong(), length - chunkStart).toInt()
+        if (bytes.size != expected) return
         touchPinnedTailChunks(length)
         cache[chunkStart] = bytes
     }
@@ -515,16 +539,40 @@ internal class SeekableExternalHttpResource(
 
     private fun scheduleReadAhead(cursor: Long, length: Long) {
         if (!rangeReadAheadEnabled || chunkSize < PREFETCH_MIN_CHUNK_SIZE || cursor >= length || closed) return
-        val currentChunkStart = ((cursor - 1L).coerceAtLeast(0L) / chunkSize) * chunkSize
-        val nextChunkStart = currentChunkStart + chunkSize.toLong()
-        if (nextChunkStart >= length) return
-        if (cache.containsKey(nextChunkStart)) {
-            cancelPrefetch()
-            return
+
+        val learnedSegmentBytes = shortRangeSegmentBytes
+        val startOffset: Long
+        val requestedBytes: Int
+        if (learnedSegmentBytes != null) {
+            startOffset = cursor
+            requestedBytes = min(SHORT_RANGE_READ_AHEAD_BYTES.toLong(), length - startOffset).toInt()
+        } else {
+            val currentChunkStart = ((cursor - 1L).coerceAtLeast(0L) / chunkSize) * chunkSize
+            startOffset = currentChunkStart + chunkSize.toLong()
+            if (startOffset >= length) return
+            requestedBytes = min(chunkSize.toLong(), length - startOffset).toInt()
+        }
+        if (requestedBytes <= 0) return
+
+        val cachedChunkStart = (startOffset / chunkSize) * chunkSize
+        val cached = cache[cachedChunkStart]
+        if (cached != null) {
+            val inChunk = (startOffset - cachedChunkStart).toInt()
+            if (inChunk >= 0 && inChunk + requestedBytes <= cached.size) {
+                cancelPrefetch()
+                return
+            }
         }
 
         val existing = prefetch
-        if (existing != null && existing.generation == generation && existing.chunkStart == nextChunkStart) return
+        if (
+            existing != null &&
+            existing.generation == generation &&
+            existing.startOffset == startOffset &&
+            existing.requestedBytes == requestedBytes
+        ) {
+            return
+        }
         cancelPrefetch()
 
         val taskGeneration = generation
@@ -535,7 +583,7 @@ internal class SeekableExternalHttpResource(
                 } else {
                     prefetchHighWater.updateAndGet { maxOf(it, prefetchWorkerActive.get()) }
                     try {
-                        loadRangeOnlyChunk(nextChunkStart, length, taskGeneration)
+                        loadRangeOnlyChunk(startOffset, length, taskGeneration, requestedBytes)
                     } finally {
                         prefetchWorkerActive.set(0)
                     }
@@ -543,7 +591,7 @@ internal class SeekableExternalHttpResource(
             },
             PREFETCH_EXECUTOR,
         )
-        prefetch = PrefetchTask(taskGeneration, nextChunkStart, future)
+        prefetch = PrefetchTask(taskGeneration, startOffset, requestedBytes, future)
     }
 
     private fun invalidateReadAhead() {
@@ -557,99 +605,63 @@ internal class SeekableExternalHttpResource(
         prefetch = null
     }
 
-    private fun loadChunk(chunkStart: Long, length: Long): ByteArray {
-        val requested = min(chunkSize.toLong(), length - chunkStart).toInt()
-        val output = ByteArrayOutputStream(requested)
-        var cursor = chunkStart
-        var consecutiveNetworkFailures = 0
-        var parallelRangesEnabled = true
+    private fun loadForegroundWindow(
+        chunkStart: Long,
+        cursor: Long,
+        demandBytes: Int,
+        length: Long,
+    ): ReadWindow {
+        require(demandBytes > 0)
+        val learnedSegmentBytes = shortRangeSegmentBytes
+        if (learnedSegmentBytes != null) {
+            return ReadWindow(
+                startOffset = cursor,
+                bytes = loadForegroundDemand(cursor, demandBytes, length, learnedSegmentBytes),
+                cacheableFullChunk = false,
+            )
+        }
 
-        while (output.size() < requested) {
-            if (sequentialFallback != null) {
-                rangeReadAheadEnabled = false
-                shortRangeSegmentBytes = null
-                return fillFromSequentialFallback(output, cursor, requested, length)
-            }
-            val remaining = requested - output.size()
-            val learnedSegmentBytes = shortRangeSegmentBytes
-            if (parallelRangesEnabled && learnedSegmentBytes != null && remaining > learnedSegmentBytes) {
-                try {
-                    val parallelBytes = loadParallelRangeRemainder(
-                        startOffset = cursor,
-                        byteCount = remaining,
-                        length = length,
-                        segmentBytes = learnedSegmentBytes,
-                        executor = RANGE_EXECUTOR,
-                    )
-                    if (parallelBytes == null) {
-                        rangeReadAheadEnabled = false
-                        cancelPrefetch()
-                        shortRangeSegmentBytes = null
-                        return fillFromSequentialFallback(output, cursor, requested, length)
-                    }
-                    rangeReadAheadEnabled = true
-                    output.write(parallelBytes)
-                    cursor += parallelBytes.size.toLong()
-                    consecutiveNetworkFailures = 0
-                    continue
-                } catch (protocol: ExternalProtocolIOException) {
-                    throw protocol
-                } catch (_: IOException) {
-                    parallelRangesEnabled = false
-                    consecutiveNetworkFailures = 0
-                }
-            }
+        val requested = min(chunkSize.toLong(), length - chunkStart).toInt()
+        var consecutiveNetworkFailures = 0
+        while (true) {
             try {
-                val range = transport.readRange(url, context, cursor, remaining)
+                val range = transport.readRange(url, context, chunkStart, requested)
                 range.totalLength?.let { total ->
                     if (total != length) throw ExternalProtocolIOException("Protected media length changed during streaming")
                 }
                 if (!range.rangeHonored) {
-                    rangeReadAheadEnabled = false
-                    cancelPrefetch()
-                    shortRangeSegmentBytes = null
-                    return fillFromSequentialFallback(output, cursor, requested, length)
+                    disableRangeReadAhead()
+                    return ReadWindow(
+                        startOffset = cursor,
+                        bytes = loadSequentialDemand(cursor, demandBytes, length),
+                        cacheableFullChunk = false,
+                    )
                 }
                 rangeReadAheadEnabled = true
                 if (range.bytes.isEmpty()) {
                     throw IOException("Protected media range returned no bytes before EOF")
                 }
-                if (range.bytes.size > remaining) {
-                    throw ExternalProtocolIOException("Protected media range exceeded the remaining chunk size")
+                if (range.bytes.size > requested) {
+                    throw ExternalProtocolIOException("Protected media range exceeded the requested chunk size")
                 }
-                output.write(range.bytes)
-                cursor += range.bytes.size.toLong()
-                consecutiveNetworkFailures = 0
+                if (range.bytes.size == requested) {
+                    return ReadWindow(chunkStart, range.bytes, cacheableFullChunk = true)
+                }
 
-                if (range.bytes.size < remaining) {
-                    rememberShortRangeSegment(range.bytes.size)
-                    val parallelRemaining = requested - output.size()
-                    val segmentBytes = shortRangeSegmentBytes
-                    if (parallelRangesEnabled && segmentBytes != null && parallelRemaining > segmentBytes) {
-                        try {
-                            val parallelBytes = loadParallelRangeRemainder(
-                                startOffset = cursor,
-                                byteCount = parallelRemaining,
-                                length = length,
-                                segmentBytes = segmentBytes,
-                                executor = RANGE_EXECUTOR,
-                            )
-                            if (parallelBytes == null) {
-                                rangeReadAheadEnabled = false
-                                cancelPrefetch()
-                                shortRangeSegmentBytes = null
-                                return fillFromSequentialFallback(output, cursor, requested, length)
-                            }
-                            output.write(parallelBytes)
-                            cursor += parallelBytes.size.toLong()
-                        } catch (protocol: ExternalProtocolIOException) {
-                            throw protocol
-                        } catch (_: IOException) {
-                            parallelRangesEnabled = false
-                            consecutiveNetworkFailures = 0
-                        }
-                    }
+                rememberShortRangeSegment(range.bytes.size)
+                val output = ByteArrayOutputStream(demandBytes)
+                val probeOffset = (cursor - chunkStart).toInt()
+                if (probeOffset >= 0 && probeOffset < range.bytes.size) {
+                    val copy = min(demandBytes, range.bytes.size - probeOffset)
+                    output.write(range.bytes, probeOffset, copy)
                 }
+                val remaining = demandBytes - output.size()
+                if (remaining > 0) {
+                    val directStart = cursor + output.size().toLong()
+                    val segmentBytes = shortRangeSegmentBytes ?: MIN_PARALLEL_SEGMENT_BYTES
+                    output.write(loadForegroundDemand(directStart, remaining, length, segmentBytes))
+                }
+                return ReadWindow(cursor, output.toByteArray(), cacheableFullChunk = false)
             } catch (protocol: ExternalProtocolIOException) {
                 throw protocol
             } catch (io: IOException) {
@@ -659,12 +671,103 @@ internal class SeekableExternalHttpResource(
                 }
             }
         }
+    }
+
+    private fun loadForegroundDemand(
+        startOffset: Long,
+        byteCount: Int,
+        length: Long,
+        segmentBytes: Int,
+    ): ByteArray {
+        if (byteCount <= 0) return ByteArray(0)
+        try {
+            val bytes = if (byteCount > segmentBytes) {
+                loadParallelRangeRemainder(
+                    startOffset = startOffset,
+                    byteCount = byteCount,
+                    length = length,
+                    segmentBytes = segmentBytes,
+                    executor = RANGE_EXECUTOR,
+                )
+            } else {
+                loadRangeSegment(startOffset, byteCount, length)
+            }
+            if (bytes != null) {
+                rangeReadAheadEnabled = true
+                return bytes
+            }
+            disableRangeReadAhead()
+            return loadSequentialDemand(startOffset, byteCount, length)
+        } catch (protocol: ExternalProtocolIOException) {
+            throw protocol
+        } catch (_: IOException) {
+            return loadSerialRangeDemand(startOffset, byteCount, length)
+        }
+    }
+
+    private fun loadSerialRangeDemand(startOffset: Long, byteCount: Int, length: Long): ByteArray {
+        val output = ByteArrayOutputStream(byteCount)
+        var cursor = startOffset
+        var consecutiveNetworkFailures = 0
+        while (output.size() < byteCount) {
+            val remaining = byteCount - output.size()
+            try {
+                val range = transport.readRange(url, context, cursor, remaining)
+                range.totalLength?.let { total ->
+                    if (total != length) throw ExternalProtocolIOException("Protected media length changed during streaming")
+                }
+                if (!range.rangeHonored) {
+                    disableRangeReadAhead()
+                    val prefix = output.toByteArray()
+                    val tail = loadSequentialDemand(cursor, remaining, length)
+                    return ByteArrayOutputStream(byteCount).apply {
+                        write(prefix)
+                        write(tail)
+                    }.toByteArray()
+                }
+                rangeReadAheadEnabled = true
+                if (range.bytes.isEmpty()) {
+                    throw IOException("Protected media range returned no bytes before EOF")
+                }
+                if (range.bytes.size > remaining) {
+                    throw ExternalProtocolIOException("Protected media range exceeded the current read demand")
+                }
+                if (range.bytes.size < remaining) rememberShortRangeSegment(range.bytes.size)
+                output.write(range.bytes)
+                cursor += range.bytes.size.toLong()
+                consecutiveNetworkFailures = 0
+            } catch (protocol: ExternalProtocolIOException) {
+                throw protocol
+            } catch (io: IOException) {
+                consecutiveNetworkFailures += 1
+                if (consecutiveNetworkFailures >= MAX_TRANSIENT_FAILURES_PER_POSITION) {
+                    throw IOException("Protected media demand range failed after bounded retries", io)
+                }
+            }
+        }
         return output.toByteArray()
     }
 
-    private fun loadRangeOnlyChunk(chunkStart: Long, length: Long, expectedGeneration: Long): ByteArray? {
+    private fun loadSequentialDemand(startOffset: Long, byteCount: Int, length: Long): ByteArray {
+        val output = ByteArrayOutputStream(byteCount)
+        return fillFromSequentialFallback(output, startOffset, byteCount, length)
+    }
+
+    private fun disableRangeReadAhead() {
+        rangeReadAheadEnabled = false
+        cancelPrefetch()
+        shortRangeSegmentBytes = null
+    }
+
+    private fun loadRangeOnlyChunk(
+        chunkStart: Long,
+        length: Long,
+        expectedGeneration: Long,
+        requestedBytes: Int,
+    ): ByteArray? {
         if (generation != expectedGeneration) return null
-        val requested = min(chunkSize.toLong(), length - chunkStart).toInt()
+        val requested = min(requestedBytes.toLong(), length - chunkStart).toInt()
+        if (requested <= 0) return ByteArray(0)
         val output = ByteArrayOutputStream(requested)
         var cursor = chunkStart
         var consecutiveNetworkFailures = 0
@@ -706,7 +809,7 @@ internal class SeekableExternalHttpResource(
                 if (!range.rangeHonored) return null
                 if (range.bytes.isEmpty()) return null
                 if (range.bytes.size > remaining) {
-                    throw ExternalProtocolIOException("Protected media read-ahead exceeded the remaining chunk size")
+                    throw ExternalProtocolIOException("Protected media read-ahead exceeded the remaining window size")
                 }
                 output.write(range.bytes)
                 cursor += range.bytes.size.toLong()
@@ -907,6 +1010,7 @@ internal class SeekableExternalHttpResource(
     companion object {
         private const val DEFAULT_CHUNK_SIZE = 128 * 1024
         private const val PREFETCH_MIN_CHUNK_SIZE = 64 * 1024
+        private const val SHORT_RANGE_READ_AHEAD_BYTES = 64 * 1024
         private const val TAIL_HOT_CHUNKS = 6
         private const val MIN_PARALLEL_SEGMENT_BYTES = 8 * 1024
         private const val SHORT_RANGE_PARALLELISM = 8

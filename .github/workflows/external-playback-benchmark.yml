@@ -1,0 +1,130 @@
+name: External Playback Benchmark
+
+on:
+  push:
+    branches:
+      - 'diag/external-playback-*'
+      - 'candidate/external-playback-*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Set up JDK 17
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407
+        with:
+          packages: ''
+          log-accepted-android-sdk-licenses: 'false'
+      - name: Set up Gradle 9.5
+        uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a
+        with:
+          gradle-version: '9.5.0'
+      - name: Build benchmark APKs
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager "platforms;android-37.0" "build-tools;37.0.0" "platform-tools" "emulator" "system-images;android-29;google_apis;x86_64"
+          gradle --no-daemon --stacktrace :app:assembleDebug :app:assembleDebugAndroidTest :external-stream-receiver:assembleDebug
+      - name: Sign target and instrumentation APKs
+        shell: bash
+        env:
+          SIGNING_PASSPHRASE: ${{ secrets.FC2_WEEKLY_RANKER_TEST_SIGNING_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          test -n "${SIGNING_PASSPHRASE:-}"
+          BT="$ANDROID_HOME/build-tools/37.0.0"
+          PASS_FILE="$RUNNER_TEMP/fc2-benchmark-signing-pass"
+          trap 'rm -f "$PASS_FILE"' EXIT
+          umask 077
+          printf '%s' "$SIGNING_PASSPHRASE" > "$PASS_FILE"
+
+          APP_UNSIGNED="$(find app/build/outputs/apk/debug -maxdepth 1 -type f -name '*-unsigned.apk' -print -quit)"
+          TEST_CANDIDATE="$(find app/build/outputs/apk/androidTest/debug -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          RECEIVER_APK="$(find external-stream-receiver/build/outputs/apk/debug -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          test -s "$APP_UNSIGNED"
+          test -s "$TEST_CANDIDATE"
+          test -s "$RECEIVER_APK"
+
+          "$BT/zipalign" -p -f 4 "$APP_UNSIGNED" "$RUNNER_TEMP/benchmark-app-aligned.apk"
+          APKSIGNER="$BT/apksigner" bash tools/sign_test.sh "$RUNNER_TEMP/benchmark-app-aligned.apk" "$PASS_FILE" "$RUNNER_TEMP/benchmark-app.apk" >/dev/null
+          "$BT/apksigner" verify --min-sdk-version 29 "$RUNNER_TEMP/benchmark-app.apk"
+
+          "$BT/zipalign" -p -f 4 "$TEST_CANDIDATE" "$RUNNER_TEMP/benchmark-test-aligned.apk"
+          APKSIGNER="$BT/apksigner" bash tools/sign_test.sh "$RUNNER_TEMP/benchmark-test-aligned.apk" "$PASS_FILE" "$RUNNER_TEMP/benchmark-test.apk" >/dev/null
+          "$BT/apksigner" verify --min-sdk-version 29 "$RUNNER_TEMP/benchmark-test.apk"
+
+          cp "$RECEIVER_APK" "$RUNNER_TEMP/benchmark-receiver.apk"
+      - name: Run actual-frame direct versus opaque-proxy benchmark
+        shell: bash
+        run: |
+          set -euo pipefail
+          export ANDROID_AVD_HOME="$RUNNER_TEMP/android-avd"
+          mkdir -p "$ANDROID_AVD_HOME"
+          AVD_NAME=fc2-playback-benchmark
+          echo no | avdmanager create avd --force --name "$AVD_NAME" --package "system-images;android-29;google_apis;x86_64" --device pixel --path "$ANDROID_AVD_HOME/$AVD_NAME.avd"
+          sudo chmod 666 /dev/kvm 2>/dev/null || true
+          "$ANDROID_HOME/emulator/emulator" -avd "$AVD_NAME" -no-window -noaudio -no-boot-anim -no-snapshot -gpu swiftshader_indirect >"$RUNNER_TEMP/playback-emulator.log" 2>&1 &
+          trap 'adb emu kill >/dev/null 2>&1 || true' EXIT
+          timeout 180s adb wait-for-device
+          for _ in $(seq 1 120); do
+            [[ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == "1" ]] && break
+            sleep 2
+          done
+          [[ "$(adb shell getprop sys.boot_completed | tr -d '\r')" == "1" ]]
+
+          adb install -r "$RUNNER_TEMP/benchmark-app.apk"
+          adb install -r "$RUNNER_TEMP/benchmark-receiver.apk"
+          adb install -r -t "$RUNNER_TEMP/benchmark-test.apk"
+          adb logcat -c
+          adb shell am instrument -w \
+            -e class com.shaterguy.fc2weeklyranker.media.ExternalPlaybackBenchmarkInstrumentedTest \
+            com.shaterguy.fc2weeklyranker.dev.test/androidx.test.runner.AndroidJUnitRunner \
+            | tee "$RUNNER_TEMP/external-playback-instrumentation.txt"
+          grep -Fq 'OK (1 test)' "$RUNNER_TEMP/external-playback-instrumentation.txt"
+
+          adb exec-out run-as com.shaterguy.fc2weeklyranker.dev cat files/external-playback-benchmark.json \
+            | tee "$RUNNER_TEMP/external-playback-benchmark.json"
+          python3 - "$RUNNER_TEMP/external-playback-benchmark.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+          data = json.loads(Path(sys.argv[1]).read_text())
+          assert data["schema"] == "fc2-external-playback-benchmark-v1"
+          assert data["repetitions"] == 3
+          for path in ("direct", "proxy"):
+              group = data[path]
+              assert len(group["runs"]) == 3
+              assert all(run["ok"] for run in group["runs"])
+              assert all(run["mediaErrorWhat"] == 0 for run in group["runs"])
+              assert all(run["completedSeeks"] == 3 for run in group["runs"])
+          assert data["longProxy"]["ok"]
+          assert data["longProxy"]["mediaErrorWhat"] == 0
+          assert data["longProxy"]["playedPositionMs"] >= 120000
+          print(json.dumps(data, separators=(",", ":"), sort_keys=True))
+          PY
+          adb logcat -d -s FC2PlaybackBench:I '*:S' > "$RUNNER_TEMP/external-playback-logcat.txt" || true
+      - name: Upload playback benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: external-playback-benchmark-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/external-playback-benchmark.json
+            ${{ runner.temp }}/external-playback-instrumentation.txt
+            ${{ runner.temp }}/external-playback-logcat.txt
+            ${{ runner.temp }}/playback-emulator.log
+          if-no-files-found: warn
+          retention-days: 14

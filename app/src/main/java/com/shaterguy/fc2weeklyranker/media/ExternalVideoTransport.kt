@@ -612,12 +612,24 @@ internal class SeekableExternalHttpResource(
         length: Long,
     ): ReadWindow {
         require(demandBytes > 0)
-        val learnedSegmentBytes = shortRangeSegmentBytes
-        if (learnedSegmentBytes != null) {
+        if (sequentialFallback != null) {
+            rangeReadAheadEnabled = false
+            shortRangeSegmentBytes = null
             return ReadWindow(
                 startOffset = cursor,
-                bytes = loadForegroundDemand(cursor, demandBytes, length, learnedSegmentBytes),
+                bytes = loadSequentialDemand(cursor, demandBytes, length),
                 cacheableFullChunk = false,
+            )
+        }
+
+        val learnedSegmentBytes = shortRangeSegmentBytes
+        if (learnedSegmentBytes != null) {
+            val bytes = loadForegroundDemand(cursor, demandBytes, length, learnedSegmentBytes)
+            val expectedFullChunk = min(chunkSize.toLong(), length - chunkStart).toInt()
+            return ReadWindow(
+                startOffset = cursor,
+                bytes = bytes,
+                cacheableFullChunk = cursor == chunkStart && bytes.size == expectedFullChunk,
             )
         }
 
@@ -661,7 +673,12 @@ internal class SeekableExternalHttpResource(
                     val segmentBytes = shortRangeSegmentBytes ?: MIN_PARALLEL_SEGMENT_BYTES
                     output.write(loadForegroundDemand(directStart, remaining, length, segmentBytes))
                 }
-                return ReadWindow(cursor, output.toByteArray(), cacheableFullChunk = false)
+                val bytes = output.toByteArray()
+                return ReadWindow(
+                    startOffset = cursor,
+                    bytes = bytes,
+                    cacheableFullChunk = cursor == chunkStart && bytes.size == requested,
+                )
             } catch (protocol: ExternalProtocolIOException) {
                 throw protocol
             } catch (io: IOException) {

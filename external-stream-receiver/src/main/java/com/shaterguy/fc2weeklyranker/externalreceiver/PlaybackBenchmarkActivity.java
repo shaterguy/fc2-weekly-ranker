@@ -112,7 +112,7 @@ public final class PlaybackBenchmarkActivity extends Activity implements Texture
             if (uri == null || !("content".equals(uri.getScheme()) || "https".equals(uri.getScheme()) || "http".equals(uri.getScheme()))) {
                 throw new IllegalArgumentException("invalid media URI");
             }
-            if (!("benchmark".equals(mode) || "long".equals(mode))) {
+            if (!("benchmark".equals(mode) || "long".equals(mode) || "deep-long".equals(mode))) {
                 throw new IllegalArgumentException("invalid benchmark mode");
             }
             failureStage = "await-surface";
@@ -222,9 +222,34 @@ public final class PlaybackBenchmarkActivity extends Activity implements Texture
                 result.playedPositionMs = Math.max(0, player.getCurrentPosition());
                 result.ok = result.completedSeeks == targets.length && mediaErrorWhat.get() == 0;
             } else {
-                failureStage = "long-playback";
+                if ("deep-long".equals(mode)) {
+                    failureStage = "deep-seek";
+                    int latestStart = Math.max(0, durationMs - (int) LONG_TARGET_MEDIA_MS - 5_000);
+                    int target = Math.min(
+                            Math.min(durationMs - 5_000, Math.max(10_000, durationMs * 2 / 3)),
+                            latestStart);
+                    long seekStartedAt = SystemClock.elapsedRealtime();
+                    CountDownLatch completed = new CountDownLatch(1);
+                    seekComplete.set(completed);
+                    player.seekTo(target, MediaPlayer.SEEK_CLOSEST);
+                    if (!completed.await(SEEK_TIMEOUT_MS, TimeUnit.MILLISECONDS) || mediaErrorWhat.get() != 0) {
+                        failureStage = "deep-seek-complete-timeout";
+                        return finishResult(result, player);
+                    }
+                    long frameAfterSeekComplete = frameCounter.get();
+                    if (!player.isPlaying()) player.start();
+                    if (!waitForFrameAfter(frameAfterSeekComplete, SEEK_TIMEOUT_MS)) {
+                        failureStage = "deep-seek-frame-timeout";
+                        return finishResult(result, player);
+                    }
+                    result.completedSeeks = 1;
+                    result.seekResumeMs = Math.max(0L, lastFrameAtMs.get() - seekStartedAt);
+                }
+
+                failureStage = "deep-long".equals(mode) ? "deep-long-playback" : "long-playback";
                 int startPosition = Math.max(0, player.getCurrentPosition());
-                int targetPosition = startPosition + (int) LONG_TARGET_MEDIA_MS;
+                int targetPosition = Math.min(durationMs - 1_000, startPosition + (int) LONG_TARGET_MEDIA_MS);
+                long requiredSpanMs = targetPosition - startPosition;
                 long deadline = SystemClock.elapsedRealtime() + LONG_TIMEOUT_MS;
                 int lastPosition = startPosition;
                 long lastProgressAt = SystemClock.elapsedRealtime();
@@ -244,14 +269,18 @@ public final class PlaybackBenchmarkActivity extends Activity implements Texture
                             result.inStall = true;
                         }
                     }
-                    if (position > lastPosition || now - lastProgressAt < STALL_THRESHOLD_MS) result.inStall = false;
-                    if (position >= targetPosition) {
+                    if (now - lastProgressAt < STALL_THRESHOLD_MS) result.inStall = false;
+                    if (position >= targetPosition && requiredSpanMs >= LONG_TARGET_MEDIA_MS - 1_000L) {
                         result.ok = true;
                         break;
                     }
                     SystemClock.sleep(200L);
                 }
-                if (!result.ok) failureStage = mediaErrorWhat.get() == 0 ? "long-playback-timeout" : "long-playback-media-error";
+                if (!result.ok) {
+                    failureStage = mediaErrorWhat.get() == 0
+                            ? ("deep-long".equals(mode) ? "deep-long-playback-timeout" : "long-playback-timeout")
+                            : ("deep-long".equals(mode) ? "deep-long-playback-media-error" : "long-playback-media-error");
+                }
             }
             return finishResult(result, player);
         } finally {

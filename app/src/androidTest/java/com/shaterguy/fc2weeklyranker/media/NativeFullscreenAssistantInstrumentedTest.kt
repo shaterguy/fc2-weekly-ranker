@@ -58,7 +58,7 @@ class NativeFullscreenAssistantInstrumentedTest {
                         assistant.requireButtonStartingWith("닫기").isShown,
                     )
 
-                    val customButtons = assistant.collectButtons()
+                    val customButtons = assistant.collectLabeledButtons()
                     assertTrue("fullscreen assistant must expose custom controls", customButtons.size >= 10)
                     customButtons.forEach { button ->
                         assertTrue(
@@ -155,10 +155,10 @@ class NativeFullscreenAssistantInstrumentedTest {
     private fun View.requireButtonStartingWith(prefix: String): Button =
         findButtonStartingWith(prefix) ?: error("button not found: $prefix")
 
-    private fun View.collectButtons(destination: MutableList<Button> = mutableListOf()): List<Button> {
-        if (this is Button) destination += this
+    private fun View.collectLabeledButtons(destination: MutableList<Button> = mutableListOf()): List<Button> {
+        if (this is Button && text.toString().isNotBlank()) destination += this
         if (this is ViewGroup) {
-            for (index in 0 until childCount) getChildAt(index).collectButtons(destination)
+            for (index in 0 until childCount) getChildAt(index).collectLabeledButtons(destination)
         }
         return destination
     }

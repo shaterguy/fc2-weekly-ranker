@@ -11,13 +11,30 @@ permissions:
   contents: read
   actions: read
 
+env:
+  TARGET_SOURCE_SHA: 70572475abde675c65ffeb2f2db4665702f8b653
+
 jobs:
   benchmark:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
-      - name: Checkout
+      - name: Checkout pinned product source
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ env.TARGET_SOURCE_SHA }}
+          fetch-depth: 1
+      - name: Assert diagnostic source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          ACTUAL_SOURCE_SHA="$(git rev-parse HEAD)"
+          {
+            echo "trigger_sha=${GITHUB_SHA}"
+            echo "target_source_sha=${TARGET_SOURCE_SHA}"
+            echo "tested_source_sha=${ACTUAL_SOURCE_SHA}"
+          } | tee "$RUNNER_TEMP/source-identity.txt"
+          test "$ACTUAL_SOURCE_SHA" = "$TARGET_SOURCE_SHA"
       - name: Set up JDK 17
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
         with:
@@ -71,6 +88,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          DIAG="$RUNNER_TEMP/install-diagnostic.txt"
           export ANDROID_AVD_HOME="$RUNNER_TEMP/android-avd"
           mkdir -p "$ANDROID_AVD_HOME"
           AVD_NAME=fc2-playback-benchmark
@@ -85,9 +103,52 @@ jobs:
           done
           [[ "$(adb shell getprop sys.boot_completed | tr -d '\r')" == "1" ]]
 
-          adb install -r "$RUNNER_TEMP/benchmark-app.apk"
-          adb install -r "$RUNNER_TEMP/benchmark-receiver.apk"
-          adb install -r -t "$RUNNER_TEMP/benchmark-test.apk"
+          {
+            echo "=== pre-install device state ==="
+            date -u +%FT%TZ
+            adb version
+            adb devices -l
+            adb shell getprop ro.build.version.release
+            adb shell getprop ro.build.version.sdk
+            adb shell getprop sys.boot_completed
+            adb shell 'df -h /data 2>/dev/null || df /data'
+            adb shell 'cmd package list packages 2>/dev/null | wc -l || true'
+            adb shell 'ps -A | grep -E "package|installd" || true'
+          } 2>&1 | tee "$DIAG"
+
+          install_one() {
+            local label="$1"
+            shift
+            echo "=== install ${label}: adb install --no-streaming $* ===" | tee -a "$DIAG"
+            adb logcat -c || true
+            set +e
+            timeout 120s adb install --no-streaming "$@" 2>&1 | tee -a "$DIAG"
+            local rc=${PIPESTATUS[0]}
+            set -e
+            echo "install_${label}_rc=${rc}" | tee -a "$DIAG"
+            if [[ "$rc" -ne 0 ]]; then
+              {
+                echo "=== ${label} failure state ==="
+                date -u +%FT%TZ
+                adb devices -l || true
+                adb shell 'df -h /data 2>/dev/null || df /data' || true
+                adb shell 'ps -A | grep -E "package|installd" || true' || true
+                adb shell dumpsys package 2>/dev/null | tail -n 300 || true
+                adb logcat -d -v threadtime -t 500 || true
+              } >> "$DIAG" 2>&1
+              return "$rc"
+            fi
+          }
+
+          install_one app -r "$RUNNER_TEMP/benchmark-app.apk"
+          install_one receiver -r "$RUNNER_TEMP/benchmark-receiver.apk"
+          install_one test -r -t "$RUNNER_TEMP/benchmark-test.apk"
+          {
+            echo "=== post-install package state ==="
+            adb shell pm path com.shaterguy.fc2weeklyranker.dev || true
+            adb shell pm path com.shaterguy.fc2weeklyranker.dev.test || true
+          } 2>&1 | tee -a "$DIAG"
+
           adb logcat -c
           adb shell am instrument -w \
             -e class com.shaterguy.fc2weeklyranker.media.ExternalPlaybackBenchmarkInstrumentedTest \
@@ -122,6 +183,8 @@ jobs:
         with:
           name: external-playback-benchmark-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
+            ${{ runner.temp }}/source-identity.txt
+            ${{ runner.temp }}/install-diagnostic.txt
             ${{ runner.temp }}/external-playback-benchmark.json
             ${{ runner.temp }}/external-playback-instrumentation.txt
             ${{ runner.temp }}/external-playback-logcat.txt

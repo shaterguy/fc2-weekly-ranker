@@ -79,7 +79,19 @@ internal class NativeFullscreenAssistantView(
 
     private val playerListener = object : Player.Listener {
         override fun onIsPlayingChanged(isPlaying: Boolean) {
-            if (isPlaying) scheduleAutoHide() else if (!pictureInPicture && !interactionLocked) showControls()
+            if (isPlaying) {
+                scheduleAutoHide()
+            } else if (
+                nativeFullscreenShouldShowControlsOnPlaybackChange(
+                    isPlaying = isPlaying,
+                    playWhenReady = player.playWhenReady,
+                    playbackEnded = player.playbackState == Player.STATE_ENDED,
+                    pictureInPicture = pictureInPicture,
+                    interactionLocked = interactionLocked,
+                )
+            ) {
+                showControls()
+            }
         }
     }
 
@@ -90,6 +102,7 @@ internal class NativeFullscreenAssistantView(
         playerView.apply {
             useController = true
             setControllerShowTimeoutMs(CONTROL_TIMEOUT_MS.toInt())
+            setControllerAutoShow(false)
             resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
         }
         addView(playerView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
@@ -102,6 +115,7 @@ internal class NativeFullscreenAssistantView(
             sensitivityProvider = { sensitivity.factor },
             onSingleTap = { toggleControls() },
             onOsd = { message, persistent -> showOsd(message, persistent) },
+            onHideOsd = { hideOsdImmediately() },
         )
         addView(
             gestureView,
@@ -291,6 +305,11 @@ internal class NativeFullscreenAssistantView(
 
     private val hideOsd = Runnable { osd.visibility = View.GONE }
 
+    private fun hideOsdImmediately() {
+        osd.removeCallbacks(hideOsd)
+        osd.visibility = View.GONE
+    }
+
     private fun setInteractionLocked(locked: Boolean) {
         interactionLocked = locked
         gestureView.interactionLocked = locked
@@ -464,6 +483,7 @@ private class NativeFullscreenGestureView(
     private val sensitivityProvider: () -> Float,
     private val onSingleTap: () -> Unit,
     private val onOsd: (String, Boolean) -> Unit,
+    private val onHideOsd: () -> Unit,
 ) : View(context) {
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
     private val classifier = NativeFullscreenGestureClassifier(touchSlop)
@@ -544,18 +564,18 @@ private class NativeFullscreenGestureView(
                 val mode = classifier.mode
                 if (mode == NativeGestureMode.NONE) {
                     gestureDetector.onTouchEvent(event)
-                } else if (mode == NativeGestureMode.HORIZONTAL &&
-                    player.isCommandAvailable(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)
-                ) {
-                    updateSeekPreview(event.x)
-                    player.seekTo(previewTargetMs)
-                    val duration = if (player.duration > 0L) nativeFullscreenFormatTime(player.duration) else "--:--"
-                    onOsd("이동 ${nativeFullscreenFormatTime(previewTargetMs)} / $duration", false)
+                } else if (mode == NativeGestureMode.HORIZONTAL) {
+                    if (player.isCommandAvailable(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)) {
+                        updateSeekPreview(event.x)
+                        player.seekTo(previewTargetMs)
+                    }
+                    onHideOsd()
                 }
                 classifier.reset()
             }
 
             MotionEvent.ACTION_CANCEL -> {
+                if (classifier.mode != NativeGestureMode.NONE) onHideOsd()
                 classifier.reset()
             }
         }
@@ -563,6 +583,7 @@ private class NativeFullscreenGestureView(
     }
 
     fun cancelInteraction() {
+        if (classifier.mode != NativeGestureMode.NONE) onHideOsd()
         classifier.reset()
     }
 

@@ -79,6 +79,18 @@ internal fun nativeFullscreenShouldAutoHide(
     pictureInPicture: Boolean,
 ): Boolean = isPlaying && controlsVisible && !interactionLocked && !pictureInPicture
 
+internal fun nativeFullscreenShouldShowControlsOnPlaybackChange(
+    isPlaying: Boolean,
+    playWhenReady: Boolean,
+    playbackEnded: Boolean,
+    pictureInPicture: Boolean,
+    interactionLocked: Boolean,
+): Boolean =
+    !isPlaying &&
+        !pictureInPicture &&
+        !interactionLocked &&
+        (!playWhenReady || playbackEnded)
+
 internal fun nativeFullscreenToggleOrientationLock(currentLocked: Boolean): Boolean = !currentLocked
 
 internal fun nativeFullscreenSeekSpanMs(durationMs: Long, sensitivityFactor: Float): Long {
@@ -133,10 +145,12 @@ internal fun nativeFullscreenSeekPreviewText(
     targetMs: Long,
     durationMs: Long,
 ): String {
-    val signedSeconds = deltaMs / 1_000L
-    val sign = if (signedSeconds > 0L) "+" else ""
-    val duration = if (durationMs > 0L) nativeFullscreenFormatTime(durationMs) else "--:--"
-    return "탐색 $sign${signedSeconds}초  ${nativeFullscreenFormatTime(targetMs)} / $duration"
+    val seconds = abs(deltaMs) / 1_000L
+    return when {
+        deltaMs > 0L -> "앞으로 ${seconds}초"
+        deltaMs < 0L -> "뒤로 ${seconds}초"
+        else -> "이동 0초"
+    }
 }
 
 internal fun nativeFullscreenVerticalFraction(

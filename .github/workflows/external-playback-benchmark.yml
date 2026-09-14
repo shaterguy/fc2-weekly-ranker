@@ -113,6 +113,10 @@ jobs:
           assert data["longProxy"]["ok"]
           assert data["longProxy"]["mediaErrorWhat"] == 0
           assert data["longProxy"]["playedPositionMs"] >= 120000
+          assert data["deepLongProxy"]["ok"]
+          assert data["deepLongProxy"]["mediaErrorWhat"] == 0
+          assert data["deepLongProxy"]["completedSeeks"] == 1
+          assert data["deepLongProxy"]["stallCount"] == 0
           print(json.dumps(data, separators=(",", ":"), sort_keys=True))
           PY
           adb logcat -d -s FC2PlaybackBench:I '*:S' > "$RUNNER_TEMP/external-playback-logcat.txt" || true

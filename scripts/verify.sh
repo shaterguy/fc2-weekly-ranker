@@ -18,6 +18,12 @@ fi
 if [[ -f scripts/verify_dev24_to_dev26_update.sh ]]; then
   bash -n scripts/verify_dev24_to_dev26_update.sh
 fi
+if [[ -f scripts/verify_dev26_to_dev27_update.sh ]]; then
+  bash -n scripts/verify_dev26_to_dev27_update.sh
+fi
+if [[ -f scripts/verify_dev27_to_dev28_update.sh ]]; then
+  bash -n scripts/verify_dev27_to_dev28_update.sh
+fi
 
 MAIN='app/src/main/java/com/shaterguy/fc2weeklyranker/MainActivity.kt'
 LAUNCHER='app/src/main/java/com/shaterguy/fc2weeklyranker/media/ExternalVideoPlayerLauncher.kt'

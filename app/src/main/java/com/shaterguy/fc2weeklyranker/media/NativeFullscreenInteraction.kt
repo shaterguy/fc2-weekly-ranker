@@ -1,5 +1,6 @@
 package com.shaterguy.fc2weeklyranker.media
 
+import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 
@@ -29,6 +30,56 @@ internal enum class NativeAspectMode(val label: String) {
 
     fun next(): NativeAspectMode = entries[(ordinal + 1) % entries.size]
 }
+
+internal enum class NativeGestureMode {
+    NONE,
+    HORIZONTAL,
+    BRIGHTNESS,
+    VOLUME,
+}
+
+internal class NativeFullscreenGestureClassifier(
+    private val touchSlopPx: Int,
+) {
+    var mode: NativeGestureMode = NativeGestureMode.NONE
+        private set
+
+    fun reset() {
+        mode = NativeGestureMode.NONE
+    }
+
+    fun update(
+        deltaX: Float,
+        deltaY: Float,
+        downX: Float,
+        widthPx: Int,
+    ): NativeGestureMode {
+        if (mode != NativeGestureMode.NONE) return mode
+        if (abs(deltaX) <= touchSlopPx && abs(deltaY) <= touchSlopPx) return mode
+        mode = if (abs(deltaX) > abs(deltaY)) {
+            NativeGestureMode.HORIZONTAL
+        } else if (downX < widthPx / 2f) {
+            NativeGestureMode.BRIGHTNESS
+        } else {
+            NativeGestureMode.VOLUME
+        }
+        return mode
+    }
+}
+
+internal fun nativeFullscreenGestureInputAllowed(
+    interactionLocked: Boolean,
+    enabled: Boolean,
+): Boolean = !interactionLocked && enabled
+
+internal fun nativeFullscreenShouldAutoHide(
+    isPlaying: Boolean,
+    controlsVisible: Boolean,
+    interactionLocked: Boolean,
+    pictureInPicture: Boolean,
+): Boolean = isPlaying && controlsVisible && !interactionLocked && !pictureInPicture
+
+internal fun nativeFullscreenToggleOrientationLock(currentLocked: Boolean): Boolean = !currentLocked
 
 internal fun nativeFullscreenSeekSpanMs(durationMs: Long, sensitivityFactor: Float): Long {
     val base = if (durationMs > 0L) {
@@ -63,6 +114,29 @@ internal fun nativeFullscreenSeekTargetMs(
         else -> startPositionMs + deltaMs
     }.coerceAtLeast(0L)
     return if (durationMs > 0L) target.coerceAtMost(durationMs) else target
+}
+
+internal fun nativeFullscreenFormatTime(positionMs: Long): String {
+    val totalSeconds = positionMs.coerceAtLeast(0L) / 1_000L
+    val hours = totalSeconds / 3_600L
+    val minutes = (totalSeconds % 3_600L) / 60L
+    val seconds = totalSeconds % 60L
+    return if (hours > 0L) {
+        "%d:%02d:%02d".format(hours, minutes, seconds)
+    } else {
+        "%02d:%02d".format(minutes, seconds)
+    }
+}
+
+internal fun nativeFullscreenSeekPreviewText(
+    deltaMs: Long,
+    targetMs: Long,
+    durationMs: Long,
+): String {
+    val signedSeconds = deltaMs / 1_000L
+    val sign = if (signedSeconds > 0L) "+" else ""
+    val duration = if (durationMs > 0L) nativeFullscreenFormatTime(durationMs) else "--:--"
+    return "탐색 $sign${signedSeconds}초  ${nativeFullscreenFormatTime(targetMs)} / $duration"
 }
 
 internal fun nativeFullscreenVerticalFraction(

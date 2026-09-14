@@ -44,29 +44,29 @@ class NativeFullscreenAssistantInstrumentedTest {
                     assertSame("compact view must own the production player before fullscreen", player, compact.player)
 
                     controller.openFullscreen(video, autoPlay = false)
-                    val assistant = activity.window.decorView.findFirstView<NativeFullscreenAssistantView>()
+                    val assistant = activity.window.decorView.findFirstView(NativeFullscreenAssistantView::class.java)
                     assertNotNull("fullscreen assistant overlay was not attached", assistant)
                     assistant!!
                     assertSame("fullscreen must reuse the compact ExoPlayer instance", player, assistant.playerView.player)
                     assertNull("compact target must detach while fullscreen owns the player", compact.player)
 
-                    assistant.findButtonStartingWith("속도 ").performClick()
+                    assistant.requireButtonStartingWith("속도 ").performClick()
                     assertEquals(1.25f, player.playbackParameters.speed, 0.0001f)
 
-                    assistant.findButtonStartingWith("화면 맞춤").performClick()
+                    assistant.requireButtonStartingWith("화면 맞춤").performClick()
                     assertEquals(AspectRatioFrameLayout.RESIZE_MODE_ZOOM, assistant.playerView.resizeMode)
 
-                    val sensitivityBefore = assistant.findButtonStartingWith("감도 ").text.toString()
-                    assistant.findButtonStartingWith("감도 ").performClick()
-                    val sensitivityAfter = assistant.findButtonStartingWith("감도 ").text.toString()
+                    val sensitivityBefore = assistant.requireButtonStartingWith("감도 ").text.toString()
+                    assistant.requireButtonStartingWith("감도 ").performClick()
+                    val sensitivityAfter = assistant.requireButtonStartingWith("감도 ").text.toString()
                     assertTrue("sensitivity control must advance to another persisted mode", sensitivityAfter != sensitivityBefore)
 
-                    assistant.findButtonStartingWith("화면 잠금").performClick()
+                    assistant.requireButtonStartingWith("화면 잠금").performClick()
                     assertTrue("screen lock must enter locked interaction state", assistant.interactionLocked)
-                    assistant.findButtonStartingWith("화면 잠금 해제").performClick()
+                    assistant.requireButtonStartingWith("화면 잠금 해제").performClick()
                     assertFalse("unlock control must restore interaction", assistant.interactionLocked)
 
-                    assistant.findButtonStartingWith("닫기").performClick()
+                    assistant.requireButtonStartingWith("닫기").performClick()
                     assertNull("fullscreen overlay must detach on close", assistant.parent)
                     assertSame("closing fullscreen must return the same player to compact view", player, compact.player)
                 } finally {
@@ -77,28 +77,26 @@ class NativeFullscreenAssistantInstrumentedTest {
         }
     }
 
-    private inline fun <reified T : View> View.findFirstView(): T? {
-        if (this is T) return this
+    private fun <T : View> View.findFirstView(type: Class<T>): T? {
+        if (type.isInstance(this)) return type.cast(this)
         if (this !is ViewGroup) return null
         for (index in 0 until childCount) {
-            getChildAt(index).findFirstView<T>()?.let { return it }
+            getChildAt(index).findFirstView(type)?.let { return it }
         }
         return null
     }
 
-    private fun View.findButtonStartingWith(prefix: String): Button {
-        val match = when (this) {
-            is Button -> takeIf { it.text.toString().startsWith(prefix) }
-            else -> null
+    private fun View.findButtonStartingWith(prefix: String): Button? {
+        if (this is Button && text.toString().startsWith(prefix)) return this
+        if (this !is ViewGroup) return null
+        for (index in 0 until childCount) {
+            getChildAt(index).findButtonStartingWith(prefix)?.let { return it }
         }
-        if (match != null) return match
-        if (this is ViewGroup) {
-            for (index in 0 until childCount) {
-                runCatching { return getChildAt(index).findButtonStartingWith(prefix) }
-            }
-        }
-        error("button not found: $prefix")
+        return null
     }
+
+    private fun View.requireButtonStartingWith(prefix: String): Button =
+        findButtonStartingWith(prefix) ?: error("button not found: $prefix")
 
     companion object {
         private const val DECODER_MEDIA_URL =

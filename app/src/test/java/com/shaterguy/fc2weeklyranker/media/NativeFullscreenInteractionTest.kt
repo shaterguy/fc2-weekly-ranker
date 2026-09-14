@@ -69,7 +69,6 @@ class NativeFullscreenInteractionTest {
         "nativeFullscreenVolumeLevel",
         java.lang.Integer.TYPE,
         java.lang.Integer.TYPE,
-        java.lang.Integer.TYPE,
         java.lang.Float.TYPE,
         java.lang.Integer.TYPE,
         java.lang.Float.TYPE,
@@ -103,14 +102,18 @@ class NativeFullscreenInteractionTest {
     }
 
     @Test
-    fun `seek preview includes direction delta target and total duration`() {
+    fun `seek preview only shows direction and delta seconds`() {
         assertEquals(
-            "탐색 +30초  02:00 / 10:00",
+            "앞으로 30초",
             nativeFullscreenSeekPreviewText(30_000L, 120_000L, 600_000L),
         )
         assertEquals(
-            "탐색 -10초  00:05 / --:--",
+            "뒤로 10초",
             nativeFullscreenSeekPreviewText(-10_000L, 5_000L, -1L),
+        )
+        assertEquals(
+            "이동 0초",
+            nativeFullscreenSeekPreviewText(0L, 5_000L, 60_000L),
         )
     }
 
@@ -202,6 +205,40 @@ class NativeFullscreenInteractionTest {
         assertFalse(nativeFullscreenShouldAutoHide(true, false, false, false))
         assertFalse(nativeFullscreenShouldAutoHide(true, true, true, false))
         assertFalse(nativeFullscreenShouldAutoHide(true, true, false, true))
+    }
+
+    @Test
+    fun `seek buffering keeps controls hidden while explicit pause and ended can show them`() {
+        assertFalse(
+            nativeFullscreenShouldShowControlsOnPlaybackChange(
+                isPlaying = false,
+                playWhenReady = true,
+                playbackEnded = false,
+                pictureInPicture = false,
+                interactionLocked = false,
+            ),
+        )
+        assertTrue(
+            nativeFullscreenShouldShowControlsOnPlaybackChange(
+                isPlaying = false,
+                playWhenReady = false,
+                playbackEnded = false,
+                pictureInPicture = false,
+                interactionLocked = false,
+            ),
+        )
+        assertTrue(
+            nativeFullscreenShouldShowControlsOnPlaybackChange(
+                isPlaying = false,
+                playWhenReady = true,
+                playbackEnded = true,
+                pictureInPicture = false,
+                interactionLocked = false,
+            ),
+        )
+        assertFalse(nativeFullscreenShouldShowControlsOnPlaybackChange(false, false, false, true, false))
+        assertFalse(nativeFullscreenShouldShowControlsOnPlaybackChange(false, false, false, false, true))
+        assertFalse(nativeFullscreenShouldShowControlsOnPlaybackChange(true, false, false, false, false))
     }
 
     @Test

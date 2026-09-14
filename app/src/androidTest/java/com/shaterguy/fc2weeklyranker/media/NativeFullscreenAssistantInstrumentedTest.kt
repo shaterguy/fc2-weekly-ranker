@@ -52,6 +52,10 @@ class NativeFullscreenAssistantInstrumentedTest {
                     assertNotNull("fullscreen assistant overlay was not attached", assistant)
                     assistant!!
                     assertSame("fullscreen must reuse the compact ExoPlayer instance", player, assistant.playerView.player)
+                    assertFalse(
+                        "fullscreen PlayerView must not auto-show controls on seek or buffering state changes",
+                        assistant.playerView.controllerAutoShow,
+                    )
                     assertNull("compact target must detach while fullscreen owns the player", compact.player)
                     assertTrue(
                         "paused fullscreen must keep primary controls available",

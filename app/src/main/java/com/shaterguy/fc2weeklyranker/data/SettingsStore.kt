@@ -17,6 +17,8 @@ class SettingsStore(context: Context, private val clockMillis: () -> Long = { Sy
     val anchorEpochMillis: Flow<Long?> = dataStore.data.map { it[ANCHOR] }
     val baseUrl: Flow<String> = dataStore.data.map { it[BASE_URL] ?: DEFAULT_BASE_URL }
     val visitedPostIds: Flow<Set<String>> = dataStore.data.map { it[VISITED_POST_IDS].orEmpty() }
+    val fullscreenGestureSensitivity: Flow<String> =
+        dataStore.data.map { it[FULLSCREEN_GESTURE_SENSITIVITY] ?: DEFAULT_FULLSCREEN_GESTURE_SENSITIVITY }
 
     suspend fun ensureAnchor(): Long {
         var chosen = 0L
@@ -51,6 +53,10 @@ class SettingsStore(context: Context, private val clockMillis: () -> Long = { Sy
 
     suspend fun setBaseUrl(normalizedBaseUrl: String) { dataStore.edit { it[BASE_URL] = normalizedBaseUrl } }
 
+    suspend fun setFullscreenGestureSensitivity(value: String) {
+        dataStore.edit { it[FULLSCREEN_GESTURE_SENSITIVITY] = value }
+    }
+
     suspend fun isRankingWindowCovered(key: String): Boolean =
         dataStore.data.first()[RANKING_COVERED_WINDOWS].orEmpty().contains(key)
 
@@ -68,9 +74,11 @@ class SettingsStore(context: Context, private val clockMillis: () -> Long = { Sy
 
     companion object {
         const val DEFAULT_BASE_URL = "https://01.avsee.is"
+        const val DEFAULT_FULLSCREEN_GESTURE_SENSITIVITY = "NORMAL"
         private val ANCHOR = longPreferencesKey("anchor_epoch_millis")
         private val BASE_URL = stringPreferencesKey("base_url")
         private val VISITED_POST_IDS = stringSetPreferencesKey("visited_post_ids")
         private val RANKING_COVERED_WINDOWS = stringSetPreferencesKey("ranking_covered_windows_v1")
+        private val FULLSCREEN_GESTURE_SENSITIVITY = stringPreferencesKey("fullscreen_gesture_sensitivity")
     }
 }

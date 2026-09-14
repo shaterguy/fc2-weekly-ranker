@@ -1,20 +1,20 @@
 package com.shaterguy.fc2weeklyranker.media
 
-import android.annotation.SuppressLint
 import android.app.Activity
-import android.app.Dialog
+import android.app.PictureInPictureParams
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
 import android.os.Build
-import android.view.MotionEvent
+import android.util.Rational
 import android.view.View
-import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.webkit.CookieManager
-import android.widget.FrameLayout
+import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
 import androidx.annotation.OptIn
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -33,8 +33,14 @@ import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
+import com.shaterguy.fc2weeklyranker.data.SettingsStore
 import com.shaterguy.fc2weeklyranker.data.VideoEntity
-import kotlin.math.abs
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
 
 internal data class NativeFullscreenIdentity(
     val sessionId: Long,
@@ -83,17 +89,31 @@ internal class NativeVideoSessionController(
     private data class ActiveSession(
         val identity: NativeFullscreenIdentity,
         val player: ExoPlayer,
-        val dialog: Dialog,
+        val assistant: NativeFullscreenAssistantView,
         val fullscreenView: PlayerView,
         val orientationListener: Player.Listener,
         val previousOrientation: Int?,
+        val previousBrightness: Float?,
+        val backCallback: OnBackPressedCallback?,
     )
 
     private val gate = NativeFullscreenSessionGate()
     private val compactHandles = linkedMapOf<String, CompactHandle>()
     private val resumeStates = linkedMapOf<String, NativePlaybackResume>()
+    private val settingsStore = SettingsStore(context.applicationContext)
+    private val controllerScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var gestureSensitivity = NativeGestureSensitivity.NORMAL
     private var activeSession: ActiveSession? = null
     private var released = false
+
+    init {
+        controllerScope.launch {
+            settingsStore.fullscreenGestureSensitivity.collectLatest { stored ->
+                gestureSensitivity = NativeGestureSensitivity.fromStored(stored)
+                activeSession?.assistant?.updateSensitivity(gestureSensitivity)
+            }
+        }
+    }
 
     internal fun obtainPlayer(video: VideoEntity): ExoPlayer {
         check(!released) { "NativeVideoSessionController is already released" }
@@ -135,6 +155,7 @@ internal class NativeVideoSessionController(
 
     internal fun openFullscreen(video: VideoEntity, autoPlay: Boolean) {
         if (released) return
+        val hostActivity = activity ?: return
         val current = activeSession
         if (current != null) {
             if (current.identity.videoId == video.id && autoPlay) current.player.play()
@@ -145,44 +166,77 @@ internal class NativeVideoSessionController(
         val compactHandle = compactHandles[video.id]
         val player = compactHandle?.player ?: obtainPlayer(video)
         val playerCreatedForSession = compactHandle == null
-        val previousOrientation = activity?.requestedOrientation
+        val previousOrientation = hostActivity.requestedOrientation
+        val previousBrightness = hostActivity.window.attributes.screenBrightness
+
         val fullscreenView = PlayerView(context).apply {
             useController = true
             contentDescription = "내장플레이어 전체화면 ${video.ordinal + 1}"
         }
-        val fullscreenContainer = NativeFullscreenSeekContainer(context, player).apply {
-            addView(
-                fullscreenView,
-                ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT),
-            )
-        }
+        lateinit var assistant: NativeFullscreenAssistantView
         val orientationListener = object : Player.Listener {
             override fun onVideoSizeChanged(videoSize: VideoSize) {
-                if (gate.isCurrent(identity)) activity?.applyNativeVideoOrientation(videoSize)
+                if (gate.isCurrent(identity) && !assistant.orientationLocked) {
+                    hostActivity.applyNativeVideoOrientation(videoSize)
+                }
             }
         }
-        val dialog = Dialog(context, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
+        val backCallback = (hostActivity as? ComponentActivity)?.let { componentActivity ->
+            object : OnBackPressedCallback(true) {
+                override fun handleOnBackPressed() {
+                    val session = activeSession
+                    if (session?.identity != identity) return
+                    if (session.assistant.interactionLocked) {
+                        session.assistant.showOsd("화면 잠금을 먼저 해제하세요", false)
+                    } else {
+                        finishFullscreen(identity)
+                    }
+                }
+            }.also { componentActivity.onBackPressedDispatcher.addCallback(it) }
+        }
+
+        assistant = NativeFullscreenAssistantView(
+            context = context,
+            activity = hostActivity,
+            player = player,
+            playerView = fullscreenView,
+            initialSensitivity = gestureSensitivity,
+            onClose = { finishFullscreen(identity) },
+            onPictureInPicture = { enterPictureInPicture(identity) },
+            onSensitivityChanged = { value ->
+                gestureSensitivity = value
+                controllerScope.launch { settingsStore.setFullscreenGestureSensitivity(value.name) }
+            },
+            onOrientationLockChanged = { locked ->
+                if (gate.isCurrent(identity)) {
+                    if (locked) {
+                        hostActivity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LOCKED
+                    } else {
+                        hostActivity.applyNativeVideoOrientation(player.videoSize)
+                    }
+                }
+            },
+        )
+
         val session = ActiveSession(
             identity = identity,
             player = player,
-            dialog = dialog,
+            assistant = assistant,
             fullscreenView = fullscreenView,
             orientationListener = orientationListener,
             previousOrientation = previousOrientation,
+            previousBrightness = previousBrightness,
+            backCallback = backCallback,
         )
         activeSession = session
 
-        dialog.setContentView(
-            fullscreenContainer,
-            ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT),
-        )
-        fullscreenView.setFullscreenButtonClickListener { isFullscreen ->
-            if (!isFullscreen) dialog.dismiss()
-        }
-        dialog.setOnShowListener {
-            if (!gate.isCurrent(identity)) return@setOnShowListener
+        runCatching {
+            hostActivity.addContentView(
+                assistant,
+                ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT),
+            )
             player.addListener(orientationListener)
-            activity?.applyNativeVideoOrientation(player.videoSize)
+            hostActivity.applyNativeVideoOrientation(player.videoSize)
             val latestCompact = compactHandles[video.id]?.takeIf { it.player === player }
             if (latestCompact != null) {
                 PlayerView.switchTargetView(player, latestCompact.view, fullscreenView)
@@ -190,27 +244,61 @@ internal class NativeVideoSessionController(
             } else {
                 fullscreenView.player = player
             }
+            fullscreenView.setFullscreenButtonClickListener { isFullscreen ->
+                if (!isFullscreen && !assistant.interactionLocked) finishFullscreen(identity)
+            }
             fullscreenView.setFullscreenButtonState(true)
             if (autoPlay) player.play()
-            hideNativeVideoSystemBars(dialog)
-        }
-        dialog.setOnDismissListener { finishFullscreen(identity) }
-
-        runCatching { dialog.show() }.onFailure {
-            dialog.setOnDismissListener(null)
+            hideNativeVideoSystemBars(hostActivity)
+        }.onFailure {
+            player.removeListener(orientationListener)
+            backCallback?.remove()
+            (assistant.parent as? ViewGroup)?.removeView(assistant)
             activeSession = null
             gate.finish(identity)
+            restoreFullscreenWindowState(hostActivity, previousOrientation, previousBrightness)
             if (playerCreatedForSession) player.release()
             throw it
+        }
+    }
+
+    private fun enterPictureInPicture(identity: NativeFullscreenIdentity) {
+        val session = activeSession ?: return
+        val hostActivity = activity ?: return
+        if (!gate.isCurrent(identity) || session.identity != identity) return
+        if (!hostActivity.packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)) {
+            session.assistant.showOsd("PiP를 지원하지 않는 기기입니다", false)
+            return
+        }
+
+        val builder = PictureInPictureParams.Builder()
+        val size = session.player.videoSize
+        if (size.width > 0 && size.height > 0) {
+            val ratio = size.width.toDouble() / size.height.toDouble()
+            if (ratio in (1.0 / 2.39)..2.39) {
+                builder.setAspectRatio(Rational(size.width, size.height))
+            }
+        }
+        val entered = runCatching { hostActivity.enterPictureInPictureMode(builder.build()) }.getOrDefault(false)
+        if (entered) {
+            session.assistant.setPictureInPictureMode(true)
+        } else {
+            session.assistant.showOsd("PiP 전환에 실패했습니다", false)
         }
     }
 
     private fun finishFullscreen(identity: NativeFullscreenIdentity) {
         val session = activeSession ?: return
         if (!gate.isCurrent(identity) || session.identity != identity) return
+        val hostActivity = activity
 
         session.player.removeListener(session.orientationListener)
-        session.previousOrientation?.let { previous -> activity?.requestedOrientation = previous }
+        session.backCallback?.remove()
+        session.assistant.dispose()
+        if (hostActivity != null) {
+            restoreFullscreenWindowState(hostActivity, session.previousOrientation, session.previousBrightness)
+            showNativeVideoSystemBars(hostActivity)
+        }
         resumeStates[identity.videoId] = session.player.resumeSnapshot()
 
         val compactHandle = compactHandles[identity.videoId]?.takeIf { it.player === session.player }
@@ -224,6 +312,7 @@ internal class NativeVideoSessionController(
             session.player.release()
         }
 
+        (session.assistant.parent as? ViewGroup)?.removeView(session.assistant)
         activeSession = null
         gate.finish(identity)
     }
@@ -231,13 +320,18 @@ internal class NativeVideoSessionController(
     internal fun release() {
         if (released) return
         released = true
+        controllerScope.cancel()
         val releasedPlayers = mutableSetOf<ExoPlayer>()
         activeSession?.let { session ->
-            session.dialog.setOnDismissListener(null)
             session.player.removeListener(session.orientationListener)
-            session.previousOrientation?.let { previous -> activity?.requestedOrientation = previous }
+            session.backCallback?.remove()
+            session.assistant.dispose()
+            activity?.let {
+                restoreFullscreenWindowState(it, session.previousOrientation, session.previousBrightness)
+                showNativeVideoSystemBars(it)
+            }
             session.fullscreenView.player = null
-            runCatching { session.dialog.dismiss() }
+            (session.assistant.parent as? ViewGroup)?.removeView(session.assistant)
             if (releasedPlayers.add(session.player)) session.player.release()
         }
         activeSession = null
@@ -339,81 +433,42 @@ private fun Activity.applyNativeVideoOrientation(videoSize: VideoSize) {
     if (requestedOrientation != requested) requestedOrientation = requested
 }
 
-@SuppressLint("ClickableViewAccessibility")
-private class NativeFullscreenSeekContainer(
-    context: Context,
-    private val player: Player,
-) : FrameLayout(context) {
-    private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
-    private val controllerExclusionHeightPx = (96f * resources.displayMetrics.density).toInt()
-    private var downX = 0f
-    private var downY = 0f
-    private var startPositionMs = 0L
-    private var seeking = false
-
-    override fun onInterceptTouchEvent(event: MotionEvent): Boolean {
-        when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN -> {
-                downX = event.x
-                downY = event.y
-                startPositionMs = player.currentPosition
-                seeking = false
-            }
-            MotionEvent.ACTION_MOVE -> {
-                if (!player.isCommandAvailable(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)) return false
-                if (startsInControllerZone()) return false
-                val dx = event.x - downX
-                val dy = event.y - downY
-                if (abs(dx) > touchSlop && abs(dx) > abs(dy)) {
-                    seeking = true
-                    return true
-                }
-            }
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> seeking = false
-        }
-        return false
-    }
-
-    override fun onTouchEvent(event: MotionEvent): Boolean {
-        if (!seeking) return super.onTouchEvent(event)
-        when (event.actionMasked) {
-            MotionEvent.ACTION_MOVE -> seekForHorizontalDrag(event.x)
-            MotionEvent.ACTION_UP -> {
-                seekForHorizontalDrag(event.x)
-                seeking = false
-            }
-            MotionEvent.ACTION_CANCEL -> seeking = false
-        }
-        return true
-    }
-
-    private fun startsInControllerZone(): Boolean =
-        height > 0 && downY >= (height - controllerExclusionHeightPx).coerceAtLeast(0)
-
-    private fun seekForHorizontalDrag(currentX: Float) {
-        if (!player.isCommandAvailable(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)) return
-        val deltaMs = fullscreenSeekDeltaMs(currentX - downX, width)
-        val durationMs = player.duration.takeIf { it >= 0L }
-        player.seekTo(clampFullscreenSeekPosition(startPositionMs, deltaMs, durationMs))
+private fun restoreFullscreenWindowState(
+    activity: Activity,
+    previousOrientation: Int?,
+    previousBrightness: Float?,
+) {
+    previousOrientation?.let { activity.requestedOrientation = it }
+    previousBrightness?.let { brightness ->
+        val attrs = activity.window.attributes
+        attrs.screenBrightness = brightness
+        activity.window.attributes = attrs
     }
 }
 
 @Suppress("DEPRECATION")
-private fun hideNativeVideoSystemBars(dialog: Dialog) {
-    val window = dialog.window ?: return
-    window.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+private fun hideNativeVideoSystemBars(activity: Activity) {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-        window.insetsController?.apply {
+        activity.window.insetsController?.apply {
             systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
             hide(WindowInsets.Type.systemBars())
         }
     } else {
-        window.decorView.systemUiVisibility =
+        activity.window.decorView.systemUiVisibility =
             View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
                 View.SYSTEM_UI_FLAG_FULLSCREEN or
                 View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
                 View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
                 View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
                 View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+    }
+}
+
+@Suppress("DEPRECATION")
+private fun showNativeVideoSystemBars(activity: Activity) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        activity.window.insetsController?.show(WindowInsets.Type.systemBars())
+    } else {
+        activity.window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
     }
 }

@@ -71,8 +71,16 @@ class ExternalPlaybackBenchmarkInstrumentedTest {
                 mode = "long",
                 timeoutSeconds = 190L,
             )
+            val deepLongProxy = runBenchmark(
+                context = context,
+                uri = proxyUri,
+                grantFlags = request.intent.flags,
+                requestId = "proxy-deep-long",
+                mode = "deep-long",
+                timeoutSeconds = 190L,
+            )
 
-            writeReport(context, direct, proxy, longProxy)
+            writeReport(context, direct, proxy, longProxy, deepLongProxy)
 
             (direct + proxy).forEach { metric ->
                 assertTrue(metric.describe(), metric.ok)
@@ -85,6 +93,13 @@ class ExternalPlaybackBenchmarkInstrumentedTest {
             assertEquals(longProxy.describe(), 0, longProxy.mediaErrorWhat)
             assertTrue(longProxy.describe(), longProxy.firstFrameMs >= 0L)
             assertTrue(longProxy.describe(), longProxy.playedPositionMs >= 120_000)
+
+            assertTrue(deepLongProxy.describe(), deepLongProxy.ok)
+            assertEquals(deepLongProxy.describe(), 0, deepLongProxy.mediaErrorWhat)
+            assertTrue(deepLongProxy.describe(), deepLongProxy.firstFrameMs >= 0L)
+            assertTrue(deepLongProxy.describe(), deepLongProxy.seekResumeMs >= 0L)
+            assertEquals(deepLongProxy.describe(), 1, deepLongProxy.completedSeeks)
+            assertEquals(deepLongProxy.describe(), 0, deepLongProxy.stallCount)
         }
     }
 
@@ -148,7 +163,13 @@ class ExternalPlaybackBenchmarkInstrumentedTest {
         }
     }
 
-    private fun writeReport(context: Context, direct: List<Metric>, proxy: List<Metric>, longProxy: Metric) {
+    private fun writeReport(
+        context: Context,
+        direct: List<Metric>,
+        proxy: List<Metric>,
+        longProxy: Metric,
+        deepLongProxy: Metric,
+    ) {
         val directFirst = direct.map { it.firstFrameMs }
         val proxyFirst = proxy.map { it.firstFrameMs }
         val directSeek = direct.map { it.seekResumeMs }
@@ -160,6 +181,7 @@ class ExternalPlaybackBenchmarkInstrumentedTest {
             .put("direct", metricGroup(direct, directFirst, directSeek))
             .put("proxy", metricGroup(proxy, proxyFirst, proxySeek))
             .put("longProxy", metricJson(longProxy))
+            .put("deepLongProxy", metricJson(deepLongProxy))
         File(context.filesDir, REPORT_FILE).writeText(root.toString(2), Charsets.UTF_8)
     }
 

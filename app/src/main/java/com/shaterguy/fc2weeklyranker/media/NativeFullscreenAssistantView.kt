@@ -5,6 +5,7 @@ import android.app.Activity
 import android.content.Context
 import android.graphics.Color
 import android.media.AudioManager
+import android.os.Build
 import android.provider.Settings
 import android.view.GestureDetector
 import android.view.Gravity
@@ -24,7 +25,6 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
-import kotlin.math.abs
 import kotlin.math.roundToInt
 
 @OptIn(UnstableApi::class)
@@ -46,12 +46,12 @@ internal class NativeFullscreenAssistantView(
     private val assistantScroll = HorizontalScrollView(context)
     private val assistantControls = LinearLayout(context)
     private val osd = TextView(context)
-    private val unlockButton = makeButton("화면 잠금 해제")
-    private val orientationButton = makeButton("회전 자동")
-    private val sensitivityButton = makeButton("")
-    private val speedButton = makeButton("")
-    private val aspectButton = makeButton("")
-    private val subtitleButton = makeButton("자막 OFF")
+    private val unlockButton = makeButton("화면 잠금 해제", "화면 잠금 해제", "화면 잠김")
+    private val orientationButton = makeButton("회전 자동", "회전 잠금 설정", "자동")
+    private val sensitivityButton = makeButton("", "제스처 감도 변경")
+    private val speedButton = makeButton("", "재생 속도 변경")
+    private val aspectButton = makeButton("", "화면 비율 변경")
+    private val subtitleButton = makeButton("자막 OFF", "자막 변경", "OFF")
     private val gestureView: NativeFullscreenGestureView
     private var controlsVisible = true
     private var pictureInPicture = false
@@ -65,7 +65,16 @@ internal class NativeFullscreenAssistantView(
         private set
 
     private val autoHide = Runnable {
-        if (player.isPlaying && !interactionLocked && !pictureInPicture) hideControls()
+        if (
+            nativeFullscreenShouldAutoHide(
+                isPlaying = player.isPlaying,
+                controlsVisible = controlsVisible,
+                interactionLocked = interactionLocked,
+                pictureInPicture = pictureInPicture,
+            )
+        ) {
+            hideControls()
+        }
     }
 
     private val playerListener = object : Player.Listener {
@@ -109,6 +118,7 @@ internal class NativeFullscreenAssistantView(
         updateSensitivity(initialSensitivity)
         refreshSpeedLabel()
         refreshAspectLabel()
+        refreshOrientationLabel()
         showControls()
     }
 
@@ -117,19 +127,19 @@ internal class NativeFullscreenAssistantView(
         topControls.gravity = Gravity.CENTER_VERTICAL
         topControls.setPadding(dp(8), dp(8), dp(8), dp(8))
 
-        topControls.addView(makeButton("화면 잠금").apply {
+        topControls.addView(makeButton("화면 잠금", "화면 잠금", "해제됨").apply {
             setOnClickListener { setInteractionLocked(true) }
         })
         topControls.addView(orientationButton.apply {
             setOnClickListener {
-                orientationLocked = !orientationLocked
-                orientationButton.text = if (orientationLocked) "회전 잠금" else "회전 자동"
+                orientationLocked = nativeFullscreenToggleOrientationLock(orientationLocked)
+                refreshOrientationLabel()
                 onOrientationLockChanged(orientationLocked)
                 showOsd(if (orientationLocked) "현재 방향 잠금" else "동영상 방향 자동", false)
                 scheduleAutoHide()
             }
         })
-        topControls.addView(makeButton("닫기").apply {
+        topControls.addView(makeButton("닫기", "전체화면 닫기").apply {
             setOnClickListener { if (!interactionLocked) onClose() }
         })
 
@@ -144,10 +154,10 @@ internal class NativeFullscreenAssistantView(
         assistantControls.gravity = Gravity.CENTER_VERTICAL
         assistantControls.setPadding(dp(8), dp(4), dp(8), dp(4))
 
-        assistantControls.addView(makeButton("-10초").apply {
+        assistantControls.addView(makeButton("-10초", "10초 뒤로 이동").apply {
             setOnClickListener { seekBy(-10_000L, "10초 뒤로") }
         })
-        assistantControls.addView(makeButton("+10초").apply {
+        assistantControls.addView(makeButton("+10초", "10초 앞으로 이동").apply {
             setOnClickListener { seekBy(10_000L, "10초 앞으로") }
         })
         assistantControls.addView(speedButton.apply {
@@ -185,7 +195,7 @@ internal class NativeFullscreenAssistantView(
                 scheduleAutoHide()
             }
         })
-        assistantControls.addView(makeButton("PiP").apply {
+        assistantControls.addView(makeButton("PiP", "Picture in Picture 전환").apply {
             setOnClickListener {
                 if (!interactionLocked) onPictureInPicture()
             }
@@ -212,6 +222,7 @@ internal class NativeFullscreenAssistantView(
             gravity = Gravity.CENTER
             setPadding(dp(14), dp(10), dp(14), dp(10))
             visibility = View.GONE
+            contentDescription = "전체화면 동영상 상태"
         }
         addView(
             osd,
@@ -232,6 +243,7 @@ internal class NativeFullscreenAssistantView(
     internal fun updateSensitivity(value: NativeGestureSensitivity) {
         sensitivity = value
         sensitivityButton.text = "감도 ${value.label}"
+        sensitivityButton.updateAccessibility("제스처 감도 변경", value.label)
     }
 
     internal fun setPictureInPictureMode(inPip: Boolean) {
@@ -256,6 +268,7 @@ internal class NativeFullscreenAssistantView(
     internal fun showOsd(message: String, persistent: Boolean) {
         if (pictureInPicture) return
         osd.text = message
+        osd.contentDescription = "전체화면 동영상 상태, $message"
         osd.visibility = View.VISIBLE
         osd.removeCallbacks(hideOsd)
         if (!persistent) osd.postDelayed(hideOsd, OSD_TIMEOUT_MS)
@@ -289,6 +302,7 @@ internal class NativeFullscreenAssistantView(
             topControls.visibility = View.GONE
             assistantScroll.visibility = View.GONE
             playerView.hideController()
+            unlockButton.updateAccessibility("화면 잠금 해제", "화면 잠김")
             unlockButton.visibility = View.VISIBLE
         } else {
             unlockButton.visibility = View.GONE
@@ -322,7 +336,14 @@ internal class NativeFullscreenAssistantView(
 
     private fun scheduleAutoHide() {
         removeCallbacks(autoHide)
-        if (player.isPlaying && controlsVisible && !interactionLocked && !pictureInPicture) {
+        if (
+            nativeFullscreenShouldAutoHide(
+                isPlaying = player.isPlaying,
+                controlsVisible = controlsVisible,
+                interactionLocked = interactionLocked,
+                pictureInPicture = pictureInPicture,
+            )
+        ) {
             postDelayed(autoHide, CONTROL_TIMEOUT_MS)
         }
     }
@@ -349,6 +370,7 @@ internal class NativeFullscreenAssistantView(
         if (tracks.isEmpty()) {
             subtitleSelection = -1
             subtitleButton.text = "자막 없음"
+            subtitleButton.updateAccessibility("자막 변경", "사용 가능한 자막 없음")
             showOsd("내장 자막 트랙이 없습니다", false)
             return
         }
@@ -361,6 +383,7 @@ internal class NativeFullscreenAssistantView(
                 .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
                 .build()
             subtitleButton.text = "자막 OFF"
+            subtitleButton.updateAccessibility("자막 변경", "OFF")
             showOsd("자막 OFF", false)
         } else {
             val (group, trackIndex) = tracks[subtitleSelection]
@@ -368,20 +391,37 @@ internal class NativeFullscreenAssistantView(
                 .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
                 .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, trackIndex))
                 .build()
-            subtitleButton.text = "자막 ${subtitleSelection + 1}/${tracks.size}"
-            showOsd("자막 ${subtitleSelection + 1}/${tracks.size}", false)
+            val state = "${subtitleSelection + 1}/${tracks.size}"
+            subtitleButton.text = "자막 $state"
+            subtitleButton.updateAccessibility("자막 변경", state)
+            showOsd("자막 $state", false)
         }
     }
 
     private fun refreshSpeedLabel() {
-        speedButton.text = "속도 ${formatSpeed(player.playbackParameters.speed)}"
+        val speed = formatSpeed(player.playbackParameters.speed)
+        speedButton.text = "속도 $speed"
+        speedButton.updateAccessibility("재생 속도 변경", speed)
     }
 
     private fun refreshAspectLabel() {
         aspectButton.text = "화면 ${aspectMode.label}"
+        aspectButton.updateAccessibility("화면 비율 변경", aspectMode.label)
     }
 
-    private fun makeButton(label: String): Button = Button(context).apply {
+    private fun refreshOrientationLabel() {
+        orientationButton.text = if (orientationLocked) "회전 잠금" else "회전 자동"
+        orientationButton.updateAccessibility(
+            action = "회전 잠금 설정",
+            state = if (orientationLocked) "잠김" else "자동",
+        )
+    }
+
+    private fun makeButton(
+        label: String,
+        accessibilityAction: String = label,
+        accessibilityState: String? = null,
+    ): Button = Button(context).apply {
         text = label
         setTextColor(Color.WHITE)
         textSize = 12f
@@ -390,6 +430,18 @@ internal class NativeFullscreenAssistantView(
         minHeight = dp(40)
         minWidth = 0
         setPadding(dp(10), 0, dp(10), 0)
+        updateAccessibility(accessibilityAction, accessibilityState)
+    }
+
+    private fun Button.updateAccessibility(action: String, state: String?) {
+        contentDescription = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R || state.isNullOrBlank()) {
+            action
+        } else {
+            "$action, $state"
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            stateDescription = state
+        }
     }
 
     private fun formatSpeed(speed: Float): String =
@@ -413,9 +465,8 @@ private class NativeFullscreenGestureView(
     private val onSingleTap: () -> Unit,
     private val onOsd: (String, Boolean) -> Unit,
 ) : View(context) {
-    private enum class Mode { NONE, HORIZONTAL, BRIGHTNESS, VOLUME }
-
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
+    private val classifier = NativeFullscreenGestureClassifier(touchSlop)
     private val gestureDetector = GestureDetector(
         context,
         object : GestureDetector.SimpleOnGestureListener() {
@@ -444,7 +495,6 @@ private class NativeFullscreenGestureView(
             if (value) cancelInteraction()
         }
 
-    private var mode = Mode.NONE
     private var downX = 0f
     private var downY = 0f
     private var startPositionMs = 0L
@@ -453,7 +503,7 @@ private class NativeFullscreenGestureView(
     private var startVolume = 0
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        if (interactionLocked || !isEnabled) return true
+        if (!nativeFullscreenGestureInputAllowed(interactionLocked, isEnabled)) return true
         if (event.pointerCount > 1) {
             cancelInteraction()
             onOsd("핀치 확대는 SurfaceView 안전성을 위해 사용하지 않습니다", false)
@@ -462,7 +512,7 @@ private class NativeFullscreenGestureView(
 
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
-                mode = Mode.NONE
+                classifier.reset()
                 downX = event.x
                 downY = event.y
                 startPositionMs = player.currentPosition.coerceAtLeast(0L)
@@ -473,50 +523,47 @@ private class NativeFullscreenGestureView(
             }
 
             MotionEvent.ACTION_MOVE -> {
-                if (mode == Mode.NONE) {
+                if (classifier.mode == NativeGestureMode.NONE) {
                     gestureDetector.onTouchEvent(event)
-                    val dx = event.x - downX
-                    val dy = event.y - downY
-                    if (abs(dx) > touchSlop || abs(dy) > touchSlop) {
-                        mode = if (abs(dx) > abs(dy)) {
-                            Mode.HORIZONTAL
-                        } else if (downX < width / 2f) {
-                            Mode.BRIGHTNESS
-                        } else {
-                            Mode.VOLUME
-                        }
-                    }
                 }
+                val mode = classifier.update(
+                    deltaX = event.x - downX,
+                    deltaY = event.y - downY,
+                    downX = downX,
+                    widthPx = width,
+                )
                 when (mode) {
-                    Mode.HORIZONTAL -> updateSeekPreview(event.x)
-                    Mode.BRIGHTNESS -> updateBrightness(event.y)
-                    Mode.VOLUME -> updateVolume(event.y)
-                    Mode.NONE -> Unit
+                    NativeGestureMode.HORIZONTAL -> updateSeekPreview(event.x)
+                    NativeGestureMode.BRIGHTNESS -> updateBrightness(event.y)
+                    NativeGestureMode.VOLUME -> updateVolume(event.y)
+                    NativeGestureMode.NONE -> Unit
                 }
             }
 
             MotionEvent.ACTION_UP -> {
-                if (mode == Mode.NONE) {
+                val mode = classifier.mode
+                if (mode == NativeGestureMode.NONE) {
                     gestureDetector.onTouchEvent(event)
-                } else if (mode == Mode.HORIZONTAL &&
+                } else if (mode == NativeGestureMode.HORIZONTAL &&
                     player.isCommandAvailable(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)
                 ) {
                     updateSeekPreview(event.x)
                     player.seekTo(previewTargetMs)
-                    onOsd("이동 ${formatTime(previewTargetMs)}", false)
+                    val duration = if (player.duration > 0L) nativeFullscreenFormatTime(player.duration) else "--:--"
+                    onOsd("이동 ${nativeFullscreenFormatTime(previewTargetMs)} / $duration", false)
                 }
-                mode = Mode.NONE
+                classifier.reset()
             }
 
             MotionEvent.ACTION_CANCEL -> {
-                mode = Mode.NONE
+                classifier.reset()
             }
         }
         return true
     }
 
     fun cancelInteraction() {
-        mode = Mode.NONE
+        classifier.reset()
     }
 
     private fun updateSeekPreview(currentX: Float) {
@@ -531,9 +578,14 @@ private class NativeFullscreenGestureView(
             sensitivityFactor = sensitivityProvider(),
         )
         previewTargetMs = nativeFullscreenSeekTargetMs(startPositionMs, delta, player.duration)
-        val signedSeconds = delta / 1_000L
-        val sign = if (signedSeconds > 0L) "+" else ""
-        onOsd("탐색 $sign${signedSeconds}초  ${formatTime(previewTargetMs)}", true)
+        onOsd(
+            nativeFullscreenSeekPreviewText(
+                deltaMs = delta,
+                targetMs = previewTargetMs,
+                durationMs = player.duration,
+            ),
+            true,
+        )
     }
 
     private fun updateBrightness(currentY: Float) {
@@ -596,17 +648,5 @@ private class NativeFullscreenGestureView(
             Settings.System.getInt(context.contentResolver, Settings.System.SCREEN_BRIGHTNESS)
         }.getOrDefault(128)
         return (system / 255f).coerceIn(0.01f, 1f)
-    }
-
-    private fun formatTime(positionMs: Long): String {
-        val totalSeconds = (positionMs.coerceAtLeast(0L) / 1_000L)
-        val hours = totalSeconds / 3_600L
-        val minutes = (totalSeconds % 3_600L) / 60L
-        val seconds = totalSeconds % 60L
-        return if (hours > 0L) {
-            "%d:%02d:%02d".format(hours, minutes, seconds)
-        } else {
-            "%02d:%02d".format(minutes, seconds)
-        }
     }
 }

@@ -18,8 +18,8 @@ DEV28_ARTIFACT_DIGEST='sha256:4863e455503eb4400d0195a9d09e8901cb058e63438fb12b1d
 PINNED_TEST_CERT_SHA256='ff32473e516ff59ca24ada94fe22e8282ce70fd66bd94fb0975340106d981cfd'
 
 CURRENT_BADGING="$("$BT/aapt" dump badging "$CURRENT_APK")"
-if ! grep -Fq "package: name='$DEV_PACKAGE' versionCode='54' versionName='0.2.0-dev30'" <<<"$CURRENT_BADGING"; then
-  echo 'ERROR: current TEST APK identity is not DEV30/versionCode 54.' >&2
+if ! grep -Fq "package: name='$DEV_PACKAGE' versionCode='55' versionName='0.2.0-dev31'" <<<"$CURRENT_BADGING"; then
+  echo 'ERROR: current TEST APK identity is not DEV31/versionCode 55.' >&2
   exit 1
 fi
 "$BT/apksigner" verify --min-sdk-version 29 "$CURRENT_APK"
@@ -94,13 +94,13 @@ extract_cert_sha256() {
 }
 
 DEV28_CERT_SHA256="$(extract_cert_sha256 "$DEV28_APK" fc2-dev28)"
-CURRENT_CERT_SHA256="$(extract_cert_sha256 "$CURRENT_APK" fc2-dev30)"
+CURRENT_CERT_SHA256="$(extract_cert_sha256 "$CURRENT_APK" fc2-dev31)"
 if [[ "$DEV28_CERT_SHA256" != "$PINNED_TEST_CERT_SHA256" ]]; then
   echo "ERROR: DEV28 signer mismatch: $DEV28_CERT_SHA256" >&2
   exit 1
 fi
 if [[ "$CURRENT_CERT_SHA256" != "$PINNED_TEST_CERT_SHA256" ]]; then
-  echo "ERROR: DEV30 signer mismatch: $CURRENT_CERT_SHA256" >&2
+  echo "ERROR: DEV31 signer mismatch: $CURRENT_CERT_SHA256" >&2
   exit 1
 fi
 
@@ -164,11 +164,11 @@ adb shell am force-stop "$DEV_PACKAGE"
 sleep 1
 
 adb shell dumpsys package "$STABLE_PACKAGE" | grep -Fq 'versionName=0.1.0'
-adb shell dumpsys package "$DEV_PACKAGE" | grep -Fq 'versionName=0.2.0-dev30'
+adb shell dumpsys package "$DEV_PACKAGE" | grep -Fq 'versionName=0.2.0-dev31'
 MARKER_AFTER="$(adb shell "run-as $DEV_PACKAGE cat files/dev30-update-marker.txt" | tr -d '\r')"
 if [[ "$MARKER_AFTER" != 'dev28-update-marker' ]]; then
-  echo 'ERROR: DEV28 application data marker did not survive DEV30 in-place update.' >&2
+  echo 'ERROR: DEV28 application data marker did not survive DEV31 in-place update.' >&2
   exit 1
 fi
 
-echo 'DEV28 to DEV30 in-place TEST update and stable co-install verified.'
+echo 'DEV28 to DEV31 in-place TEST update and stable co-install verified.'

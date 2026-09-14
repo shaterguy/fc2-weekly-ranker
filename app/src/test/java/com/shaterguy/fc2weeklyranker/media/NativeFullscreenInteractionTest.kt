@@ -69,6 +69,7 @@ class NativeFullscreenInteractionTest {
         "nativeFullscreenVolumeLevel",
         java.lang.Integer.TYPE,
         java.lang.Integer.TYPE,
+        java.lang.Integer.TYPE,
         java.lang.Float.TYPE,
         java.lang.Integer.TYPE,
         java.lang.Float.TYPE,

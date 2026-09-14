@@ -83,6 +83,40 @@ class DemandFirstExternalHttpResourceTest {
     }
 
     @Test
+    fun deepSeekSmallReadsDoNotPayAnotherRangeHandshakeAcrossFormerChunkBoundaries() {
+        val smallReadBytes = 16 * 1024
+        val deepSeekOffset = 4L * chunkBytes.toLong() + 12_345L
+        val continuityBytes = 2 * chunkBytes + 128 * 1024
+        val upstream = FullRangeUpstream(
+            payload = payload,
+            rangeDelayMs = 40L,
+        )
+        val reader = reader(upstream)
+        try {
+            var cursor = deepSeekOffset
+            var remaining = continuityBytes
+            while (remaining > 0) {
+                val wanted = min(smallReadBytes, remaining)
+                val bytes = reader.read(cursor, wanted)
+                assertArrayEquals(
+                    payload.copyOfRange(cursor.toInt(), cursor.toInt() + wanted),
+                    bytes,
+                )
+                cursor += bytes.size.toLong()
+                remaining -= bytes.size
+            }
+
+            assertEquals(
+                "deep-seek continuity must not expose another Range RTT/TTFB after playback has resumed",
+                1,
+                upstream.foregroundRanges.size,
+            )
+        } finally {
+            reader.close()
+        }
+    }
+
+    @Test
     fun nonAlignedSeekCancelsOldWindowBeforeOpeningNewRange() {
         val upstream = FullRangeUpstream(payload)
         val reader = reader(upstream)
@@ -184,6 +218,7 @@ class DemandFirstExternalHttpResourceTest {
         private val ignoreRanges: Boolean = false,
         private val trackBodyReads: Boolean = false,
         private val bodyChunkBytes: Int = Int.MAX_VALUE,
+        private val rangeDelayMs: Long = 0L,
     ) : Interceptor {
         val foregroundRanges = Collections.synchronizedList(mutableListOf<String>())
         val rangeCalls = Collections.synchronizedList(mutableListOf<Call>())
@@ -224,9 +259,13 @@ class DemandFirstExternalHttpResourceTest {
 
             val range = RANGE.matchEntire(rawRange) ?: return response(request, 400)
             recordRange(chain, rawRange)
+            if (rangeDelayMs > 0L) Thread.sleep(rangeDelayMs)
 
             val requestedStart = range.groupValues[1].toLong()
-            val requestedEnd = range.groupValues[2].toLong()
+            val requestedEnd = range.groupValues[2]
+                .takeIf(String::isNotBlank)
+                ?.toLong()
+                ?: payload.lastIndex.toLong()
             if (requestedStart >= payload.size) {
                 return response(
                     request,
@@ -294,7 +333,7 @@ class DemandFirstExternalHttpResourceTest {
         }
 
         companion object {
-            private val RANGE = Regex("bytes=(\\d+)-(\\d+)")
+            private val RANGE = Regex("bytes=(\\d+)-(\\d*)")
         }
     }
 

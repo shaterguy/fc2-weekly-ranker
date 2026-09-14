@@ -3,8 +3,8 @@ package com.shaterguy.fc2weeklyranker.network
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
-import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotSame
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.IOException
@@ -15,6 +15,7 @@ class AvseeClientThreadingTest {
     @Test
     fun `test connection runs blocking request on injected io dispatcher`() {
         val callerThread = Thread.currentThread()
+        val dispatcherThread = AtomicReference<Thread>()
         val observedThread = AtomicReference<Thread>()
         val http = OkHttpClient.Builder()
             .addInterceptor {
@@ -22,7 +23,9 @@ class AvseeClientThreadingTest {
                 throw IOException("synthetic stop")
             }
             .build()
-        val executor = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "avsee-test-io") }
+        val executor = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "avsee-test-io").also(dispatcherThread::set)
+        }
 
         executor.asCoroutineDispatcher().use { dispatcher ->
             val result = runBlocking {
@@ -32,7 +35,8 @@ class AvseeClientThreadingTest {
         }
 
         val networkThread = requireNotNull(observedThread.get())
+        val injectedThread = requireNotNull(dispatcherThread.get())
         assertNotSame(callerThread, networkThread)
-        assertEquals("avsee-test-io", networkThread.name)
+        assertSame(injectedThread, networkThread)
     }
 }

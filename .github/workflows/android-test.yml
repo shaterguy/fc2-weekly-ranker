@@ -273,13 +273,13 @@ jobs:
           adb install -r "$RECEIVER_APK"
           adb install -r -t "$TEST_APK"
           FIXTURE_BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/test-fixtures/external-stream"
-          INSTRUMENTATION_OUTPUT="$RUNNER_TEMP/external-stream-instrumentation.txt"
+          INSTRUMENTATION_OUTPUT="$RUNNER_TEMP/runtime-instrumentation.txt"
           adb shell am instrument -w \
             -e fixtureBaseUrl "$FIXTURE_BASE" \
-            -e class com.shaterguy.fc2weeklyranker.media.ExternalVideoStreamProviderInstrumentedTest \
+            -e class com.shaterguy.fc2weeklyranker.media.ExternalVideoStreamProviderInstrumentedTest,com.shaterguy.fc2weeklyranker.media.NativeFullscreenAssistantInstrumentedTest \
             com.shaterguy.fc2weeklyranker.dev.test/androidx.test.runner.AndroidJUnitRunner \
             | tee "$INSTRUMENTATION_OUTPUT"
-          grep -Fq 'OK (3 tests)' "$INSTRUMENTATION_OUTPUT"
+          grep -Fq 'OK (4 tests)' "$INSTRUMENTATION_OUTPUT"
       - name: Verify DEV28 in-place TEST update
         if: steps.sign.outputs.configured == 'true'
         shell: bash

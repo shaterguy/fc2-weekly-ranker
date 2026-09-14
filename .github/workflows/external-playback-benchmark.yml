@@ -84,10 +84,15 @@ jobs:
             sleep 2
           done
           [[ "$(adb shell getprop sys.boot_completed | tr -d '\r')" == "1" ]]
+          for _ in $(seq 1 60); do
+            adb shell pm path android >/dev/null 2>&1 && break
+            sleep 2
+          done
+          adb shell pm path android >/dev/null
 
-          adb install -r "$RUNNER_TEMP/benchmark-app.apk"
-          adb install -r "$RUNNER_TEMP/benchmark-receiver.apk"
-          adb install -r -t "$RUNNER_TEMP/benchmark-test.apk"
+          timeout 180s adb install --no-streaming -r "$RUNNER_TEMP/benchmark-app.apk"
+          timeout 180s adb install --no-streaming -r "$RUNNER_TEMP/benchmark-receiver.apk"
+          timeout 180s adb install --no-streaming -r -t "$RUNNER_TEMP/benchmark-test.apk"
           adb logcat -c
           adb shell am instrument -w \
             -e class com.shaterguy.fc2weeklyranker.media.ExternalPlaybackBenchmarkInstrumentedTest \

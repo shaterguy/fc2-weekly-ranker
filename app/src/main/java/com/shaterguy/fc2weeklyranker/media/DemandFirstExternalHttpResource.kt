@@ -12,9 +12,9 @@ import kotlin.math.min
  * Production-sized proxy reads can be much wider than the decoder's immediate demand.
  * This adapter opens one bounded streaming Range window for normal small reads, returns
  * only the decoder's immediate demand, and reuses the same response for contiguous reads.
- * While a window is being consumed it pre-opens exactly one following bounded window so
- * Range connection setup stays off the decoder's rollover read. Any unusual server
- * behavior falls back permanently to the proven SeekableExternalHttpResource path.
+ * Near the end of a window it pre-opens exactly one following bounded window so Range
+ * connection setup stays off the decoder's rollover read. Any unusual server behavior
+ * falls back permanently to the proven SeekableExternalHttpResource path.
  */
 internal class DemandFirstExternalHttpResource(
     private val url: String,
@@ -169,7 +169,10 @@ internal class DemandFirstExternalHttpResource(
         if (closed || delegateOnly || chunkSize < DEMAND_FIRST_MIN_CHUNK_SIZE) return
         if (readAheadWindow != null) return
 
+        val window = activeWindow ?: return
         val nextOffset = activeWindowEndExclusive ?: return
+        val remainingBytes = nextOffset - window.position
+        if (remainingBytes > READ_AHEAD_TRIGGER_BYTES) return
         if (nextOffset >= length) return
         val requestedBytes = min(chunkSize.toLong(), length - nextOffset).toInt()
         if (requestedBytes <= 0) return
@@ -271,6 +274,7 @@ internal class DemandFirstExternalHttpResource(
 
     companion object {
         private const val DEMAND_FIRST_MIN_CHUNK_SIZE = 256 * 1024
+        private const val READ_AHEAD_TRIGGER_BYTES = 256 * 1024L
         private val READ_AHEAD_THREAD_ID = AtomicInteger(0)
         private val READ_AHEAD_EXECUTOR = Executors.newFixedThreadPool(
             2,

@@ -62,6 +62,7 @@ import androidx.navigation.navArgument
 import com.shaterguy.fc2weeklyranker.data.DownloadStatus
 import com.shaterguy.fc2weeklyranker.data.PostEntity
 import com.shaterguy.fc2weeklyranker.data.VideoEntity
+import com.shaterguy.fc2weeklyranker.domain.ContentMode
 import com.shaterguy.fc2weeklyranker.domain.RankedPost
 import com.shaterguy.fc2weeklyranker.domain.RankingMode
 import com.shaterguy.fc2weeklyranker.domain.windowFor
@@ -158,6 +159,7 @@ private fun RankerApp(vm: MainViewModel) {
     val backStack by nav.currentBackStackEntryAsState()
     val route = backStack?.destination?.route.orEmpty()
     val showBottom = destinations.any { it.route == route }
+    val contentMode by vm.selectedContentMode.collectAsState()
     val rankingPosts by vm.rankedPosts.collectAsState()
     val rankingPostIds = remember(rankingPosts) { rankingPosts.map { it.post.id } }
     val favoritePosts by vm.favorites.collectAsState()
@@ -170,6 +172,9 @@ private fun RankerApp(vm: MainViewModel) {
         nav.navigate("detail/${Uri.encode(id)}")
     }
     Scaffold(
+        topBar = {
+            if (showBottom) ContentModeSelector(contentMode, vm::selectContentMode)
+        },
         bottomBar = {
             if (showBottom) {
                 NavigationBar {
@@ -208,7 +213,10 @@ private fun RankerApp(vm: MainViewModel) {
                 FavoritesScreen(vm) { id -> openDetail(id, "favorites", favoritePostIds) }
             }
             composable("downloads") {
-                DownloadScreen(onPost = { id, postIds -> openDetail(id, "downloads", postIds) })
+                DownloadScreen(
+                    contentMode = contentMode,
+                    onPost = { id, postIds -> openDetail(id, "downloads", postIds) },
+                )
             }
             composable("settings") { SettingsScreen(vm) }
             composable(
@@ -232,7 +240,42 @@ private fun RankerApp(vm: MainViewModel) {
 }
 
 @Composable
+private fun ContentModeSelector(selected: ContentMode, onSelect: (ContentMode) -> Unit) {
+    Column(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text("콘텐츠 모드 · ${selected.sourceKey}", style = MaterialTheme.typography.labelLarge)
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ContentModeButton(ContentMode.FC2, selected, onSelect, Modifier.weight(1f))
+            ContentModeButton(ContentMode.JAV, selected, onSelect, Modifier.weight(1f))
+        }
+    }
+}
+
+@Composable
+private fun ContentModeButton(
+    mode: ContentMode,
+    selected: ContentMode,
+    onSelect: (ContentMode) -> Unit,
+    modifier: Modifier,
+) {
+    if (mode == selected) {
+        Button(
+            onClick = { onSelect(mode) },
+            modifier = modifier.semantics { contentDescription = "${mode.sourceKey} 모드 선택됨" },
+        ) { Text(mode.sourceKey) }
+    } else {
+        OutlinedButton(
+            onClick = { onSelect(mode) },
+            modifier = modifier.semantics { contentDescription = "${mode.sourceKey} 모드로 전환" },
+        ) { Text(mode.sourceKey) }
+    }
+}
+
+@Composable
 private fun RankingScreen(vm: MainViewModel, onPost: (String) -> Unit) {
+    val mode by vm.selectedContentMode.collectAsState()
     val posts by vm.rankedPosts.collectAsState()
     val rankingMode by vm.rankingMode.collectAsState()
     val favoritePosts by vm.favorites.collectAsState()
@@ -245,7 +288,7 @@ private fun RankingScreen(vm: MainViewModel, onPost: (String) -> Unit) {
     val window = remember(anchor, page) { windowFor(Instant.ofEpochMilli(anchor), page) }
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         Spacer(Modifier.height(12.dp))
-        Text("7일 댓글 랭킹", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        Text("${mode.sourceKey} 7일 댓글 랭킹", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         Text("기준 ${formatDateTime(anchor)}")
         Text("${window.startDate} ∼ ${window.endDate}", style = MaterialTheme.typography.bodyLarge)
         Row(
@@ -305,10 +348,11 @@ private fun RankingModeSelector(selected: RankingMode, onSelect: (RankingMode) -
 
 @Composable
 private fun FavoritesScreen(vm: MainViewModel, onPost: (String) -> Unit) {
+    val mode by vm.selectedContentMode.collectAsState()
     val posts by vm.favorites.collectAsState()
     val visited by vm.visitedPostIds.collectAsState()
     Column(Modifier.fillMaxSize().padding(16.dp)) {
-        Text("즐겨찾기", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        Text("${mode.sourceKey} 즐겨찾기", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(8.dp))
         if (posts.isEmpty()) Text("저장한 게시물이 없습니다.")
         LazyColumn {

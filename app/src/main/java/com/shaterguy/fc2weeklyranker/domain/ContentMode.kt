@@ -3,9 +3,10 @@ package com.shaterguy.fc2weeklyranker.domain
 enum class ContentMode(
     val sourceKey: String,
     val boardTable: String,
+    val defaultBaseUrl: String,
 ) {
-    FC2("FC2", "javfc2"),
-    JAV("JAV", "javc"),
+    FC2("FC2", "javfc2", "https://01.avsee.is"),
+    JAV("JAV", "javc", "https://02.avsee.is"),
     ;
 
     fun localPostId(remoteId: String): String =

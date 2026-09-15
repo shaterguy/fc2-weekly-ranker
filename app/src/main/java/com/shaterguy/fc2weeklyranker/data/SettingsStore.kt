@@ -22,6 +22,7 @@ class SettingsStore(context: Context, private val clockMillis: () -> Long = { Sy
         dataStore.data.map { ContentMode.fromSourceKey(it[CONTENT_MODE]) }
     val baseUrl: Flow<String> = selectedContentMode.flatMapLatest { mode -> baseUrl(mode) }
     val visitedPostIds: Flow<Set<String>> = dataStore.data.map { it[VISITED_POST_IDS].orEmpty() }
+    val javFavoriteTags: Flow<Set<String>> = dataStore.data.map { it[JAV_FAVORITE_TAGS].orEmpty() }
     val fullscreenGestureSensitivity: Flow<String> =
         dataStore.data.map { it[FULLSCREEN_GESTURE_SENSITIVITY] ?: DEFAULT_FULLSCREEN_GESTURE_SENSITIVITY }
 
@@ -76,6 +77,15 @@ class SettingsStore(context: Context, private val clockMillis: () -> Long = { Sy
         dataStore.edit { it[FULLSCREEN_GESTURE_SENSITIVITY] = value }
     }
 
+    suspend fun toggleJavFavoriteTag(query: String) {
+        val tag = query.trim()
+        if (tag.isEmpty()) return
+        dataStore.edit { prefs ->
+            val current = prefs[JAV_FAVORITE_TAGS].orEmpty()
+            prefs[JAV_FAVORITE_TAGS] = if (tag in current) current - tag else current + tag
+        }
+    }
+
     suspend fun isRankingWindowCovered(key: String): Boolean =
         dataStore.data.first()[RANKING_COVERED_WINDOWS].orEmpty().contains(key)
 
@@ -106,6 +116,7 @@ class SettingsStore(context: Context, private val clockMillis: () -> Long = { Sy
         private val BASE_URL = stringPreferencesKey("base_url")
         private val JAV_BASE_URL = stringPreferencesKey("jav_base_url")
         private val VISITED_POST_IDS = stringSetPreferencesKey("visited_post_ids")
+        private val JAV_FAVORITE_TAGS = stringSetPreferencesKey("jav_favorite_tags")
         private val RANKING_COVERED_WINDOWS = stringSetPreferencesKey("ranking_covered_windows_v1")
         private val FULLSCREEN_GESTURE_SENSITIVITY = stringPreferencesKey("fullscreen_gesture_sensitivity")
     }

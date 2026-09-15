@@ -35,24 +35,31 @@ jobs:
       - name: Install Android API 37
         shell: bash
         run: sdkmanager "platforms;android-37.0" "build-tools;37.0.0"
-      - name: Verify dev15 feature surface is preserved
+      - name: Verify feature surface is preserved and DEV33 additions exist
         shell: bash
         run: |
           set -euo pipefail
           test -f app/src/main/java/com/shaterguy/fc2weeklyranker/search/SearchRuntime.kt
           test -f app/src/main/java/com/shaterguy/fc2weeklyranker/search/SearchStore.kt
           test -f app/src/main/java/com/shaterguy/fc2weeklyranker/ui/SearchScreen.kt
+          test -f app/src/main/java/com/shaterguy/fc2weeklyranker/ui/TagScreen.kt
+          test -f app/src/main/java/com/shaterguy/fc2weeklyranker/ui/TagFeatureViewModel.kt
           test -f app/src/main/java/com/shaterguy/fc2weeklyranker/ui/DownloadScreen.kt
           test -f app/src/main/java/com/shaterguy/fc2weeklyranker/ui/DownloadViewModel.kt
           test -f app/src/main/java/com/shaterguy/fc2weeklyranker/download/DownloadScheduler.kt
           test -f app/src/main/java/com/shaterguy/fc2weeklyranker/download/DownloadTransferRunner.kt
+          test -f scripts/verify_dev32_to_dev33_update.sh
           grep -Fq 'TopDestination("search", "검색"' app/src/main/java/com/shaterguy/fc2weeklyranker/MainActivity.kt
+          grep -Fq 'TopDestination("tags", "태그"' app/src/main/java/com/shaterguy/fc2weeklyranker/MainActivity.kt
           grep -Fq 'TopDestination("downloads", "다운로드"' app/src/main/java/com/shaterguy/fc2weeklyranker/MainActivity.kt
           grep -Fq 'SearchScreen(vm)' app/src/main/java/com/shaterguy/fc2weeklyranker/MainActivity.kt
+          grep -Fq 'TagResultsScreen' app/src/main/java/com/shaterguy/fc2weeklyranker/MainActivity.kt
           grep -Fq 'contentMode = contentMode' app/src/main/java/com/shaterguy/fc2weeklyranker/MainActivity.kt
           grep -Fq 'ContentModeSelector' app/src/main/java/com/shaterguy/fc2weeklyranker/MainActivity.kt
           grep -Fq 'RankingModeSelector' app/src/main/java/com/shaterguy/fc2weeklyranker/MainActivity.kt
           grep -Fq 'AdaptiveRanking.rank' app/src/main/java/com/shaterguy/fc2weeklyranker/ui/MainViewModel.kt
+          grep -Fq 'javFavoriteTags' app/src/main/java/com/shaterguy/fc2weeklyranker/data/SettingsStore.kt
+          grep -Fq 'MIGRATION_2_3' app/src/main/java/com/shaterguy/fc2weeklyranker/search/SearchStore.kt
       - name: Canonical verification
         run: bash scripts/verify.sh
       - name: Build unsigned TEST APK
@@ -63,7 +70,7 @@ jobs:
           APK="$(find app/build/outputs/apk/debug -maxdepth 1 -type f -name '*-unsigned.apk' -print -quit)"
           test -s "$APK"
           BADGING="$("$ANDROID_HOME/build-tools/37.0.0/aapt" dump badging "$APK")"
-          grep -Fq "package: name='com.shaterguy.fc2weeklyranker.dev' versionCode='56' versionName='0.2.0-dev32'" <<<"$BADGING"
+          grep -Fq "package: name='com.shaterguy.fc2weeklyranker.dev' versionCode='57' versionName='0.2.0-dev33'" <<<"$BADGING"
           printf '%s\n' "$GITHUB_SHA" > app/build/outputs/apk/debug/SOURCE_COMMIT.txt
           sha256sum "$APK" > app/build/outputs/apk/debug/UNSIGNED_SHA256SUMS.txt
       - name: Upload unsigned TEST provenance
@@ -98,13 +105,13 @@ jobs:
           UNSIGNED="$(find app/build/outputs/apk/debug -maxdepth 1 -type f -name '*-unsigned.apk' -print -quit)"
           OUT=app/build/outputs/fc2-weekly-ranker-test
           mkdir -p "$OUT"
-          ALIGNED="$OUT/fc2-weekly-ranker-test-v0.2.0-dev32-aligned-unsigned.apk"
-          APK="$OUT/fc2-weekly-ranker-test-v0.2.0-dev32.apk"
+          ALIGNED="$OUT/fc2-weekly-ranker-test-v0.2.0-dev33-aligned-unsigned.apk"
+          APK="$OUT/fc2-weekly-ranker-test-v0.2.0-dev33.apk"
           "$BT/zipalign" -p -f 4 "$UNSIGNED" "$ALIGNED"
           APKSIGNER="$BT/apksigner" bash tools/sign_test.sh "$ALIGNED" "$PASS_FILE" "$APK" > "$OUT/APKSIGNER_VERIFY.txt"
           "$BT/apksigner" verify --verbose --print-certs-pem --min-sdk-version 29 "$APK" > "$OUT/APK_CERT.txt"
           BADGING="$("$BT/aapt" dump badging "$APK")"
-          grep -Fq "package: name='com.shaterguy.fc2weeklyranker.dev' versionCode='56' versionName='0.2.0-dev32'" <<<"$BADGING"
+          grep -Fq "package: name='com.shaterguy.fc2weeklyranker.dev' versionCode='57' versionName='0.2.0-dev33'" <<<"$BADGING"
           PINNED_TEST_CERT_SHA256='ff32473e516ff59ca24ada94fe22e8282ce70fd66bd94fb0975340106d981cfd'
           CERT_SHA256="$(awk -F= '/^certificate_sha256=/{print $2; exit}' "$OUT/APKSIGNER_VERIFY.txt" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
           [[ "$CERT_SHA256" =~ ^[0-9a-f]{64}$ ]]
@@ -129,7 +136,7 @@ jobs:
           sha256sum "$APK" > "$OUT/SHA256SUMS.txt"
           printf '%s\n' "$GITHUB_SHA" > "$OUT/SOURCE_COMMIT.txt"
           echo 'configured=true' >> "$GITHUB_OUTPUT"
-      - name: Verify DEV15 upgrade migration and stable co-install
+      - name: Verify migrations, runtime contracts, and stable co-install
         if: steps.sign.outputs.configured == 'true'
         shell: bash
         env:
@@ -137,7 +144,7 @@ jobs:
         run: |
           set -euo pipefail
           BT="$ANDROID_HOME/build-tools/37.0.0"
-          CURRENT_APK="$GITHUB_WORKSPACE/app/build/outputs/fc2-weekly-ranker-test/fc2-weekly-ranker-test-v0.2.0-dev32.apk"
+          CURRENT_APK="$GITHUB_WORKSPACE/app/build/outputs/fc2-weekly-ranker-test/fc2-weekly-ranker-test-v0.2.0-dev33.apk"
           OLD="$RUNNER_TEMP/fc2-dev15"
           PASS_FILE="$RUNNER_TEMP/fc2-ranker-signing-pass-compat"
           AVD_NAME=fc2-compat
@@ -225,7 +232,7 @@ jobs:
           adb shell am force-stop com.shaterguy.fc2weeklyranker.dev
           sleep 1
 
-          NEW_DB_DIR="$RUNNER_TEMP/dev32-db"
+          NEW_DB_DIR="$RUNNER_TEMP/dev33-db"
           mkdir -p "$NEW_DB_DIR"
           adb exec-out run-as com.shaterguy.fc2weeklyranker.dev cat databases/ranker.db > "$NEW_DB_DIR/ranker.db"
           for suffix in -wal -shm; do
@@ -269,7 +276,7 @@ jobs:
           PY
 
           adb shell dumpsys package com.shaterguy.fc2weeklyranker | grep -Fq 'versionName=0.1.0'
-          adb shell dumpsys package com.shaterguy.fc2weeklyranker.dev | grep -Fq 'versionName=0.2.0-dev32'
+          adb shell dumpsys package com.shaterguy.fc2weeklyranker.dev | grep -Fq 'versionName=0.2.0-dev33'
 
           RECEIVER_APK="$(find external-stream-receiver/build/outputs/apk/debug -maxdepth 1 -type f -name '*.apk' -print -quit)"
           TEST_CANDIDATE="$(find app/build/outputs/apk/androidTest/debug -maxdepth 1 -type f -name '*.apk' -print -quit)"
@@ -286,16 +293,13 @@ jobs:
           INSTRUMENTATION_OUTPUT="$RUNNER_TEMP/runtime-instrumentation.txt"
           adb shell am instrument -w \
             -e fixtureBaseUrl "$FIXTURE_BASE" \
-            -e class com.shaterguy.fc2weeklyranker.media.ExternalVideoStreamProviderInstrumentedTest,com.shaterguy.fc2weeklyranker.media.NativeFullscreenAssistantInstrumentedTest \
+            -e class com.shaterguy.fc2weeklyranker.media.ExternalVideoStreamProviderInstrumentedTest,com.shaterguy.fc2weeklyranker.media.NativeFullscreenAssistantInstrumentedTest,com.shaterguy.fc2weeklyranker.search.SearchDatabaseInstrumentedTest,com.shaterguy.fc2weeklyranker.data.SettingsStoreInstrumentedTest \
             com.shaterguy.fc2weeklyranker.dev.test/androidx.test.runner.AndroidJUnitRunner \
             | tee "$INSTRUMENTATION_OUTPUT"
-          grep -Fq 'OK (4 tests)' "$INSTRUMENTATION_OUTPUT"
-      - name: Verify DEV31 in-place TEST update
-        if: steps.sign.outputs.configured == 'true'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: bash scripts/verify_dev31_to_dev32_update.sh app/build/outputs/fc2-weekly-ranker-test/fc2-weekly-ranker-test-v0.2.0-dev32.apk
+          grep -Fq 'OK (6 tests)' "$INSTRUMENTATION_OUTPUT"
+
+          REUSE_ADB=1 bash scripts/verify_dev32_to_dev33_update.sh "$CURRENT_APK"
+          adb shell dumpsys package com.shaterguy.fc2weeklyranker | grep -Fq 'versionName=0.1.0'
       - name: Upload signed TEST evidence
         if: steps.sign.outputs.configured == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -313,7 +317,7 @@ jobs:
         if: steps.sign.outputs.configured == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          path: app/build/outputs/fc2-weekly-ranker-test/fc2-weekly-ranker-test-v0.2.0-dev32.apk
+          path: app/build/outputs/fc2-weekly-ranker-test/fc2-weekly-ranker-test-v0.2.0-dev33.apk
           archive: false
           if-no-files-found: error
           retention-days: 14

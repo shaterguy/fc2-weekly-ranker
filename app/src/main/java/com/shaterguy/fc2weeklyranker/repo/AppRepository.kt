@@ -19,6 +19,7 @@ import com.shaterguy.fc2weeklyranker.download.DownloadTransferRunner
 import com.shaterguy.fc2weeklyranker.download.VideoDownloadWorker
 import com.shaterguy.fc2weeklyranker.network.AvseeClient
 import com.shaterguy.fc2weeklyranker.network.BaseUrlPolicy
+import com.shaterguy.fc2weeklyranker.network.RemotePost
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
@@ -238,8 +239,8 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
 
     suspend fun markPostVisited(postId: String) = settings.markPostVisited(postId)
 
-    suspend fun loadVideos(postId: String) {
-        val post = db.postDao().byId(postId) ?: return
+    suspend fun loadVideos(postId: String): RemotePost? {
+        val post = db.postDao().byId(postId) ?: return null
         val mode = ContentMode.fromSourceKey(post.sourceKey)
         videoMutationMutex.withLock { clearProbeSessions(postId) }
         val detailUrl = rebaseDetailUrl(post.url, settings.baseUrl(mode).first())
@@ -270,6 +271,7 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
                 .flatMapTo(linkedSetOf()) { it.activeVideoIds }
             db.videoDao().reconcileForPost(postId, reconcileVideoRows(existing, entities, detailUrl, activeProbeIds))
         }
+        return detail
     }
 
     suspend fun registerProbedVideo(postId: String, url: String, referer: String, ordinal: Int) {

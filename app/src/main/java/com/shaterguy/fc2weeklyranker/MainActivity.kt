@@ -72,11 +72,15 @@ import com.shaterguy.fc2weeklyranker.media.NativeVideoSessionController
 import com.shaterguy.fc2weeklyranker.media.RestrictedIframePlayer
 import com.shaterguy.fc2weeklyranker.media.createExternalVideoPlayerRequest
 import com.shaterguy.fc2weeklyranker.media.rememberNativeVideoSessionController
+import com.shaterguy.fc2weeklyranker.network.RemoteTag
 import com.shaterguy.fc2weeklyranker.repo.AppRepository
 import com.shaterguy.fc2weeklyranker.ui.DownloadScreen
 import com.shaterguy.fc2weeklyranker.ui.MainViewModel
 import com.shaterguy.fc2weeklyranker.ui.SEARCH_SNAPSHOT_KEY
 import com.shaterguy.fc2weeklyranker.ui.SearchScreen
+import com.shaterguy.fc2weeklyranker.ui.TagFeatureViewModel
+import com.shaterguy.fc2weeklyranker.ui.TagResultsScreen
+import com.shaterguy.fc2weeklyranker.ui.TagScreen
 import java.net.URI
 import java.time.Instant
 import java.time.ZoneId
@@ -84,10 +88,11 @@ import java.time.format.DateTimeFormatter
 
 class MainActivity : ComponentActivity() {
     private val mainViewModel: MainViewModel by viewModels()
+    private val tagFeatureViewModel: TagFeatureViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { MaterialTheme { RankerApp(mainViewModel) } }
+        setContent { MaterialTheme { RankerApp(mainViewModel, tagFeatureViewModel) } }
     }
 
     override fun onStart() {
@@ -102,13 +107,24 @@ class MainActivity : ComponentActivity() {
 }
 
 private data class TopDestination(val route: String, val label: String, val glyph: String)
-private val destinations = listOf(
+private val fc2Destinations = listOf(
     TopDestination("ranking", "랭킹", "▦"),
     TopDestination("search", "검색", "⌕"),
     TopDestination("favorites", "즐겨찾기", "♥"),
     TopDestination("downloads", "다운로드", "↓"),
     TopDestination("settings", "설정", "⚙"),
 )
+private val javDestinations = listOf(
+    TopDestination("ranking", "랭킹", "▦"),
+    TopDestination("search", "검색", "⌕"),
+    TopDestination("tags", "태그", "#"),
+    TopDestination("favorites", "즐겨찾기", "♥"),
+    TopDestination("downloads", "다운로드", "↓"),
+    TopDestination("settings", "설정", "⚙"),
+)
+
+private fun destinationsFor(mode: ContentMode): List<TopDestination> =
+    if (mode == ContentMode.JAV) javDestinations else fc2Destinations
 
 internal data class DetailPostNeighbors(val previousId: String?, val nextId: String?)
 
@@ -154,12 +170,13 @@ private fun openExternalPlayer(context: Context, video: VideoEntity) {
 }
 
 @Composable
-private fun RankerApp(vm: MainViewModel) {
+private fun RankerApp(vm: MainViewModel, tagVm: TagFeatureViewModel) {
     val nav = rememberNavController()
     val backStack by nav.currentBackStackEntryAsState()
     val route = backStack?.destination?.route.orEmpty()
-    val showBottom = destinations.any { it.route == route }
     val contentMode by vm.selectedContentMode.collectAsState()
+    val destinations = remember(contentMode) { destinationsFor(contentMode) }
+    val showBottom = destinations.any { it.route == route }
     val rankingPosts by vm.rankedPosts.collectAsState()
     val rankingPostIds = remember(rankingPosts) { rankingPosts.map { it.post.id } }
     val favoritePosts by vm.favorites.collectAsState()
@@ -171,6 +188,17 @@ private fun RankerApp(vm: MainViewModel) {
         detailListRoute = listRoute
         nav.navigate("detail/${Uri.encode(id)}")
     }
+
+    LaunchedEffect(contentMode, route) {
+        tagVm.onContentModeChanged(contentMode)
+        if (contentMode != ContentMode.JAV && route in setOf("tags", "tag-results")) {
+            nav.navigate("ranking") {
+                popUpTo("ranking") { inclusive = false }
+                launchSingleTop = true
+            }
+        }
+    }
+
     Scaffold(
         topBar = {
             if (showBottom) ContentModeSelector(contentMode, vm::selectContentMode)
@@ -209,6 +237,21 @@ private fun RankerApp(vm: MainViewModel) {
                     vm.openSearchPost(post) { id -> openDetail(id, "search", postIds) }
                 }
             }
+            composable("tags") {
+                TagScreen(tagVm) { query ->
+                    tagVm.searchTagPosts(query)
+                    nav.navigate("tag-results") { launchSingleTop = true }
+                }
+            }
+            composable("tag-results") {
+                TagResultsScreen(
+                    vm = tagVm,
+                    onBack = { nav.popBackStack() },
+                    onPost = { post, postIds ->
+                        tagVm.openTagPost(post) { id -> openDetail(id, "tag-results", postIds) }
+                    },
+                )
+            }
             composable("favorites") {
                 FavoritesScreen(vm) { id -> openDetail(id, "favorites", favoritePostIds) }
             }
@@ -225,6 +268,7 @@ private fun RankerApp(vm: MainViewModel) {
             ) { entry ->
                 VideoDetailScreen(
                     vm = vm,
+                    tagVm = tagVm,
                     postId = entry.arguments?.getString("postId").orEmpty(),
                     navigationPostIds = detailPostIds,
                     onList = {
@@ -233,6 +277,10 @@ private fun RankerApp(vm: MainViewModel) {
                         }
                     },
                     onPost = { id -> nav.navigate("detail/${Uri.encode(id)}") },
+                    onTag = { query ->
+                        tagVm.searchTagPosts(query)
+                        nav.navigate("tag-results") { launchSingleTop = true }
+                    },
                 )
             }
         }
@@ -403,24 +451,31 @@ private fun SettingsScreen(vm: MainViewModel) {
 @Composable
 private fun VideoDetailScreen(
     vm: MainViewModel,
+    tagVm: TagFeatureViewModel,
     postId: String,
     navigationPostIds: List<String>,
     onList: () -> Unit,
     onPost: (String) -> Unit,
+    onTag: (String) -> Unit,
 ) {
     val videos by remember(postId) { vm.videos(postId) }.collectAsState(initial = emptyList())
     val post by remember(postId) { vm.post(postId) }.collectAsState(initial = null)
     val favorite by remember(postId) { vm.isFavorite(postId) }.collectAsState(initial = false)
     val previousPost by remember(postId) { vm.previousPost(postId) }.collectAsState(initial = null)
     val nextPost by remember(postId) { vm.nextPost(postId) }.collectAsState(initial = null)
-    val loading by vm.isLoading.collectAsState()
-    val message by vm.message.collectAsState()
+    val mainLoading by vm.isLoading.collectAsState()
+    val mainMessage by vm.message.collectAsState()
+    val detailLoading by tagVm.isDetailLoading.collectAsState()
+    val detailMessage by tagVm.detailMessage.collectAsState()
+    val loading = mainLoading || detailLoading
+    val message = detailMessage ?: mainMessage
     val uriHandler = LocalUriHandler.current
     val nativeVideoController = rememberNativeVideoSessionController(postId)
     var refreshStartedAt by remember(postId) { mutableStateOf<Long?>(null) }
     var syncFinished by remember(postId) { mutableStateOf(false) }
     var syncSucceeded by remember(postId) { mutableStateOf(false) }
     var activeMediaExpected by remember(postId) { mutableStateOf(false) }
+    var detailTags by remember(postId) { mutableStateOf<List<RemoteTag>>(emptyList()) }
     val neighbors = remember(postId, navigationPostIds, previousPost?.id, nextPost?.id) {
         if (navigationPostIds.isNotEmpty()) {
             detailPostNeighbors(navigationPostIds, postId)
@@ -439,11 +494,13 @@ private fun VideoDetailScreen(
         syncFinished = false
         syncSucceeded = false
         activeMediaExpected = false
+        detailTags = emptyList()
         vm.openPost(postId)
-        val result = vm.loadVideos(postId)
+        val result = tagVm.loadDetail(postId)
         if (result != null) {
             refreshStartedAt = result.refreshStartedAtEpochMillis
             activeMediaExpected = result.hasActiveMedia
+            detailTags = result.tags
             syncSucceeded = true
         }
         syncFinished = true
@@ -518,7 +575,10 @@ private fun VideoDetailScreen(
                     .semantics { contentDescription = "다음 게시물로 이동" },
             ) { Text("다음 →", maxLines = 1, style = MaterialTheme.typography.labelSmall) }
         }
-        StatusLine(loading, message, vm::clearMessage)
+        StatusLine(loading, message) {
+            vm.clearMessage()
+            tagVm.clearDetailMessage()
+        }
 
         if (contentReady) {
             resolvers.forEach { resolver ->
@@ -545,6 +605,24 @@ private fun VideoDetailScreen(
             ) {
                 itemsIndexed(directVideos, key = { _, video -> video.id }) { index, video ->
                     VideoCard(vm, index, video, nativeVideoController)
+                }
+                if (detailTags.isNotEmpty()) {
+                    item(key = "detail-tags") {
+                        Column(
+                            Modifier.fillMaxWidth().padding(top = 4.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text("태그", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                            detailTags.forEach { tag ->
+                                OutlinedButton(
+                                    onClick = { onTag(tag.query) },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .semantics { contentDescription = "태그 ${tag.label} 검색" },
+                                ) { Text(tag.label) }
+                            }
+                        }
+                    }
                 }
             }
         } else if (syncFinished && syncSucceeded && activeMediaExpected) {

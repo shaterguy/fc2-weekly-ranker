@@ -99,7 +99,7 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
     }
 
     fun rankingObservations(mode: ContentMode = ContentMode.FC2): Flow<List<RankObservationEntity>> =
-        settings.baseUrl.flatMapLatest { baseUrl ->
+        settings.baseUrl(mode).flatMapLatest { baseUrl ->
             db.rankObservationDao().observeDataset(rankDatasetKey(baseUrl, mode))
         }
 
@@ -115,7 +115,7 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
 
     suspend fun ensurePage(pageIndex: Int, mode: ContentMode = ContentMode.FC2) {
         val anchorMillis = settings.ensureAnchor(mode)
-        val baseUrl = settings.baseUrl.first()
+        val baseUrl = settings.baseUrl(mode).first()
         if (!settings.isRankingWindowCovered(coverageKey(baseUrl, anchorMillis, pageIndex, mode))) {
             refreshPage(pageIndex, mode = mode)
         }
@@ -136,7 +136,7 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
         mode: ContentMode,
     ) {
         val anchor = Instant.ofEpochMilli(anchorMillis)
-        val baseUrl = settings.baseUrl.first()
+        val baseUrl = settings.baseUrl(mode).first()
         val datasetKey = rankDatasetKey(baseUrl, mode)
         val coverageKey = coverageKey(baseUrl, anchorMillis, pageIndex, mode)
         if (!force && settings.isRankingWindowCovered(coverageKey)) return
@@ -225,12 +225,12 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
     ): Result<String> {
         val normalized = BaseUrlPolicy.normalize(input).getOrElse { return Result.failure(it) }
         source.testConnection(normalized, mode.boardTable).getOrElse { return Result.failure(it) }
-        settings.setBaseUrl(normalized)
+        settings.setBaseUrl(normalized, mode)
         return Result.success(normalized)
     }
 
     suspend fun testCurrentBaseUrl(mode: ContentMode = ContentMode.FC2): Result<Unit> =
-        source.testConnection(settings.baseUrl.first(), mode.boardTable)
+        source.testConnection(settings.baseUrl(mode).first(), mode.boardTable)
 
     suspend fun toggleFavorite(postId: String) {
         if (db.postDao().isFavorite(postId)) db.postDao().removeFavorite(postId) else db.postDao().addFavorite(FavoriteEntity(postId, System.currentTimeMillis()))
@@ -240,8 +240,9 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
 
     suspend fun loadVideos(postId: String) {
         val post = db.postDao().byId(postId) ?: return
+        val mode = ContentMode.fromSourceKey(post.sourceKey)
         videoMutationMutex.withLock { clearProbeSessions(postId) }
-        val detailUrl = rebaseDetailUrl(post.url, settings.baseUrl.first())
+        val detailUrl = rebaseDetailUrl(post.url, settings.baseUrl(mode).first())
         val detail = source.loadDetail(detailUrl)
         val now = System.currentTimeMillis()
         val seenMedia = linkedSetOf<String>()

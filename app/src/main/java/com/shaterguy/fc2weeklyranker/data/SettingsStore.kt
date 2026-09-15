@@ -19,13 +19,16 @@ class SettingsStore(context: Context, private val clockMillis: () -> Long = { Sy
     val anchorEpochMillis: Flow<Long?> = anchorEpochMillis(ContentMode.FC2)
     val selectedContentMode: Flow<ContentMode> =
         dataStore.data.map { ContentMode.fromSourceKey(it[CONTENT_MODE]) }
-    val baseUrl: Flow<String> = dataStore.data.map { it[BASE_URL] ?: DEFAULT_BASE_URL }
+    val baseUrl: Flow<String> = baseUrl(ContentMode.FC2)
     val visitedPostIds: Flow<Set<String>> = dataStore.data.map { it[VISITED_POST_IDS].orEmpty() }
     val fullscreenGestureSensitivity: Flow<String> =
         dataStore.data.map { it[FULLSCREEN_GESTURE_SENSITIVITY] ?: DEFAULT_FULLSCREEN_GESTURE_SENSITIVITY }
 
     fun anchorEpochMillis(mode: ContentMode): Flow<Long?> =
         dataStore.data.map { it[anchorKey(mode)] }
+
+    fun baseUrl(mode: ContentMode): Flow<String> =
+        dataStore.data.map { it[baseUrlKey(mode)] ?: mode.defaultBaseUrl }
 
     suspend fun ensureAnchor(mode: ContentMode = ContentMode.FC2): Long {
         val key = anchorKey(mode)
@@ -64,7 +67,9 @@ class SettingsStore(context: Context, private val clockMillis: () -> Long = { Sy
         dataStore.edit { it[CONTENT_MODE] = mode.sourceKey }
     }
 
-    suspend fun setBaseUrl(normalizedBaseUrl: String) { dataStore.edit { it[BASE_URL] = normalizedBaseUrl } }
+    suspend fun setBaseUrl(normalizedBaseUrl: String, mode: ContentMode = ContentMode.FC2) {
+        dataStore.edit { it[baseUrlKey(mode)] = normalizedBaseUrl }
+    }
 
     suspend fun setFullscreenGestureSensitivity(value: String) {
         dataStore.edit { it[FULLSCREEN_GESTURE_SENSITIVITY] = value }
@@ -88,6 +93,9 @@ class SettingsStore(context: Context, private val clockMillis: () -> Long = { Sy
     private fun anchorKey(mode: ContentMode): Preferences.Key<Long> =
         if (mode == ContentMode.FC2) ANCHOR else JAV_ANCHOR
 
+    private fun baseUrlKey(mode: ContentMode): Preferences.Key<String> =
+        if (mode == ContentMode.FC2) BASE_URL else JAV_BASE_URL
+
     companion object {
         const val DEFAULT_BASE_URL = "https://01.avsee.is"
         const val DEFAULT_FULLSCREEN_GESTURE_SENSITIVITY = "NORMAL"
@@ -95,6 +103,7 @@ class SettingsStore(context: Context, private val clockMillis: () -> Long = { Sy
         private val JAV_ANCHOR = longPreferencesKey("jav_anchor_epoch_millis")
         private val CONTENT_MODE = stringPreferencesKey("content_mode")
         private val BASE_URL = stringPreferencesKey("base_url")
+        private val JAV_BASE_URL = stringPreferencesKey("jav_base_url")
         private val VISITED_POST_IDS = stringSetPreferencesKey("visited_post_ids")
         private val RANKING_COVERED_WINDOWS = stringSetPreferencesKey("ranking_covered_windows_v1")
         private val FULLSCREEN_GESTURE_SENSITIVITY = stringPreferencesKey("fullscreen_gesture_sensitivity")

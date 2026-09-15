@@ -1,45 +1,50 @@
 package com.shaterguy.fc2weeklyranker.ui
 
+import com.shaterguy.fc2weeklyranker.domain.ContentMode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 internal class PagePrefetchCoordinator(
     private val scope: CoroutineScope,
-    private val ensurePage: suspend (Int) -> Unit,
+    private val ensurePage: suspend (ContentMode, Int) -> Unit,
 ) {
-    private var targetPage: Int? = null
+    private data class Target(val mode: ContentMode, val pageIndex: Int)
+
+    private var target: Target? = null
     private var job: Job? = null
     private var succeeded = false
 
-    fun start(pageIndex: Int) {
+    fun start(mode: ContentMode, pageIndex: Int) {
         if (pageIndex < 0) return
-        if (targetPage == pageIndex && job?.isActive == true) return
+        val requested = Target(mode, pageIndex)
+        if (target == requested && job?.isActive == true) return
         cancel()
-        targetPage = pageIndex
+        target = requested
         succeeded = false
         job = scope.launch {
-            succeeded = runCatching { ensurePage(pageIndex) }.isSuccess
+            succeeded = runCatching { ensurePage(mode, pageIndex) }.isSuccess
         }
     }
 
-    suspend fun consume(pageIndex: Int): Boolean {
-        if (targetPage != pageIndex) return false
+    suspend fun consume(mode: ContentMode, pageIndex: Int): Boolean {
+        val requested = Target(mode, pageIndex)
+        if (target != requested) return false
         val current = job ?: return false
         current.join()
-        val result = targetPage == pageIndex && succeeded
-        if (targetPage == pageIndex) {
-            targetPage = null
-            job = null
-            succeeded = false
-        }
+        val result = target == requested && succeeded
+        if (target == requested) reset()
         return result
     }
 
     fun cancel() {
         job?.cancel()
+        reset()
+    }
+
+    private fun reset() {
         job = null
-        targetPage = null
+        target = null
         succeeded = false
     }
 }

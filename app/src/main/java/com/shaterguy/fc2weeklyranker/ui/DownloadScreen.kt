@@ -32,36 +32,44 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.shaterguy.fc2weeklyranker.data.DownloadListItem
 import com.shaterguy.fc2weeklyranker.data.DownloadStatus
+import com.shaterguy.fc2weeklyranker.domain.ContentMode
 import com.shaterguy.fc2weeklyranker.download.VideoDownloadWorker
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 @Composable
 fun DownloadScreen(
+    contentMode: ContentMode,
     onPost: (String, List<String>) -> Unit,
     vm: DownloadViewModel = viewModel(),
 ) {
     val active by vm.activeDownloads.collectAsState()
     val history by vm.completedDownloads.collectAsState()
-    val historyPostIds = remember(history) { history.map { it.postId }.distinct() }
+    val visibleActive = remember(active, contentMode) {
+        active.filter { contentModeForLocalPostId(it.postId) == contentMode }
+    }
+    val visibleHistory = remember(history, contentMode) {
+        history.filter { contentModeForLocalPostId(it.postId) == contentMode }
+    }
+    val historyPostIds = remember(visibleHistory) { visibleHistory.map { it.postId }.distinct() }
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
         contentPadding = PaddingValues(top = 12.dp, bottom = 24.dp),
     ) {
         item {
-            Text("다운로드", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Text("${contentMode.sourceKey} 다운로드", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(10.dp))
             Text("다운로드 중", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         }
-        items(active, key = { it.videoId }) { item ->
+        items(visibleActive, key = { it.videoId }) { item ->
             ActiveDownloadCard(item, vm)
         }
         item {
             Spacer(Modifier.height(8.dp))
             Text("다운로드 내역", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         }
-        items(history, key = { it.videoId }) { item ->
+        items(visibleHistory, key = { it.videoId }) { item ->
             CompletedDownloadCard(item, vm) { postId -> onPost(postId, historyPostIds) }
         }
     }

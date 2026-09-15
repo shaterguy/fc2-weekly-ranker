@@ -57,9 +57,10 @@ object AppGraph {
     fun initialize(app: Application) {
         if (::database.isInitialized) return
         database = Room.databaseBuilder(app, AppDatabase::class.java, "ranker.db")
-            .addMigrations(AppDatabase.MIGRATION_1_2, AppDatabase.MIGRATION_2_3)
+            .addMigrations(AppDatabase.MIGRATION_1_2, AppDatabase.MIGRATION_2_3, AppDatabase.MIGRATION_3_4)
             .build()
         searchDatabase = Room.databaseBuilder(app, SearchDatabase::class.java, "search.db")
+            .addMigrations(SearchDatabase.MIGRATION_1_2)
             .build()
         settings = SettingsStore(app)
         httpClient = OkHttpClient.Builder()

@@ -33,6 +33,7 @@ import javax.net.ssl.SSLException
 import java.util.LinkedHashMap
 
 private const val SEARCH_PATH = "/bbs/search.php"
+private const val TAG_PATH = "/bbs/tag.php"
 private const val UA = "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 Chrome/151 Mobile Safari/537.36"
 private val SEOUL = ZoneId.of("Asia/Seoul")
 private val COUNT_TOKEN = Regex("(?<![A-Za-z0-9])(?:\\d{1,3}(?:,\\d{3})+|\\d+)(?![A-Za-z0-9])")
@@ -42,11 +43,28 @@ private fun boardPath(boardTable: String): String =
     "/bbs/board.php?bo_table=$boardTable&sop=and&sst=wr_datetime&sod=desc"
 
 data class RemoteMedia(val url: String, val referer: String, val kind: String, val ordinal: Int)
-data class RemotePost(val id: String, val url: String, val title: String, val postedAt: Instant, val recommendationCount: Int, val media: List<RemoteMedia>)
+data class RemoteTag(val query: String, val label: String)
+data class RemotePost(
+    val id: String,
+    val url: String,
+    val title: String,
+    val postedAt: Instant,
+    val recommendationCount: Int,
+    val media: List<RemoteMedia>,
+    val tags: List<RemoteTag> = emptyList(),
+)
 data class RemoteRankPost(val id: String, val url: String, val title: String, val postedAt: Instant, val commentCount: Int)
-data class RemoteSearchPost(val id: String, val url: String, val title: String)
+data class RemoteSearchPost(val id: String, val url: String, val title: String, val occurrenceCount: Int = 1)
+data class RemoteTagPost(
+    val id: String,
+    val url: String,
+    val title: String,
+    val commentCount: Int,
+    val viewCount: Int,
+)
 internal data class BoardRow(val id: String, val url: String, val title: String, val commentCount: Int)
 internal data class SearchPage(val posts: List<RemoteSearchPost>, val totalPages: Int)
+internal data class TagPage(val posts: List<RemoteTagPost>, val totalPages: Int)
 
 class AvseeClient(
     http: OkHttpClient,
@@ -222,13 +240,36 @@ class AvseeClient(
         val firstUrl = buildSearchUrl(baseUrl, term, 1, boardTable)
         val first = parseSearchPage(fetch(firstUrl), firstUrl)
         val out = LinkedHashMap<String, RemoteSearchPost>()
-        first.posts.forEach { post -> out.putIfAbsent(post.id, post) }
+        first.posts.forEach { post -> mergeSearchPost(out, post) }
 
         var page = 2
         while (page <= first.totalPages) {
             currentCoroutineContext().ensureActive()
             val pageUrl = buildSearchUrl(baseUrl, term, page, boardTable)
             val parsed = parseSearchPage(fetch(pageUrl, firstUrl), pageUrl)
+            parsed.posts.forEach { post -> mergeSearchPost(out, post) }
+            page += 1
+        }
+        out.values.toList()
+    }
+
+    suspend fun searchTagPosts(
+        baseUrl: String,
+        query: String,
+    ): List<RemoteTagPost> = withContext(ioDispatcher) {
+        val term = query.trim()
+        require(term.isNotEmpty()) { "태그를 입력해 주세요." }
+
+        val firstUrl = buildTagSearchUrl(baseUrl, term, 1)
+        val first = parseTagPage(fetch(firstUrl), firstUrl)
+        val out = LinkedHashMap<String, RemoteTagPost>()
+        first.posts.forEach { post -> out.putIfAbsent(post.id, post) }
+
+        var page = 2
+        while (page <= first.totalPages) {
+            currentCoroutineContext().ensureActive()
+            val pageUrl = buildTagSearchUrl(baseUrl, term, page)
+            val parsed = parseTagPage(fetch(pageUrl, firstUrl), pageUrl)
             parsed.posts.forEach { post -> out.putIfAbsent(post.id, post) }
             page += 1
         }
@@ -247,6 +288,14 @@ class AvseeClient(
         return "$baseUrl$SEARCH_PATH?sfl=wr_subject%7C%7Cwr_content&stx=$encoded&sop=and&gr_id=&srows=1000&onetable=$onetable&page=$page"
     }
 
+    internal fun buildTagSearchUrl(baseUrl: String, query: String, page: Int): String {
+        require(page >= 1)
+        val term = query.trim()
+        require(term.isNotEmpty())
+        val encoded = URLEncoder.encode(term, "UTF-8")
+        return "$baseUrl$TAG_PATH?q=$encoded&eq=&page=$page"
+    }
+
     internal fun parseSearchPage(html: String, pageUrl: String): SearchPage {
         val doc = Jsoup.parse(html, pageUrl)
         val posts = LinkedHashMap<String, RemoteSearchPost>()
@@ -257,7 +306,9 @@ class AvseeClient(
             if (decodedQueryParam(url, "bo_table") != boardTable) return@forEach
             val id = decodedQueryParam(url, "wr_id")?.takeIf(String::isNotBlank) ?: return@forEach
             val title = link.text().trim().takeIf(String::isNotBlank) ?: "게시물 $id"
-            posts.putIfAbsent(id, RemoteSearchPost(id, url.substringBefore('#'), title))
+            val normalized = RemoteSearchPost(id, url.substringBefore('#'), title)
+            val existing = posts[id]
+            posts[id] = if (existing == null) normalized else existing.copy(occurrenceCount = existing.occurrenceCount + 1)
         }
 
         val currentPage = decodedQueryParam(pageUrl, "page")?.toIntOrNull()?.coerceAtLeast(1) ?: 1
@@ -275,6 +326,45 @@ class AvseeClient(
             ?: currentPage
         check(totalPages <= MAX_SEARCH_PAGE) { "검색 페이지 수가 안전 범위를 벗어났습니다: $totalPages" }
         return SearchPage(posts.values.toList(), totalPages)
+    }
+
+    internal fun parseTagPage(html: String, pageUrl: String): TagPage {
+        val doc = Jsoup.parse(html, pageUrl)
+        val posts = LinkedHashMap<String, RemoteTagPost>()
+        doc.select(".tagbox-media .media").forEach { row ->
+            val link = row.selectFirst(".media-heading a[href*='bo_table=javc'][href*='wr_id=']") ?: return@forEach
+            val url = link.absUrl("href").takeIf(String::isNotBlank) ?: return@forEach
+            if (decodedQueryParam(url, "bo_table") != "javc") return@forEach
+            val id = decodedQueryParam(url, "wr_id")?.takeIf(String::isNotBlank) ?: return@forEach
+            val title = link.text().trim().takeIf(String::isNotBlank) ?: "게시물 $id"
+            val (commentCount, viewCount) = parseTagMetrics(row.selectFirst(".media-info")) ?: return@forEach
+            posts.putIfAbsent(
+                id,
+                RemoteTagPost(
+                    id = id,
+                    url = url.substringBefore('#'),
+                    title = title,
+                    commentCount = commentCount,
+                    viewCount = viewCount,
+                ),
+            )
+        }
+
+        val currentPage = decodedQueryParam(pageUrl, "page")?.toIntOrNull()?.coerceAtLeast(1) ?: 1
+        val signature = tagSignature(pageUrl)
+        val totalPages = doc.select("a[href]")
+            .mapNotNull { link ->
+                val url = link.absUrl("href").takeIf(String::isNotBlank) ?: return@mapNotNull null
+                val uri = runCatching { URI(url) }.getOrNull() ?: return@mapNotNull null
+                if (!uri.path.orEmpty().endsWith(TAG_PATH)) return@mapNotNull null
+                if (tagSignature(url) != signature) return@mapNotNull null
+                decodedQueryParam(url, "page")?.toIntOrNull()
+            }
+            .maxOrNull()
+            ?.coerceAtLeast(currentPage)
+            ?: currentPage
+        check(totalPages <= MAX_TAG_PAGE) { "태그 검색 페이지 수가 안전 범위를 벗어났습니다: $totalPages" }
+        return TagPage(posts.values.toList(), totalPages)
     }
 
     internal fun clearCrawlCache() {
@@ -326,7 +416,37 @@ class AvseeClient(
             ?: "게시물 $id"
         val postedAt = parsePostedAt(doc, referenceInstant) ?: error("게시시각을 찾을 수 없습니다.")
         val media = if (includeMedia) parseMedia(doc, detailUrl) else emptyList()
-        return RemotePost(id, detailUrl, title, postedAt, parseRecommendation(doc), media)
+        val tags = if (decodedQueryParam(detailUrl, "bo_table") == "javc") parseDetailTags(doc) else emptyList()
+        return RemotePost(id, detailUrl, title, postedAt, parseRecommendation(doc), media, tags)
+    }
+
+    private fun mergeSearchPost(out: LinkedHashMap<String, RemoteSearchPost>, post: RemoteSearchPost) {
+        val existing = out[post.id]
+        out[post.id] = if (existing == null) post else existing.copy(
+            occurrenceCount = existing.occurrenceCount + post.occurrenceCount,
+        )
+    }
+
+    private fun parseDetailTags(doc: Document): List<RemoteTag> {
+        val tags = LinkedHashMap<String, RemoteTag>()
+        doc.select("p.view-tag.view-padding a[href*='tag.php?q=']").forEach { link ->
+            val url = link.absUrl("href").takeIf(String::isNotBlank) ?: return@forEach
+            val uri = runCatching { URI(url) }.getOrNull() ?: return@forEach
+            if (!uri.path.orEmpty().endsWith(TAG_PATH)) return@forEach
+            val query = decodedQueryParam(url, "q")?.trim()?.takeIf(String::isNotBlank) ?: return@forEach
+            val label = link.text().trim().takeIf(String::isNotBlank) ?: query
+            tags.putIfAbsent(query, RemoteTag(query = query, label = label))
+        }
+        return tags.values.toList()
+    }
+
+    private fun parseTagMetrics(info: Element?): Pair<Int, Int>? {
+        if (info == null || info.selectFirst(".fa-comment") == null || info.selectFirst(".fa-eye") == null) return null
+        val metrics = COUNT_TOKEN.findAll(info.text())
+            .mapNotNull { match -> match.value.replace(",", "").toIntOrNull() }
+            .toList()
+        if (metrics.size < 2) return null
+        return metrics[0] to metrics[1]
     }
 
     private suspend fun resolveBoardRowDate(
@@ -585,6 +705,9 @@ class AvseeClient(
     private fun searchSignature(url: String): List<String> =
         listOf("sfl", "stx", "sop", "gr_id", "srows", "onetable").map { key -> decodedQueryParam(url, key).orEmpty() }
 
+    private fun tagSignature(url: String): List<String> =
+        listOf("q", "eq").map { key -> decodedQueryParam(url, key).orEmpty() }
+
     private fun decodedQueryParam(url: String, key: String): String? =
         queryParam(url, key)?.let { value -> runCatching { URLDecoder.decode(value, "UTF-8") }.getOrDefault(value) }
 
@@ -598,6 +721,7 @@ class AvseeClient(
         const val USER_AGENT: String = UA
         private const val MAX_BOARD_PAGE = 1_000_000
         private const val MAX_SEARCH_PAGE = 1_000_000
+        private const val MAX_TAG_PAGE = 1_000_000
         private const val MAX_CRAWL_BOARD_REQUESTS = 2_048
         private const val MAX_CRAWL_CACHE_ENTRIES = 256
     }

@@ -60,7 +60,7 @@ object AppGraph {
             .addMigrations(AppDatabase.MIGRATION_1_2, AppDatabase.MIGRATION_2_3, AppDatabase.MIGRATION_3_4)
             .build()
         searchDatabase = Room.databaseBuilder(app, SearchDatabase::class.java, "search.db")
-            .addMigrations(SearchDatabase.MIGRATION_1_2)
+            .addMigrations(SearchDatabase.MIGRATION_1_2, SearchDatabase.MIGRATION_2_3)
             .build()
         settings = SettingsStore(app)
         httpClient = OkHttpClient.Builder()

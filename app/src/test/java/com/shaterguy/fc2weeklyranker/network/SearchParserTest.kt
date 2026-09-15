@@ -19,7 +19,7 @@ class SearchParserTest {
     }
 
     @Test
-    fun `parses only main search rows filters javfc2 and deduplicates comment hits`() {
+    fun `parses only main search rows filters javfc2 and counts duplicate comment hits`() {
         val html = """
             <div id='at-main'>
               <div class='search-media'>
@@ -69,6 +69,7 @@ class SearchParserTest {
         assertEquals("123", parsed.posts.single().id)
         assertEquals("first parent title", parsed.posts.single().title)
         assertEquals("https://example.test/bbs/board.php?bo_table=javfc2&wr_id=123", parsed.posts.single().url)
+        assertEquals(2, parsed.posts.single().occurrenceCount)
     }
 
     @Test
@@ -95,6 +96,7 @@ class SearchParserTest {
         assertEquals("321", parsed.posts.single().id)
         assertEquals("JAV title", parsed.posts.single().title)
         assertEquals("https://example.test/bbs/board.php?bo_table=javc&wr_id=321", parsed.posts.single().url)
+        assertEquals(1, parsed.posts.single().occurrenceCount)
     }
 
     @Test

@@ -17,12 +17,25 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import com.shaterguy.fc2weeklyranker.network.RemoteSearchPost
 import kotlinx.coroutines.flow.Flow
 
+internal const val SEARCH_RESULT_OCCURRENCE_MIGRATION_SQL =
+    "ALTER TABLE search_results ADD COLUMN occurrenceCount INTEGER NOT NULL DEFAULT 1"
+
 internal object SearchStatus {
     const val RUNNING = "RUNNING"
     const val COMPLETED = "COMPLETED"
     const val FAILED = "FAILED"
     const val CANCELLED = "CANCELLED"
     const val INTERRUPTED = "INTERRUPTED"
+}
+
+internal enum class SearchPageWriteDecision { APPLY, ALREADY_APPLIED, REJECT_FUTURE }
+
+internal object SearchPageWritePolicy {
+    fun decide(expectedNextPage: Int, incomingPage: Int): SearchPageWriteDecision = when {
+        incomingPage < expectedNextPage -> SearchPageWriteDecision.ALREADY_APPLIED
+        incomingPage > expectedNextPage -> SearchPageWriteDecision.REJECT_FUTURE
+        else -> SearchPageWriteDecision.APPLY
+    }
 }
 
 @Entity(tableName = "search_session")
@@ -50,8 +63,9 @@ internal data class SearchResultEntity(
     val url: String,
     val title: String,
     val sequence: Long,
+    @ColumnInfo(defaultValue = "1") val occurrenceCount: Int = 1,
 ) {
-    fun toRemote(): RemoteSearchPost = RemoteSearchPost(postId, url, title)
+    fun toRemote(): RemoteSearchPost = RemoteSearchPost(postId, url, title, occurrenceCount)
 }
 
 @Dao
@@ -77,6 +91,15 @@ internal abstract class SearchDao {
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     protected abstract suspend fun insertResults(results: List<SearchResultEntity>)
+
+    @Query(
+        """
+        UPDATE search_results
+        SET occurrenceCount = occurrenceCount + :delta
+        WHERE sessionToken = :token AND postId = :postId
+        """,
+    )
+    protected abstract suspend fun incrementOccurrenceCount(token: String, postId: String, delta: Int): Int
 
     @Query("DELETE FROM search_results")
     protected abstract suspend fun clearResults()
@@ -168,19 +191,31 @@ internal abstract class SearchDao {
     ): Boolean {
         val current = currentSession(sourceKey)
         if (current?.token != token || current.status != SearchStatus.RUNNING) return false
+        when (SearchPageWritePolicy.decide(current.nextPage, page)) {
+            SearchPageWriteDecision.ALREADY_APPLIED -> return true
+            SearchPageWriteDecision.REJECT_FUTURE -> return false
+            SearchPageWriteDecision.APPLY -> Unit
+        }
         if (posts.isNotEmpty()) {
             val baseSequence = page.toLong() * PAGE_SEQUENCE_STRIDE
-            insertResults(
-                posts.mapIndexed { index, post ->
-                    SearchResultEntity(
-                        sessionToken = token,
-                        postId = post.id,
-                        url = post.url,
-                        title = post.title,
-                        sequence = baseSequence + index,
+            posts.forEachIndexed { index, post ->
+                require(post.occurrenceCount >= 1)
+                val updated = incrementOccurrenceCount(token, post.id, post.occurrenceCount)
+                if (updated == 0) {
+                    insertResults(
+                        listOf(
+                            SearchResultEntity(
+                                sessionToken = token,
+                                postId = post.id,
+                                url = post.url,
+                                title = post.title,
+                                sequence = baseSequence + index,
+                                occurrenceCount = post.occurrenceCount,
+                            ),
+                        ),
                     )
-                },
-            )
+                }
+            }
         }
         return updateProgress(token, sourceKey, page + 1, totalPages, updatedAt) == 1
     }
@@ -192,7 +227,7 @@ internal abstract class SearchDao {
 
 @Database(
     entities = [SearchSessionEntity::class, SearchResultEntity::class],
-    version = 2,
+    version = 3,
     exportSchema = true,
 )
 internal abstract class SearchDatabase : RoomDatabase() {
@@ -202,6 +237,12 @@ internal abstract class SearchDatabase : RoomDatabase() {
         val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE search_session ADD COLUMN sourceKey TEXT NOT NULL DEFAULT 'FC2'")
+            }
+        }
+
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(SEARCH_RESULT_OCCURRENCE_MIGRATION_SQL)
             }
         }
     }

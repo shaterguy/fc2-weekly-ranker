@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.shaterguy.fc2weeklyranker.AppGraph
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -12,9 +13,11 @@ class DownloadViewModel(application: Application) : AndroidViewModel(application
     private val repo = AppGraph.repository
     private val dao = AppGraph.database.downloadDao()
 
-    val activeDownloads = dao.activeDownloads()
+    val activeDownloads = repo.settings.selectedContentMode
+        .flatMapLatest { mode -> dao.activeDownloadsForSource(mode.sourceKey) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
-    val completedDownloads = dao.completedDownloads()
+    val completedDownloads = repo.settings.selectedContentMode
+        .flatMapLatest { mode -> dao.completedDownloadsForSource(mode.sourceKey) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     init {

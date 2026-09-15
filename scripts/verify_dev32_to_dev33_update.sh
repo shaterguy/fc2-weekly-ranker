@@ -26,7 +26,7 @@ cleanup() {
 trap cleanup EXIT
 
 CURRENT_BADGING="$("$BT/aapt" dump badging "$CURRENT_APK")"
-grep -Fq "package: name='$DEV_PACKAGE' versionCode='57' versionName='0.2.0-dev33'" <<<"$CURRENT_BADGING"
+grep -Fq "package: name='$DEV_PACKAGE' versionCode='58' versionName='0.2.0-dev34'" <<<"$CURRENT_BADGING"
 "$BT/apksigner" verify --min-sdk-version 29 "$CURRENT_APK"
 
 git fetch --no-tags origin refs/heads/v0.2.0-dev32:refs/remotes/origin/v0.2.0-dev32
@@ -58,7 +58,7 @@ extract_cert_sha256() {
 }
 
 OLD_CERT_SHA256="$(extract_cert_sha256 "$OLD_APK" fc2-dev32)"
-CURRENT_CERT_SHA256="$(extract_cert_sha256 "$CURRENT_APK" fc2-dev33)"
+CURRENT_CERT_SHA256="$(extract_cert_sha256 "$CURRENT_APK" fc2-dev34)"
 [[ "$OLD_CERT_SHA256" == "$PINNED_TEST_CERT_SHA256" ]]
 [[ "$CURRENT_CERT_SHA256" == "$PINNED_TEST_CERT_SHA256" ]]
 
@@ -144,7 +144,7 @@ adb shell am start -W -n "$DEV_PACKAGE/com.shaterguy.fc2weeklyranker.MainActivit
 sleep 5
 adb shell am force-stop "$DEV_PACKAGE"
 sleep 1
-adb shell dumpsys package "$DEV_PACKAGE" | grep -Fq 'versionName=0.2.0-dev33'
+adb shell dumpsys package "$DEV_PACKAGE" | grep -Fq 'versionName=0.2.0-dev34'
 [[ "$(adb shell "run-as $DEV_PACKAGE cat files/dev33-update-marker.txt" | tr -d '\r')" == 'dev32-search-migration-marker' ]]
 
 NEW_DB_DIR="$RUNNER_TEMP/dev33-search-db"

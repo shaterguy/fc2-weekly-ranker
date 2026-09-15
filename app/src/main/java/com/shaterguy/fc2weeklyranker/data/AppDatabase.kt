@@ -39,7 +39,7 @@ internal object DownloadQueuePolicy {
         previousStatus == DownloadStatus.STOPPED || previousStatus == DownloadStatus.COMPLETED
 }
 
-@Entity(tableName = "posts", indices = [Index("snapshotKey"), Index("postedAtEpochMillis")])
+@Entity(tableName = "posts", indices = [Index("snapshotKey"), Index("postedAtEpochMillis"), Index("sourceKey")])
 data class PostEntity(
     @PrimaryKey val id: String,
     val url: String,
@@ -49,6 +49,7 @@ data class PostEntity(
     val dailyRate: Double,
     val snapshotKey: String,
     val fetchedAtEpochMillis: Long,
+    @ColumnInfo(defaultValue = "'FC2'") val sourceKey: String = "FC2",
 )
 
 data class KnownPostDate(
@@ -125,17 +126,21 @@ data class DownloadListItem(
 
 @Dao
 interface PostDao {
-    @Query("SELECT * FROM posts WHERE snapshotKey = :snapshotKey ORDER BY dailyRate DESC, recommendationCount DESC, postedAtEpochMillis DESC, id DESC")
-    fun postsForSnapshot(snapshotKey: String): Flow<List<PostEntity>>
+    @Query("SELECT * FROM posts WHERE snapshotKey = :snapshotKey AND sourceKey = :sourceKey ORDER BY dailyRate DESC, recommendationCount DESC, postedAtEpochMillis DESC, id DESC")
+    fun postsForSnapshot(snapshotKey: String, sourceKey: String = "FC2"): Flow<List<PostEntity>>
 
-    @Query("SELECT * FROM posts WHERE postedAtEpochMillis >= :startInclusiveEpochMillis AND postedAtEpochMillis <= :upperInclusiveEpochMillis")
-    fun postsForWindow(startInclusiveEpochMillis: Long, upperInclusiveEpochMillis: Long): Flow<List<PostEntity>>
+    @Query("SELECT * FROM posts WHERE sourceKey = :sourceKey AND postedAtEpochMillis >= :startInclusiveEpochMillis AND postedAtEpochMillis <= :upperInclusiveEpochMillis")
+    fun postsForWindow(
+        startInclusiveEpochMillis: Long,
+        upperInclusiveEpochMillis: Long,
+        sourceKey: String = "FC2",
+    ): Flow<List<PostEntity>>
 
-    @Query("SELECT id, postedAtEpochMillis FROM posts")
-    suspend fun knownPostDates(): List<KnownPostDate>
+    @Query("SELECT id, postedAtEpochMillis FROM posts WHERE sourceKey = :sourceKey")
+    suspend fun knownPostDates(sourceKey: String = "FC2"): List<KnownPostDate>
 
-    @Query("SELECT COUNT(*) FROM posts WHERE snapshotKey = :snapshotKey")
-    suspend fun snapshotCount(snapshotKey: String): Int
+    @Query("SELECT COUNT(*) FROM posts WHERE snapshotKey = :snapshotKey AND sourceKey = :sourceKey")
+    suspend fun snapshotCount(snapshotKey: String, sourceKey: String = "FC2"): Int
 
     @Query("SELECT * FROM posts WHERE id = :id LIMIT 1")
     suspend fun byId(id: String): PostEntity?
@@ -148,8 +153,9 @@ interface PostDao {
         SELECT candidate.*
         FROM posts candidate
         INNER JOIN posts current_post ON current_post.id = :postId
-        WHERE (candidate.postedAtEpochMillis < current_post.postedAtEpochMillis)
-           OR (candidate.postedAtEpochMillis = current_post.postedAtEpochMillis AND candidate.id < current_post.id)
+        WHERE candidate.sourceKey = current_post.sourceKey
+          AND ((candidate.postedAtEpochMillis < current_post.postedAtEpochMillis)
+           OR (candidate.postedAtEpochMillis = current_post.postedAtEpochMillis AND candidate.id < current_post.id))
         ORDER BY candidate.postedAtEpochMillis DESC, candidate.id DESC
         LIMIT 1
         """,
@@ -161,16 +167,17 @@ interface PostDao {
         SELECT candidate.*
         FROM posts candidate
         INNER JOIN posts current_post ON current_post.id = :postId
-        WHERE (candidate.postedAtEpochMillis > current_post.postedAtEpochMillis)
-           OR (candidate.postedAtEpochMillis = current_post.postedAtEpochMillis AND candidate.id > current_post.id)
+        WHERE candidate.sourceKey = current_post.sourceKey
+          AND ((candidate.postedAtEpochMillis > current_post.postedAtEpochMillis)
+           OR (candidate.postedAtEpochMillis = current_post.postedAtEpochMillis AND candidate.id > current_post.id))
         ORDER BY candidate.postedAtEpochMillis ASC, candidate.id ASC
         LIMIT 1
         """,
     )
     fun observeNext(postId: String): Flow<PostEntity?>
 
-    @Query("SELECT p.* FROM posts p INNER JOIN favorites f ON p.id = f.postId ORDER BY f.createdAtEpochMillis DESC")
-    fun favorites(): Flow<List<PostEntity>>
+    @Query("SELECT p.* FROM posts p INNER JOIN favorites f ON p.id = f.postId WHERE p.sourceKey = :sourceKey ORDER BY f.createdAtEpochMillis DESC")
+    fun favorites(sourceKey: String = "FC2"): Flow<List<PostEntity>>
 
     @Query("SELECT EXISTS(SELECT 1 FROM favorites WHERE postId = :postId)")
     suspend fun isFavorite(postId: String): Boolean
@@ -325,11 +332,42 @@ interface DownloadDao {
         FROM downloads d
         INNER JOIN videos v ON v.id = d.videoId
         INNER JOIN posts p ON p.id = v.postId
+        WHERE p.sourceKey = :sourceKey
+          AND d.status IN ('QUEUED', 'RUNNING', 'PAUSED', 'FINALIZING')
+        ORDER BY d.enqueueOrder ASC, d.videoId ASC
+        """,
+    )
+    fun activeDownloadsForSource(sourceKey: String): Flow<List<DownloadListItem>>
+
+    @Query(
+        """
+        SELECT d.videoId AS videoId, d.status AS status, d.contentUri AS contentUri,
+               d.downloadedBytes AS downloadedBytes, d.totalBytes AS totalBytes,
+               d.errorCode AS errorCode, d.updatedAtEpochMillis AS updatedAtEpochMillis,
+               v.url AS videoUrl, v.ordinal AS videoOrdinal, v.postId AS postId, p.url AS postUrl
+        FROM downloads d
+        INNER JOIN videos v ON v.id = d.videoId
+        INNER JOIN posts p ON p.id = v.postId
         WHERE d.status = 'COMPLETED'
         ORDER BY d.updatedAtEpochMillis DESC
         """,
     )
     fun completedDownloads(): Flow<List<DownloadListItem>>
+
+    @Query(
+        """
+        SELECT d.videoId AS videoId, d.status AS status, d.contentUri AS contentUri,
+               d.downloadedBytes AS downloadedBytes, d.totalBytes AS totalBytes,
+               d.errorCode AS errorCode, d.updatedAtEpochMillis AS updatedAtEpochMillis,
+               v.url AS videoUrl, v.ordinal AS videoOrdinal, v.postId AS postId, p.url AS postUrl
+        FROM downloads d
+        INNER JOIN videos v ON v.id = d.videoId
+        INNER JOIN posts p ON p.id = v.postId
+        WHERE p.sourceKey = :sourceKey AND d.status = 'COMPLETED'
+        ORDER BY d.updatedAtEpochMillis DESC
+        """,
+    )
+    fun completedDownloadsForSource(sourceKey: String): Flow<List<DownloadListItem>>
 
     @Upsert
     suspend fun upsert(entity: DownloadEntity)
@@ -412,7 +450,7 @@ interface DownloadDao {
 
 @Database(
     entities = [PostEntity::class, FavoriteEntity::class, VideoEntity::class, DownloadEntity::class, RankObservationEntity::class],
-    version = 3,
+    version = 4,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -447,6 +485,13 @@ abstract class AppDatabase : RoomDatabase() {
                 )
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_rank_observations_datasetKey_postId ON rank_observations (datasetKey, postId)")
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_rank_observations_observedAtEpochMillis ON rank_observations (observedAtEpochMillis)")
+            }
+        }
+
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE posts ADD COLUMN sourceKey TEXT NOT NULL DEFAULT 'FC2'")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_posts_sourceKey ON posts(sourceKey)")
             }
         }
 

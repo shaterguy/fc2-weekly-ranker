@@ -15,19 +15,22 @@ import org.junit.Test
 
 class SourceIsolationContractTest {
     @Test
-    fun `content modes expose stable board and local id isolation contracts`() {
+    fun `content modes expose stable board local id and host isolation contracts`() {
         val type = Class.forName("com.shaterguy.fc2weeklyranker.domain.ContentMode")
         val constants = type.enumConstants.associateBy { (it as Enum<*>).name }
         val fc2 = constants.getValue("FC2")
         val jav = constants.getValue("JAV")
         val boardTable = type.getMethod("getBoardTable")
         val sourceKey = type.getMethod("getSourceKey")
+        val defaultBaseUrl = type.getMethod("getDefaultBaseUrl")
         val localPostId = type.getMethod("localPostId", String::class.java)
 
         assertEquals("javfc2", boardTable.invoke(fc2))
         assertEquals("javc", boardTable.invoke(jav))
         assertEquals("FC2", sourceKey.invoke(fc2))
         assertEquals("JAV", sourceKey.invoke(jav))
+        assertEquals("https://01.avsee.is", defaultBaseUrl.invoke(fc2))
+        assertEquals("https://02.avsee.is", defaultBaseUrl.invoke(jav))
         assertEquals("8123", localPostId.invoke(fc2, "8123"))
         assertEquals("jav:8123", localPostId.invoke(jav, "8123"))
         assertNotEquals(localPostId.invoke(fc2, "8123"), localPostId.invoke(jav, "8123"))

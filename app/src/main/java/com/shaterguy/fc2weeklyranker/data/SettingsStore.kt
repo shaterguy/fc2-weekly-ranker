@@ -47,8 +47,8 @@ class SettingsStore(context: Context, private val clockMillis: () -> Long = { Sy
 
     suspend fun setAnchorIf(
         anchorEpochMillis: Long,
-        guardedWrite: (() -> Unit) -> Boolean,
         mode: ContentMode = ContentMode.FC2,
+        guardedWrite: (() -> Unit) -> Boolean,
     ): Boolean {
         require(anchorEpochMillis > 0L)
         var committed = false

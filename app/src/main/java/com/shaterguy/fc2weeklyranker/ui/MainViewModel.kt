@@ -7,6 +7,7 @@ import androidx.room.withTransaction
 import com.shaterguy.fc2weeklyranker.AppGraph
 import com.shaterguy.fc2weeklyranker.data.PostEntity
 import com.shaterguy.fc2weeklyranker.domain.AdaptiveRanking
+import com.shaterguy.fc2weeklyranker.domain.ContentMode
 import com.shaterguy.fc2weeklyranker.domain.RankedPost
 import com.shaterguy.fc2weeklyranker.domain.RankingMode
 import com.shaterguy.fc2weeklyranker.network.RemotePost
@@ -47,6 +48,7 @@ internal sealed interface RetryIntent {
         val refreshToken: Long,
         val repositoryToken: Long,
         val uiToken: Long,
+        val mode: ContentMode,
     ) : RetryIntent
 }
 
@@ -112,10 +114,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val searchSource = AppGraph.sourceClient
     private val searchDao = AppGraph.searchDatabase.searchDao()
     private val page = MutableStateFlow(0)
-    private val localAnchor = MutableStateFlow<Long?>(null)
+    private val localAnchor = MutableStateFlow<Pair<ContentMode, Long>?>(null)
     private val mutableMessage = MutableStateFlow<String?>(null)
     private val loading = MutableStateFlow(false)
     private val mutableRankingMode = MutableStateFlow(RankingMode.POPULARITY)
+    private val mutableContentMode = MutableStateFlow(ContentMode.FC2)
     private val mutableSearchResults = MutableStateFlow<List<RemoteSearchPost>>(emptyList())
     private val mutableSearchMessage = MutableStateFlow<String?>(null)
     private val searchLoading = MutableStateFlow(false)
@@ -127,12 +130,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val refreshOperations = LatestOperationTracker()
     private val uiOperations = LatestOperationTracker()
     private val probeRegistrationJobs = mutableMapOf<String, MutableList<Job>>()
-    private val pagePrefetch = PagePrefetchCoordinator(viewModelScope, repo::ensurePage)
+    private val pagePrefetch = PagePrefetchCoordinator(viewModelScope) { mode, pageIndex ->
+        repo.ensurePage(pageIndex, mode)
+    }
 
     val pageIndex = page.stateIn(viewModelScope, SharingStarted.Eagerly, 0)
     val message = mutableMessage.stateIn(viewModelScope, SharingStarted.Eagerly, null)
     val isLoading = loading.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     val rankingMode = mutableRankingMode.stateIn(viewModelScope, SharingStarted.Eagerly, RankingMode.POPULARITY)
+    val selectedContentMode = mutableContentMode.stateIn(viewModelScope, SharingStarted.Eagerly, ContentMode.FC2)
     val searchResults = mutableSearchResults.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
     val searchMessage = mutableSearchMessage.stateIn(viewModelScope, SharingStarted.Eagerly, null)
     val isSearchLoading = searchLoading.stateIn(viewModelScope, SharingStarted.Eagerly, false)
@@ -140,54 +146,79 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val searchProgress = mutableSearchProgress.stateIn(viewModelScope, SharingStarted.Eagerly, null)
     val searchOpeningPostId = mutableSearchOpeningPostId.stateIn(viewModelScope, SharingStarted.Eagerly, null)
     val baseUrl = repo.settings.baseUrl.stateIn(viewModelScope, SharingStarted.Eagerly, "https://01.avsee.is")
-    val anchorEpochMillis = combine(repo.settings.anchorEpochMillis, localAnchor) { stored, local -> local ?: stored }
+    val anchorEpochMillis = mutableContentMode
+        .flatMapLatest { mode ->
+            combine(repo.settings.anchorEpochMillis(mode), localAnchor) { stored, local ->
+                local?.takeIf { it.first == mode }?.second ?: stored
+            }
+        }
         .filterNotNull()
         .stateIn(viewModelScope, SharingStarted.Eagerly, System.currentTimeMillis())
-    val posts = combine(anchorEpochMillis, page) { anchor, index -> anchor to index }
-        .flatMapLatest { (anchor, index) -> repo.posts(anchor, index) }
-        .map(::rankingVisiblePosts)
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
-    val rankedPosts = combine(posts, repo.rankingObservations(), rankingMode) { currentPosts, observations, mode ->
-        AdaptiveRanking.rank(currentPosts, observations, mode)
+    val posts = combine(mutableContentMode, anchorEpochMillis, page) { mode, anchor, index ->
+        Triple(mode, anchor, index)
+    }.flatMapLatest { (mode, anchor, index) ->
+        repo.posts(anchor, index, mode)
+    }.map { currentPosts ->
+        rankingVisiblePosts(currentPosts)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    val rankedPosts = mutableContentMode.flatMapLatest { mode ->
+        combine(posts, repo.rankingObservations(mode), rankingMode) { currentPosts, observations, rankingMode ->
+            AdaptiveRanking.rank(
+                currentPosts.filter { it.sourceKey == mode.sourceKey },
+                observations,
+                rankingMode,
+            )
+        }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList<RankedPost>())
-    val favorites = repo.favorites().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    private val modeFavorites = mutableContentMode.flatMapLatest { mode -> repo.favorites(mode) }
+    val favorites = combine(mutableContentMode, modeFavorites) { mode, currentFavorites ->
+        currentFavorites.filter { it.sourceKey == mode.sourceKey }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val visitedPostIds = repo.visitedPostIds().stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
 
     init {
-        val token = beginGeneralOperation()
         viewModelScope.launch { runCatching { repo.recoverDownloads() } }
         viewModelScope.launch {
-            combine(searchDao.observeSession(), searchDao.observeResults()) { session, results -> session to results }
-                .collect { (session, results) ->
-                    currentSearchToken = session?.token
-                    mutableSearchResults.value = results.map { it.toRemote() }
-                    searchLoading.value = session?.status == SearchStatus.RUNNING
-                    if (session?.status != SearchStatus.RUNNING) searchCancelling.value = false
-                    mutableSearchProgress.value = session?.let {
-                        SearchProgress(
-                            query = it.query,
-                            completedPages = (it.nextPage - 1).coerceAtLeast(0),
-                            totalPages = it.totalPages.coerceAtLeast(0),
-                        )
-                    }
-                    mutableSearchMessage.value = when {
-                        session?.status == SearchStatus.FAILED ->
-                            "검색 실패: ${session.errorMessage ?: "알 수 없는 오류"}"
-                        session?.status == SearchStatus.CANCELLED ->
-                            session.errorMessage ?: "검색을 중지했습니다."
-                        session?.status == SearchStatus.INTERRUPTED ->
-                            session.errorMessage ?: "이전 검색 작업을 종료했습니다. 새 검색을 시작할 수 있습니다."
-                        session?.status == SearchStatus.COMPLETED && results.isEmpty() ->
-                            "검색 결과가 없습니다."
-                        else -> null
-                    }
+            mutableContentMode.value = repo.settings.selectedContentMode.first()
+            mutableContentMode.flatMapLatest { mode ->
+                combine(
+                    searchDao.observeSession(mode.sourceKey),
+                    searchDao.observeResults(mode.sourceKey),
+                ) { session, results -> Triple(mode, session, results) }
+            }.collect { (mode, session, results) ->
+                if (mode != mutableContentMode.value) return@collect
+                currentSearchToken = session?.token
+                mutableSearchResults.value = results.map { it.toRemote() }
+                searchLoading.value = session?.status == SearchStatus.RUNNING
+                if (session?.status != SearchStatus.RUNNING) searchCancelling.value = false
+                mutableSearchProgress.value = session?.let {
+                    SearchProgress(
+                        query = it.query,
+                        completedPages = (it.nextPage - 1).coerceAtLeast(0),
+                        totalPages = it.totalPages.coerceAtLeast(0),
+                    )
                 }
+                mutableSearchMessage.value = when {
+                    session?.status == SearchStatus.FAILED ->
+                        "검색 실패: ${session.errorMessage ?: "알 수 없는 오류"}"
+                    session?.status == SearchStatus.CANCELLED ->
+                        session.errorMessage ?: "검색을 중지했습니다."
+                    session?.status == SearchStatus.INTERRUPTED ->
+                        session.errorMessage ?: "이전 검색 작업을 종료했습니다. 새 검색을 시작할 수 있습니다."
+                    session?.status == SearchStatus.COMPLETED && results.isEmpty() ->
+                        "검색 결과가 없습니다."
+                    else -> null
+                }
+            }
         }
         viewModelScope.launch {
-            val anchor = repo.ensureAnchor()
-            if (!uiOperations.isLatest(token)) return@launch
-            localAnchor.value = anchor
-            if (loadPage(0, token)) pagePrefetch.start(1)
+            val mode = repo.settings.selectedContentMode.first()
+            mutableContentMode.value = mode
+            val token = beginGeneralOperation()
+            val anchor = repo.ensureAnchor(mode)
+            if (!isCurrentModeOperation(mode, token)) return@launch
+            localAnchor.value = mode to anchor
+            if (loadPage(0, token, mode)) pagePrefetch.start(mode, 1)
         }
     }
 
@@ -200,22 +231,63 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         retryCoordinator.onBackground()
     }
 
+    fun selectContentMode(mode: ContentMode) {
+        val previousMode = mutableContentMode.value
+        if (mode == previousMode) return
+
+        val previousSearchToken = currentSearchToken
+        AppGraph.searchScheduler.cancelActive()
+        pagePrefetch.cancel()
+        refreshOperations.next()
+        val token = beginGeneralOperation()
+        page.value = 0
+        localAnchor.value = null
+        currentSearchToken = null
+        mutableSearchResults.value = emptyList()
+        mutableSearchMessage.value = null
+        mutableSearchProgress.value = null
+        mutableSearchOpeningPostId.value = null
+        searchLoading.value = false
+        searchCancelling.value = false
+        mutableContentMode.value = mode
+
+        viewModelScope.launch {
+            previousSearchToken?.let { searchDao.cancel(it, System.currentTimeMillis()) }
+            try {
+                repo.settings.setSelectedContentMode(mode)
+            } catch (error: Throwable) {
+                if (isCurrentModeOperation(mode, token)) {
+                    mutableContentMode.value = previousMode
+                    mutableMessage.value = "모드 저장 실패: ${safeMessage(error)}"
+                }
+                return@launch
+            }
+            if (!isCurrentModeOperation(mode, token)) return@launch
+            val anchor = repo.ensureAnchor(mode)
+            if (!isCurrentModeOperation(mode, token)) return@launch
+            localAnchor.value = mode to anchor
+            if (loadPage(0, token, mode)) pagePrefetch.start(mode, 1)
+        }
+    }
+
     fun olderPage() {
         val target = page.value + 1
+        val mode = mutableContentMode.value
         val token = beginGeneralOperation()
         page.value = target
         viewModelScope.launch {
-            if (loadPage(target, token)) pagePrefetch.start(target + 1)
+            if (loadPage(target, token, mode)) pagePrefetch.start(mode, target + 1)
         }
     }
 
     fun newerPage() {
         if (page.value == 0) return
         val target = page.value - 1
+        val mode = mutableContentMode.value
         val token = beginGeneralOperation()
         page.value = target
         viewModelScope.launch {
-            if (loadPage(target, token)) pagePrefetch.start(target + 1)
+            if (loadPage(target, token, mode)) pagePrefetch.start(mode, target + 1)
         }
     }
 
@@ -224,12 +296,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun refreshAnchor() {
+        val mode = mutableContentMode.value
         pagePrefetch.cancel()
         page.value = 0
         val refreshToken = refreshOperations.next()
         val repositoryToken = repo.beginManualRefresh()
         val uiToken = uiOperations.next()
-        val intent = RetryIntent.Refresh(System.currentTimeMillis(), refreshToken, repositoryToken, uiToken)
+        val intent = RetryIntent.Refresh(
+            targetAnchorMillis = System.currentTimeMillis(),
+            refreshToken = refreshToken,
+            repositoryToken = repositoryToken,
+            uiToken = uiToken,
+            mode = mode,
+        )
         loading.value = false
         mutableMessage.value = null
         val startedAt = retryCoordinator.actionStarted()
@@ -238,24 +317,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun launchRefresh(intent: RetryIntent.Refresh, startedAt: Long) {
         viewModelScope.launch {
-            if (!refreshOperations.isLatest(intent.refreshToken) || !uiOperations.isLatest(intent.uiToken)) return@launch
+            if (
+                !refreshOperations.isLatest(intent.refreshToken) ||
+                !uiOperations.isLatest(intent.uiToken) ||
+                mutableContentMode.value != intent.mode
+            ) return@launch
             loading.value = true
             var retryIntent: RetryIntent? = null
             try {
-                val anchor = repo.manualRefresh(intent.targetAnchorMillis, intent.repositoryToken)
-                if (refreshOperations.isLatest(intent.refreshToken)) {
-                    localAnchor.value = anchor
+                val anchor = repo.manualRefresh(intent.targetAnchorMillis, intent.repositoryToken, intent.mode)
+                if (
+                    refreshOperations.isLatest(intent.refreshToken) &&
+                    mutableContentMode.value == intent.mode
+                ) {
+                    localAnchor.value = intent.mode to anchor
                 }
-                if (uiOperations.isLatest(intent.uiToken)) {
+                if (isCurrentModeOperation(intent.mode, intent.uiToken)) {
                     mutableMessage.value = null
-                    pagePrefetch.start(1)
+                    pagePrefetch.start(intent.mode, 1)
                 }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
                 if (
                     refreshOperations.isLatest(intent.refreshToken) &&
-                    uiOperations.isLatest(intent.uiToken)
+                    isCurrentModeOperation(intent.mode, intent.uiToken)
                 ) {
                     mutableMessage.value = "작업 실패: ${safeMessage(error)}"
                     if (isTransientNetworkError(error)) {
@@ -263,7 +349,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
             } finally {
-                if (uiOperations.isLatest(intent.uiToken)) loading.value = false
+                if (isCurrentModeOperation(intent.mode, intent.uiToken)) loading.value = false
             }
             retryIntent?.let(::retry)
         }
@@ -279,6 +365,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         if (searchCancelling.value) return
 
+        val mode = mutableContentMode.value
         uiOperations.next()
         loading.value = false
         mutableMessage.value = null
@@ -287,13 +374,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         mutableSearchProgress.value = SearchProgress(term, 0, 0)
         searchLoading.value = true
 
-        val schedule = AppGraph.searchScheduler.start(term, baseUrl.value)
+        val schedule = AppGraph.searchScheduler.start(term, baseUrl.value, mode)
         currentSearchToken = schedule.request.token
         if (!schedule.scheduled) {
             searchLoading.value = false
             mutableSearchMessage.value = "검색 실패: 백그라운드 검색 작업을 시작하지 못했습니다."
         }
         viewModelScope.launch {
+            if (mutableContentMode.value != mode || currentSearchToken != schedule.request.token) return@launch
             searchDao.prepareSession(schedule.request)
             if (!schedule.scheduled) {
                 searchDao.fail(
@@ -320,8 +408,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun reconcileSearchSession() {
+        val mode = mutableContentMode.value
         viewModelScope.launch {
-            val session = searchDao.currentSession() ?: return@launch
+            val session = searchDao.currentSession(mode.sourceKey) ?: return@launch
             if (session.status != SearchStatus.RUNNING) return@launch
             val active = AppGraph.searchScheduler.isActive(session.token)
             if (SearchRecoveryPolicy.shouldInterrupt(session.status, active)) {
@@ -335,7 +424,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         when (intent) {
             is RetryIntent.Refresh -> if (
                 refreshOperations.isLatest(intent.refreshToken) &&
-                uiOperations.isLatest(intent.uiToken)
+                isCurrentModeOperation(intent.mode, intent.uiToken)
             ) {
                 launchRefresh(intent, retryCoordinator.retryStarted())
             }
@@ -344,6 +433,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openSearchPost(post: RemoteSearchPost, onReady: (String) -> Unit) {
         if (mutableSearchOpeningPostId.value != null) return
+        val mode = mutableContentMode.value
         uiOperations.next()
         loading.value = false
         mutableMessage.value = null
@@ -352,15 +442,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         mutableSearchOpeningPostId.value = post.id
         viewModelScope.launch {
             try {
-                ensureSearchPost(post)
-                if (searchToken == currentSearchToken) {
+                ensureSearchPost(post, mode)
+                if (searchToken == currentSearchToken && mutableContentMode.value == mode) {
                     mutableSearchMessage.value = null
                     onReady(post.id)
                 }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                if (searchToken == currentSearchToken) {
+                if (searchToken == currentSearchToken && mutableContentMode.value == mode) {
                     mutableSearchMessage.value = "게시물 열기 실패: ${safeMessage(error)}"
                 }
             } finally {
@@ -391,7 +481,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val token = beginGeneralOperation()
         loading.value = true
         return try {
-            mutableSearchResults.value.firstOrNull { it.id == postId }?.let { ensureSearchPost(it) }
+            val mode = contentModeForLocalPostId(postId)
+            mutableSearchResults.value.firstOrNull { it.id == postId }?.let { ensureSearchPost(it, mode) }
             repo.loadVideos(postId)
             val current = repo.videos(postId).first()
             if (uiOperations.isLatest(token)) mutableMessage.value = null
@@ -422,52 +513,54 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun stopDownload(videoId: String) { viewModelScope.launch { repo.stopDownload(videoId) } }
 
     fun saveBaseUrl(input: String) {
+        val mode = mutableContentMode.value
         val token = beginGeneralOperation()
         viewModelScope.launch {
-            if (!uiOperations.isLatest(token)) return@launch
+            if (!isCurrentModeOperation(mode, token)) return@launch
             pagePrefetch.cancel()
             loading.value = true
             var refreshed = false
             try {
-                repo.setBaseUrl(input).onSuccess {
-                    if (uiOperations.isLatest(token)) {
+                repo.setBaseUrl(input, mode).onSuccess {
+                    if (isCurrentModeOperation(mode, token)) {
                         mutableMessage.value = "사이트 주소를 저장했습니다. 기준시각은 그대로 유지됩니다."
                     }
-                    runCatching { repo.refreshPage(page.value) }
+                    runCatching { repo.refreshPage(page.value, mode = mode) }
                         .onSuccess {
                             refreshed = true
-                            if (uiOperations.isLatest(token)) mutableMessage.value = null
+                            if (isCurrentModeOperation(mode, token)) mutableMessage.value = null
                         }
                         .onFailure {
-                            if (uiOperations.isLatest(token)) {
+                            if (isCurrentModeOperation(mode, token)) {
                                 mutableMessage.value = "주소는 저장했지만 목록 갱신에 실패했습니다: ${safeMessage(it)}"
                             }
                         }
                 }.onFailure {
-                    if (uiOperations.isLatest(token)) mutableMessage.value = "주소 저장 실패: ${safeMessage(it)}"
+                    if (isCurrentModeOperation(mode, token)) mutableMessage.value = "주소 저장 실패: ${safeMessage(it)}"
                 }
             } finally {
-                if (uiOperations.isLatest(token)) loading.value = false
+                if (isCurrentModeOperation(mode, token)) loading.value = false
             }
-            if (refreshed && uiOperations.isLatest(token)) pagePrefetch.start(page.value + 1)
+            if (refreshed && isCurrentModeOperation(mode, token)) pagePrefetch.start(mode, page.value + 1)
         }
     }
 
     fun testConnection() {
+        val mode = mutableContentMode.value
         val token = beginGeneralOperation()
         viewModelScope.launch {
-            if (!uiOperations.isLatest(token)) return@launch
+            if (!isCurrentModeOperation(mode, token)) return@launch
             loading.value = true
             try {
-                val result = repo.testCurrentBaseUrl()
-                if (uiOperations.isLatest(token)) {
+                val result = repo.testCurrentBaseUrl(mode)
+                if (isCurrentModeOperation(mode, token)) {
                     mutableMessage.value = result.fold(
                         { "게시판 연결에 성공했습니다." },
                         { "연결 실패: ${safeMessage(it)}" },
                     )
                 }
             } finally {
-                if (uiOperations.isLatest(token)) loading.value = false
+                if (isCurrentModeOperation(mode, token)) loading.value = false
             }
         }
     }
@@ -483,15 +576,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         mutableSearchMessage.value = null
     }
 
-    private suspend fun ensureSearchPost(post: RemoteSearchPost) {
+    private suspend fun ensureSearchPost(post: RemoteSearchPost, mode: ContentMode) {
         val dao = AppGraph.database.postDao()
-        if (dao.byId(post.id) != null) return
+        val remoteId = mode.remotePostId(post.id)
+        val localId = mode.localPostId(remoteId)
+        if (dao.byId(localId) != null) return
 
         val detail = searchSource.loadDetail(post.url)
-        check(detail.id == post.id) { "검색 게시물 식별자가 일치하지 않습니다." }
-        val candidate = searchPostEntity(detail, System.currentTimeMillis())
+        check(detail.id == remoteId) { "검색 게시물 식별자가 일치하지 않습니다." }
+        val candidate = searchPostEntity(detail, System.currentTimeMillis(), mode)
         AppGraph.database.withTransaction {
-            if (dao.byId(post.id) == null) dao.upsert(listOf(candidate))
+            if (dao.byId(localId) == null) dao.upsert(listOf(candidate))
         }
     }
 
@@ -503,21 +598,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return token
     }
 
-    private suspend fun loadPage(pageIndex: Int, token: Long): Boolean {
-        if (!uiOperations.isLatest(token)) return false
+    private fun isCurrentModeOperation(mode: ContentMode, token: Long): Boolean =
+        mutableContentMode.value == mode && uiOperations.isLatest(token)
+
+    private suspend fun loadPage(pageIndex: Int, token: Long, mode: ContentMode): Boolean {
+        if (!isCurrentModeOperation(mode, token)) return false
         loading.value = true
         return try {
-            val prefetched = pagePrefetch.consume(pageIndex)
-            if (!prefetched) repo.ensurePage(pageIndex)
-            if (uiOperations.isLatest(token)) mutableMessage.value = null
+            val prefetched = pagePrefetch.consume(mode, pageIndex)
+            if (!prefetched) repo.ensurePage(pageIndex, mode)
+            if (isCurrentModeOperation(mode, token)) mutableMessage.value = null
             true
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
-            if (uiOperations.isLatest(token)) mutableMessage.value = "작업 실패: ${safeMessage(error)}"
+            if (isCurrentModeOperation(mode, token)) mutableMessage.value = "작업 실패: ${safeMessage(error)}"
             false
         } finally {
-            if (uiOperations.isLatest(token)) loading.value = false
+            if (isCurrentModeOperation(mode, token)) loading.value = false
         }
     }
 
@@ -546,8 +644,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 }
 
-internal fun searchPostEntity(detail: RemotePost, fetchedAtEpochMillis: Long): PostEntity = PostEntity(
-    id = detail.id,
+internal fun searchPostEntity(
+    detail: RemotePost,
+    fetchedAtEpochMillis: Long,
+    mode: ContentMode = ContentMode.FC2,
+): PostEntity = PostEntity(
+    id = mode.localPostId(detail.id),
     url = detail.url,
     title = detail.title,
     postedAtEpochMillis = detail.postedAt.toEpochMilli(),
@@ -555,10 +657,14 @@ internal fun searchPostEntity(detail: RemotePost, fetchedAtEpochMillis: Long): P
     dailyRate = 0.0,
     snapshotKey = SEARCH_SNAPSHOT_KEY,
     fetchedAtEpochMillis = fetchedAtEpochMillis,
+    sourceKey = mode.sourceKey,
 )
 
 internal fun rankingVisiblePosts(posts: List<PostEntity>): List<PostEntity> =
     posts.filterNot { it.snapshotKey == SEARCH_SNAPSHOT_KEY }
+
+internal fun contentModeForLocalPostId(postId: String): ContentMode =
+    if (postId.startsWith("jav:")) ContentMode.JAV else ContentMode.FC2
 
 internal fun cancelPendingProbeRegistrations(jobs: Collection<Job>?) {
     jobs?.forEach { it.cancel() }

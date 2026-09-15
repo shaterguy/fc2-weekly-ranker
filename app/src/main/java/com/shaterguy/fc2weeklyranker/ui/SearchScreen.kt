@@ -37,6 +37,7 @@ fun SearchScreen(
     vm: MainViewModel,
     onPost: (RemoteSearchPost, List<String>) -> Unit,
 ) {
+    val mode by vm.selectedContentMode.collectAsState()
     val results by vm.searchResults.collectAsState()
     val loading by vm.isSearchLoading.collectAsState()
     val cancelling by vm.isSearchCancelling.collectAsState()
@@ -44,10 +45,10 @@ fun SearchScreen(
     val message by vm.searchMessage.collectAsState()
     val openingPostId by vm.searchOpeningPostId.collectAsState()
     val resultIds = remember(results) { results.map { it.id } }
-    var query by rememberSaveable { mutableStateOf("") }
-    var hasSearched by rememberSaveable { mutableStateOf(false) }
+    var query by rememberSaveable(mode.sourceKey) { mutableStateOf("") }
+    var hasSearched by rememberSaveable(mode.sourceKey) { mutableStateOf(false) }
 
-    LaunchedEffect(progress?.query) {
+    LaunchedEffect(progress?.query, mode) {
         progress?.query?.let { restored ->
             if (query.isBlank() || loading) query = restored
             hasSearched = true
@@ -58,9 +59,9 @@ fun SearchScreen(
         Modifier.fillMaxSize().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Text("FC2 검색", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        Text("${mode.sourceKey} 검색", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         Text(
-            "사이트 통합검색 전체 결과에서 FC2 게시물만 모아 중복을 제거합니다.",
+            "사이트 통합검색 전체 결과에서 ${mode.sourceKey} 게시물만 모아 중복을 제거합니다.",
             style = MaterialTheme.typography.bodyMedium,
         )
         Row(
@@ -115,7 +116,7 @@ fun SearchScreen(
             Text("검색 결과가 없습니다.")
         }
         if (!loading && results.isNotEmpty()) {
-            Text("FC2 게시물 ${results.size}건", fontWeight = FontWeight.SemiBold)
+            Text("${mode.sourceKey} 게시물 ${results.size}건", fontWeight = FontWeight.SemiBold)
         }
 
         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {

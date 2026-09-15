@@ -10,6 +10,7 @@ import com.shaterguy.fc2weeklyranker.data.PostEntity
 import com.shaterguy.fc2weeklyranker.data.RankObservationEntity
 import com.shaterguy.fc2weeklyranker.data.SettingsStore
 import com.shaterguy.fc2weeklyranker.data.VideoEntity
+import com.shaterguy.fc2weeklyranker.domain.ContentMode
 import com.shaterguy.fc2weeklyranker.domain.RankCandidate
 import com.shaterguy.fc2weeklyranker.domain.rank
 import com.shaterguy.fc2weeklyranker.domain.windowFor
@@ -71,29 +72,38 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
     private val probeSessions = mutableMapOf<ProbeKey, ProbeSession>()
     private val downloadScheduler = DownloadScheduler(context)
 
-    fun posts(anchorMillis: Long, pageIndex: Int): Flow<List<PostEntity>> {
+    fun posts(
+        anchorMillis: Long,
+        pageIndex: Int,
+        mode: ContentMode = ContentMode.FC2,
+    ): Flow<List<PostEntity>> {
         val anchor = Instant.ofEpochMilli(anchorMillis)
         val window = windowFor(anchor, pageIndex)
-        return db.postDao().postsForWindow(window.startInclusive.toEpochMilli(), window.upperInclusive.toEpochMilli())
-            .map { stored ->
-                rank(
-                    anchor,
-                    stored.map { post ->
-                        RankCandidate(
-                            value = post,
-                            postedAt = Instant.ofEpochMilli(post.postedAtEpochMillis),
-                            commentCount = post.recommendationCount,
-                            stableId = post.id,
-                        )
-                    },
-                ).map { (candidate, rate) -> candidate.value.copy(dailyRate = rate) }
-            }
+        return db.postDao().postsForWindow(
+            window.startInclusive.toEpochMilli(),
+            window.upperInclusive.toEpochMilli(),
+            mode.sourceKey,
+        ).map { stored ->
+            rank(
+                anchor,
+                stored.map { post ->
+                    RankCandidate(
+                        value = post,
+                        postedAt = Instant.ofEpochMilli(post.postedAtEpochMillis),
+                        commentCount = post.recommendationCount,
+                        stableId = post.id,
+                    )
+                },
+            ).map { (candidate, rate) -> candidate.value.copy(dailyRate = rate) }
+        }
     }
 
-    fun rankingObservations(): Flow<List<RankObservationEntity>> = settings.baseUrl.flatMapLatest { baseUrl ->
-        db.rankObservationDao().observeDataset(rankDatasetKey(baseUrl))
-    }
-    fun favorites(): Flow<List<PostEntity>> = db.postDao().favorites()
+    fun rankingObservations(mode: ContentMode = ContentMode.FC2): Flow<List<RankObservationEntity>> =
+        settings.baseUrl.flatMapLatest { baseUrl ->
+            db.rankObservationDao().observeDataset(rankDatasetKey(baseUrl, mode))
+        }
+
+    fun favorites(mode: ContentMode = ContentMode.FC2): Flow<List<PostEntity>> = db.postDao().favorites(mode.sourceKey)
     fun post(postId: String): Flow<PostEntity?> = db.postDao().observeById(postId)
     fun previousPost(postId: String): Flow<PostEntity?> = db.postDao().observePrevious(postId)
     fun nextPost(postId: String): Flow<PostEntity?> = db.postDao().observeNext(postId)
@@ -101,44 +111,59 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
     fun videos(postId: String): Flow<List<VideoEntity>> = db.videoDao().forPost(postId)
     fun download(videoId: String): Flow<DownloadEntity?> = db.downloadDao().observe(videoId)
     fun visitedPostIds(): Flow<Set<String>> = settings.visitedPostIds
-    suspend fun ensureAnchor(): Long = settings.ensureAnchor()
+    suspend fun ensureAnchor(mode: ContentMode = ContentMode.FC2): Long = settings.ensureAnchor(mode)
 
-    suspend fun ensurePage(pageIndex: Int) {
-        val anchorMillis = settings.ensureAnchor()
+    suspend fun ensurePage(pageIndex: Int, mode: ContentMode = ContentMode.FC2) {
+        val anchorMillis = settings.ensureAnchor(mode)
         val baseUrl = settings.baseUrl.first()
-        if (!settings.isRankingWindowCovered(coverageKey(baseUrl, anchorMillis, pageIndex))) {
-            refreshPage(pageIndex)
+        if (!settings.isRankingWindowCovered(coverageKey(baseUrl, anchorMillis, pageIndex, mode))) {
+            refreshPage(pageIndex, mode = mode)
         }
     }
 
-    suspend fun refreshPage(pageIndex: Int, force: Boolean = false) {
-        refreshPageForAnchor(pageIndex, settings.ensureAnchor(), force)
+    suspend fun refreshPage(
+        pageIndex: Int,
+        force: Boolean = false,
+        mode: ContentMode = ContentMode.FC2,
+    ) {
+        refreshPageForAnchor(pageIndex, settings.ensureAnchor(mode), force, mode)
     }
 
-    private suspend fun refreshPageForAnchor(pageIndex: Int, anchorMillis: Long, force: Boolean) {
+    private suspend fun refreshPageForAnchor(
+        pageIndex: Int,
+        anchorMillis: Long,
+        force: Boolean,
+        mode: ContentMode,
+    ) {
         val anchor = Instant.ofEpochMilli(anchorMillis)
         val baseUrl = settings.baseUrl.first()
-        val datasetKey = rankDatasetKey(baseUrl)
-        val coverageKey = coverageKey(baseUrl, anchorMillis, pageIndex)
+        val datasetKey = rankDatasetKey(baseUrl, mode)
+        val coverageKey = coverageKey(baseUrl, anchorMillis, pageIndex, mode)
         if (!force && settings.isRankingWindowCovered(coverageKey)) return
 
-        val knownDates = db.postDao().knownPostDates().associate { known ->
-            known.id to Instant.ofEpochMilli(known.postedAtEpochMillis).atZone(SEOUL).toLocalDate()
+        val knownDates = db.postDao().knownPostDates(mode.sourceKey).associate { known ->
+            mode.remotePostId(known.id) to Instant.ofEpochMilli(known.postedAtEpochMillis).atZone(SEOUL).toLocalDate()
         }
-        val remote = source.crawlWindow(baseUrl, windowFor(anchor, pageIndex), knownDates)
+        val remote = source.crawlWindow(
+            baseUrl = baseUrl,
+            window = windowFor(anchor, pageIndex),
+            knownDates = knownDates,
+            boardTable = mode.boardTable,
+        )
         val ranked = rank(anchor, remote.map { RankCandidate(it, it.postedAt, it.commentCount, it.id) })
         val now = System.currentTimeMillis()
         val postEntities = ranked.map { (candidate, rate) ->
             val post = candidate.value
             PostEntity(
-                post.id,
-                post.url,
-                post.title,
-                post.postedAt.toEpochMilli(),
-                post.commentCount,
-                rate,
-                snapshotKey(anchorMillis, pageIndex),
-                now,
+                id = mode.localPostId(post.id),
+                url = post.url,
+                title = post.title,
+                postedAtEpochMillis = post.postedAt.toEpochMilli(),
+                recommendationCount = post.commentCount,
+                dailyRate = rate,
+                snapshotKey = snapshotKey(anchorMillis, pageIndex),
+                fetchedAtEpochMillis = now,
+                sourceKey = mode.sourceKey,
             )
         }
         val observations = remote.mapNotNull { post ->
@@ -148,7 +173,7 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
             if (now + MAX_CLOCK_SKEW_MILLIS < postedAt) return@mapNotNull null
             RankObservationEntity(
                 datasetKey = datasetKey,
-                postId = post.id,
+                postId = mode.localPostId(post.id),
                 postedAtEpochMillis = postedAt,
                 commentCount = commentCount,
                 observedAtEpochMillis = now,
@@ -172,7 +197,11 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
 
     fun beginManualRefresh(): Long = manualRefreshGuard.next()
 
-    suspend fun manualRefresh(targetAnchorMillis: Long, requestToken: Long): Long {
+    suspend fun manualRefresh(
+        targetAnchorMillis: Long,
+        requestToken: Long,
+        mode: ContentMode = ContentMode.FC2,
+    ): Long {
         require(targetAnchorMillis > 0L)
         require(requestToken > 0L)
         if (!manualRefreshGuard.isLatest(requestToken)) return targetAnchorMillis
@@ -180,9 +209,9 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
         refreshThenCommitLatestAnchor(
             targetAnchorMillis = targetAnchorMillis,
             requestToken = requestToken,
-            refresh = { anchor -> refreshPageForAnchor(0, anchor, force = true) },
+            refresh = { anchor -> refreshPageForAnchor(0, anchor, force = true, mode = mode) },
             commitIfLatest = { anchor, token ->
-                settings.setAnchorIf(anchor) { commit ->
+                settings.setAnchorIf(anchor, mode = mode) { commit ->
                     manualRefreshGuard.commitIfLatest(token, commit)
                 }
             },
@@ -190,14 +219,18 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
         return targetAnchorMillis
     }
 
-    suspend fun setBaseUrl(input: String): Result<String> {
+    suspend fun setBaseUrl(
+        input: String,
+        mode: ContentMode = ContentMode.FC2,
+    ): Result<String> {
         val normalized = BaseUrlPolicy.normalize(input).getOrElse { return Result.failure(it) }
-        source.testConnection(normalized).getOrElse { return Result.failure(it) }
+        source.testConnection(normalized, mode.boardTable).getOrElse { return Result.failure(it) }
         settings.setBaseUrl(normalized)
         return Result.success(normalized)
     }
 
-    suspend fun testCurrentBaseUrl(): Result<Unit> = source.testConnection(settings.baseUrl.first())
+    suspend fun testCurrentBaseUrl(mode: ContentMode = ContentMode.FC2): Result<Unit> =
+        source.testConnection(settings.baseUrl.first(), mode.boardTable)
 
     suspend fun toggleFavorite(postId: String) {
         if (db.postDao().isFavorite(postId)) db.postDao().removeFavorite(postId) else db.postDao().addFavorite(FavoriteEntity(postId, System.currentTimeMillis()))
@@ -367,13 +400,21 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
 
         fun snapshotKey(anchorMillis: Long, pageIndex: Int): String = "ranking-v5-comments:$anchorMillis:$pageIndex"
 
-        internal fun coverageKey(baseUrl: String, anchorMillis: Long, pageIndex: Int): String {
+        internal fun coverageKey(
+            baseUrl: String,
+            anchorMillis: Long,
+            pageIndex: Int,
+            mode: ContentMode = ContentMode.FC2,
+        ): String {
             val window = windowFor(Instant.ofEpochMilli(anchorMillis), pageIndex)
-            return "ranking-window-v1:$baseUrl:${window.startDate}:${window.endDate}"
+            val sourcePart = if (mode == ContentMode.FC2) "" else ":${mode.boardTable}"
+            return "ranking-window-v1:$baseUrl$sourcePart:${window.startDate}:${window.endDate}"
         }
 
-        internal fun rankDatasetKey(baseUrl: String): String =
-            "${baseUrl.trimEnd('/').lowercase()}|javfc2"
+        internal fun rankDatasetKey(
+            baseUrl: String,
+            mode: ContentMode = ContentMode.FC2,
+        ): String = "${baseUrl.trimEnd('/').lowercase()}|${mode.boardTable}"
 
         internal fun observationBucket(observedAtEpochMillis: Long): Long =
             observedAtEpochMillis - observedAtEpochMillis % OBSERVATION_BUCKET_MILLIS

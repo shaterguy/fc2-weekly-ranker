@@ -241,13 +241,22 @@ jobs:
           import sys
           con = sqlite3.connect(sys.argv[1])
           version = con.execute("PRAGMA user_version").fetchone()[0]
-          if version != 3:
-              raise SystemExit(f"expected DEV31 database v3, got {version}")
+          if version != 4:
+              raise SystemExit(f"expected current database v4, got {version}")
           tables = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
           if "rank_observations" not in tables:
               raise SystemExit("rank_observations table missing after migration")
+          columns = {row[1] for row in con.execute("PRAGMA table_info(posts)")}
+          if "sourceKey" not in columns:
+              raise SystemExit("posts.sourceKey missing after migration")
+          indexes = {row[1] for row in con.execute("PRAGMA index_list(posts)")}
+          if "index_posts_sourceKey" not in indexes:
+              raise SystemExit("posts sourceKey index missing after migration")
           if con.execute("SELECT COUNT(*) FROM posts WHERE id='compat-marker'").fetchone()[0] != 1:
               raise SystemExit("post marker lost during migration")
+          source = con.execute("SELECT sourceKey FROM posts WHERE id='compat-marker'").fetchone()
+          if source != ("FC2",):
+              raise SystemExit(f"legacy post source changed during migration: {source}")
           if con.execute("SELECT COUNT(*) FROM favorites WHERE postId='compat-marker'").fetchone()[0] != 1:
               raise SystemExit("favorite marker lost during migration")
           if con.execute("SELECT COUNT(*) FROM videos WHERE id='compat-video'").fetchone()[0] != 1:

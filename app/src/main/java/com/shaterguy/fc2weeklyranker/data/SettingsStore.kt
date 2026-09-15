@@ -10,6 +10,7 @@ import androidx.datastore.preferences.preferencesDataStore
 import com.shaterguy.fc2weeklyranker.domain.ContentMode
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 
 private val Context.settingsDataStore by preferencesDataStore(name = "ranker_settings")
@@ -19,7 +20,7 @@ class SettingsStore(context: Context, private val clockMillis: () -> Long = { Sy
     val anchorEpochMillis: Flow<Long?> = anchorEpochMillis(ContentMode.FC2)
     val selectedContentMode: Flow<ContentMode> =
         dataStore.data.map { ContentMode.fromSourceKey(it[CONTENT_MODE]) }
-    val baseUrl: Flow<String> = baseUrl(ContentMode.FC2)
+    val baseUrl: Flow<String> = selectedContentMode.flatMapLatest { mode -> baseUrl(mode) }
     val visitedPostIds: Flow<Set<String>> = dataStore.data.map { it[VISITED_POST_IDS].orEmpty() }
     val fullscreenGestureSensitivity: Flow<String> =
         dataStore.data.map { it[FULLSCREEN_GESTURE_SENSITIVITY] ?: DEFAULT_FULLSCREEN_GESTURE_SENSITIVITY }

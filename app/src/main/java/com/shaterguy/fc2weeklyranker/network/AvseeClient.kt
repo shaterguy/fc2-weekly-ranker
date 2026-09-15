@@ -284,7 +284,7 @@ class AvseeClient(
     ): String {
         require(page >= 1)
         val encoded = URLEncoder.encode(query.trim(), "UTF-8").replace("+", "%20")
-        val onetable = if (boardTable == "javfc2") "" else boardTable
+        val onetable = boardTable
         return "$baseUrl$SEARCH_PATH?sfl=wr_subject%7C%7Cwr_content&stx=$encoded&sop=and&gr_id=&srows=1000&onetable=$onetable&page=$page"
     }
 

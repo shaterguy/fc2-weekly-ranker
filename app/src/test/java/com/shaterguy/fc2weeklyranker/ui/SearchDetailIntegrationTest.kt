@@ -1,6 +1,7 @@
 package com.shaterguy.fc2weeklyranker.ui
 
 import com.shaterguy.fc2weeklyranker.data.PostEntity
+import com.shaterguy.fc2weeklyranker.domain.ContentMode
 import com.shaterguy.fc2weeklyranker.network.RemotePost
 import java.time.Instant
 import org.junit.Assert.assertEquals
@@ -23,12 +24,33 @@ class SearchDetailIntegrationTest {
         )
 
         assertEquals("123", row.id)
+        assertEquals("FC2", row.sourceKey)
         assertEquals("검색 게시물", row.title)
         assertEquals(postedAt.toEpochMilli(), row.postedAtEpochMillis)
         assertEquals(0, row.recommendationCount)
         assertEquals(0.0, row.dailyRate, 0.0)
         assertEquals(SEARCH_SNAPSHOT_KEY, row.snapshotKey)
         assertEquals(456L, row.fetchedAtEpochMillis)
+    }
+
+    @Test
+    fun javSearchPostUsesNamespacedLocalIdAndJavSource() {
+        val row = searchPostEntity(
+            RemotePost(
+                id = "123",
+                url = "https://01.avsee.is/bbs/board.php?bo_table=javc&wr_id=123",
+                title = "JAV 검색 게시물",
+                postedAt = Instant.parse("2026-09-03T01:02:03Z"),
+                recommendationCount = 9,
+                media = emptyList(),
+            ),
+            fetchedAtEpochMillis = 789L,
+            mode = ContentMode.JAV,
+        )
+
+        assertEquals("jav:123", row.id)
+        assertEquals("JAV", row.sourceKey)
+        assertEquals(SEARCH_SNAPSHOT_KEY, row.snapshotKey)
     }
 
     @Test

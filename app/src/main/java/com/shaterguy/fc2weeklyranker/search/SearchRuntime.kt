@@ -17,6 +17,7 @@ import androidx.work.ForegroundInfo
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.shaterguy.fc2weeklyranker.AppGraph
+import com.shaterguy.fc2weeklyranker.domain.ContentMode
 import com.shaterguy.fc2weeklyranker.network.AvseeClient
 import com.shaterguy.fc2weeklyranker.network.SearchPage
 import com.shaterguy.fc2weeklyranker.network.isTransientNetworkError
@@ -43,23 +44,30 @@ internal data class SearchRequest(
     val token: String,
     val query: String,
     val baseUrl: String,
+    val sourceKey: String = ContentMode.FC2.sourceKey,
 ) {
+    val mode: ContentMode
+        get() = ContentMode.fromSourceKey(sourceKey)
+
     fun toPersistableBundle(): PersistableBundle = PersistableBundle().apply {
         putString(KEY_TOKEN, token)
         putString(KEY_QUERY, query)
         putString(KEY_BASE_URL, baseUrl)
+        putString(KEY_SOURCE_KEY, sourceKey)
     }
 
     companion object {
         const val KEY_TOKEN = "search_token"
         const val KEY_QUERY = "search_query"
         const val KEY_BASE_URL = "search_base_url"
+        const val KEY_SOURCE_KEY = "search_source_key"
 
         fun from(bundle: PersistableBundle): SearchRequest? {
             val token = bundle.getString(KEY_TOKEN)?.takeIf(String::isNotBlank) ?: return null
             val query = bundle.getString(KEY_QUERY)?.takeIf(String::isNotBlank) ?: return null
             val baseUrl = bundle.getString(KEY_BASE_URL)?.takeIf(String::isNotBlank) ?: return null
-            return SearchRequest(token, query, baseUrl)
+            val sourceKey = bundle.getString(KEY_SOURCE_KEY)?.takeIf(String::isNotBlank) ?: ContentMode.FC2.sourceKey
+            return SearchRequest(token, query, baseUrl, sourceKey)
         }
     }
 }
@@ -144,11 +152,16 @@ internal class SearchScheduler(private val context: Context) {
         runner = { request -> SearchRunner.run(request) },
     )
 
-    fun start(query: String, baseUrl: String): SearchScheduleResult {
+    fun start(
+        query: String,
+        baseUrl: String,
+        mode: ContentMode = ContentMode.FC2,
+    ): SearchScheduleResult {
         val request = SearchRequest(
             token = UUID.randomUUID().toString(),
             query = query.trim(),
             baseUrl = baseUrl,
+            sourceKey = mode.sourceKey,
         )
         require(request.query.isNotEmpty())
         cancelActive()
@@ -246,20 +259,25 @@ internal object SearchRunner {
         val startedAtNanos = System.nanoTime()
         var page = session.nextPage.coerceAtLeast(1)
         var totalPages = session.totalPages.coerceAtLeast(0)
+        val mode = request.mode
 
         try {
             while (true) {
                 currentCoroutineContext().ensureActive()
                 SearchRuntimePolicy.ensureWithinRuntime(startedAtNanos, System.nanoTime())
-                val parsed = client.searchPage(request.baseUrl, request.query, page)
+                val parsed = client.searchPage(request.baseUrl, request.query, page, mode)
                 SearchRuntimePolicy.validateTotalPages(parsed.totalPages)
                 totalPages = maxOf(totalPages, parsed.totalPages, page)
+                val localizedPosts = parsed.posts.map { post ->
+                    post.copy(id = mode.localPostId(post.id))
+                }
                 val stored = dao.storePage(
                     token = request.token,
                     page = page,
                     totalPages = totalPages,
-                    posts = parsed.posts,
+                    posts = localizedPosts,
                     updatedAt = System.currentTimeMillis(),
+                    sourceKey = request.sourceKey,
                 )
                 if (!stored) return SearchRunResult.STALE
                 if (page >= totalPages) {
@@ -267,7 +285,7 @@ internal object SearchRunner {
                     return SearchRunResult.COMPLETED
                 }
                 page += 1
-                session = dao.currentSession() ?: return SearchRunResult.STALE
+                session = dao.currentSession(request.sourceKey) ?: return SearchRunResult.STALE
                 if (session.token != request.token || session.status != SearchStatus.RUNNING) {
                     return SearchRunResult.STALE
                 }
@@ -303,9 +321,14 @@ internal class BackgroundSearchClient(
         }
         .build()
 
-    suspend fun searchPage(baseUrl: String, query: String, page: Int): SearchPage = withContext(Dispatchers.IO) {
-        val pageUrl = parser.buildSearchUrl(baseUrl, query, page)
-        val firstUrl = parser.buildSearchUrl(baseUrl, query, 1)
+    suspend fun searchPage(
+        baseUrl: String,
+        query: String,
+        page: Int,
+        mode: ContentMode = ContentMode.FC2,
+    ): SearchPage = withContext(Dispatchers.IO) {
+        val pageUrl = parser.buildSearchUrl(baseUrl, query, page, mode.boardTable)
+        val firstUrl = parser.buildSearchUrl(baseUrl, query, 1, mode.boardTable)
         val request = Request.Builder().url(pageUrl)
             .get()
             .header("User-Agent", AvseeClient.USER_AGENT)
@@ -334,6 +357,7 @@ internal class SearchWorker(
             token = inputData.getString(SearchRequest.KEY_TOKEN) ?: return Result.failure(),
             query = inputData.getString(SearchRequest.KEY_QUERY) ?: return Result.failure(),
             baseUrl = inputData.getString(SearchRequest.KEY_BASE_URL) ?: return Result.failure(),
+            sourceKey = inputData.getString(SearchRequest.KEY_SOURCE_KEY) ?: ContentMode.FC2.sourceKey,
         )
         try {
             setForeground(SearchNotifications.foregroundInfo(applicationContext, request.query))

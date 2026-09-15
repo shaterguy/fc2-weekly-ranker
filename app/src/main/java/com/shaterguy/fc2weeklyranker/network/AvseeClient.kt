@@ -32,12 +32,14 @@ import java.util.Collections
 import javax.net.ssl.SSLException
 import java.util.LinkedHashMap
 
-private const val BOARD_PATH = "/bbs/board.php?bo_table=javfc2&sop=and&sst=wr_datetime&sod=desc"
 private const val SEARCH_PATH = "/bbs/search.php"
 private const val UA = "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 Chrome/151 Mobile Safari/537.36"
 private val SEOUL = ZoneId.of("Asia/Seoul")
 private val COUNT_TOKEN = Regex("(?<![A-Za-z0-9])(?:\\d{1,3}(?:,\\d{3})+|\\d+)(?![A-Za-z0-9])")
 private val GET_RETRY_DELAYS_MILLIS = listOf(250L, 750L)
+
+private fun boardPath(boardTable: String): String =
+    "/bbs/board.php?bo_table=$boardTable&sop=and&sst=wr_datetime&sod=desc"
 
 data class RemoteMedia(val url: String, val referer: String, val kind: String, val ordinal: Int)
 data class RemotePost(val id: String, val url: String, val title: String, val postedAt: Instant, val recommendationCount: Int, val media: List<RemoteMedia>)
@@ -70,10 +72,13 @@ class AvseeClient(
         },
     )
 
-    suspend fun testConnection(baseUrl: String): Result<Unit> = withContext(ioDispatcher) {
+    suspend fun testConnection(
+        baseUrl: String,
+        boardTable: String = "javfc2",
+    ): Result<Unit> = withContext(ioDispatcher) {
         try {
-            val boardUrl = "$baseUrl$BOARD_PATH"
-            val rows = parseBoardRows(fetch(boardUrl), baseUrl)
+            val boardUrl = "$baseUrl${boardPath(boardTable)}"
+            val rows = parseBoardRows(fetch(boardUrl), boardUrl)
             check(rows.isNotEmpty()) { "게시물 목록을 찾을 수 없습니다." }
             val first = rows.first()
             parsePostedDate(fetch(first.url, boardUrl), first.url, Instant.now())
@@ -89,6 +94,7 @@ class AvseeClient(
         baseUrl: String,
         window: DateWindow,
         knownDates: Map<String, LocalDate> = emptyMap(),
+        boardTable: String = "javfc2",
     ): List<RemoteRankPost> = withContext(ioDispatcher) {
         val out = LinkedHashMap<String, RemoteRankPost>()
         val dateCache = knownDates.toMutableMap()
@@ -102,8 +108,8 @@ class AvseeClient(
                 "게시판 탐색 요청이 안전 상한을 초과했습니다. 원문 정렬 상태를 확인해 주세요."
             }
             boardRequestCount += 1
-            val boardUrl = "$baseUrl$BOARD_PATH&page=$page"
-            val rows = parseBoardRows(fetchForCrawl(boardUrl), baseUrl)
+            val boardUrl = "$baseUrl${boardPath(boardTable)}&page=$page"
+            val rows = parseBoardRows(fetchForCrawl(boardUrl), boardUrl)
             val snapshot = if (rows.isEmpty()) {
                 CrawlBoardPage(page, boardUrl, rows, null, null)
             } else {
@@ -205,11 +211,15 @@ class AvseeClient(
         out.values.toList()
     }
 
-    suspend fun searchPosts(baseUrl: String, query: String): List<RemoteSearchPost> = withContext(ioDispatcher) {
+    suspend fun searchPosts(
+        baseUrl: String,
+        query: String,
+        boardTable: String = "javfc2",
+    ): List<RemoteSearchPost> = withContext(ioDispatcher) {
         val term = query.trim()
         require(term.isNotEmpty()) { "검색어를 입력해 주세요." }
 
-        val firstUrl = buildSearchUrl(baseUrl, term, 1)
+        val firstUrl = buildSearchUrl(baseUrl, term, 1, boardTable)
         val first = parseSearchPage(fetch(firstUrl), firstUrl)
         val out = LinkedHashMap<String, RemoteSearchPost>()
         first.posts.forEach { post -> out.putIfAbsent(post.id, post) }
@@ -217,7 +227,7 @@ class AvseeClient(
         var page = 2
         while (page <= first.totalPages) {
             currentCoroutineContext().ensureActive()
-            val pageUrl = buildSearchUrl(baseUrl, term, page)
+            val pageUrl = buildSearchUrl(baseUrl, term, page, boardTable)
             val parsed = parseSearchPage(fetch(pageUrl, firstUrl), pageUrl)
             parsed.posts.forEach { post -> out.putIfAbsent(post.id, post) }
             page += 1
@@ -225,19 +235,26 @@ class AvseeClient(
         out.values.toList()
     }
 
-    internal fun buildSearchUrl(baseUrl: String, query: String, page: Int): String {
+    internal fun buildSearchUrl(
+        baseUrl: String,
+        query: String,
+        page: Int,
+        boardTable: String = "javfc2",
+    ): String {
         require(page >= 1)
         val encoded = URLEncoder.encode(query.trim(), "UTF-8").replace("+", "%20")
-        return "$baseUrl$SEARCH_PATH?sfl=wr_subject%7C%7Cwr_content&stx=$encoded&sop=and&gr_id=&srows=1000&onetable=&page=$page"
+        val onetable = if (boardTable == "javfc2") "" else boardTable
+        return "$baseUrl$SEARCH_PATH?sfl=wr_subject%7C%7Cwr_content&stx=$encoded&sop=and&gr_id=&srows=1000&onetable=$onetable&page=$page"
     }
 
     internal fun parseSearchPage(html: String, pageUrl: String): SearchPage {
         val doc = Jsoup.parse(html, pageUrl)
         val posts = LinkedHashMap<String, RemoteSearchPost>()
+        val boardTable = decodedQueryParam(pageUrl, "onetable")?.takeIf(String::isNotBlank) ?: "javfc2"
         doc.select("#at-main .search-media .media").forEach { row ->
-            val link = row.selectFirst(".media-heading a[href*='bo_table=javfc2'][href*='wr_id=']") ?: return@forEach
+            val link = row.selectFirst(".media-heading a[href*='bo_table=$boardTable'][href*='wr_id=']") ?: return@forEach
             val url = link.absUrl("href").takeIf(String::isNotBlank) ?: return@forEach
-            if (decodedQueryParam(url, "bo_table") != "javfc2") return@forEach
+            if (decodedQueryParam(url, "bo_table") != boardTable) return@forEach
             val id = decodedQueryParam(url, "wr_id")?.takeIf(String::isNotBlank) ?: return@forEach
             val title = link.text().trim().takeIf(String::isNotBlank) ?: "게시물 $id"
             posts.putIfAbsent(id, RemoteSearchPost(id, url.substringBefore('#'), title))
@@ -270,17 +287,23 @@ class AvseeClient(
 
     internal fun parseBoardLinks(html: String, baseUrl: String): List<String> {
         val doc = Jsoup.parse(html, baseUrl)
-        return doc.select("#fboardlist .list-item h2 a[href*='bo_table=javfc2'][href*='wr_id=']")
-            .mapNotNull { it.absUrl("href").takeIf(String::isNotBlank) }
+        val boardTable = decodedQueryParam(baseUrl, "bo_table")?.takeIf(String::isNotBlank) ?: "javfc2"
+        return doc.select("#fboardlist .list-item h2 a[href*='bo_table=$boardTable'][href*='wr_id=']")
+            .mapNotNull { link ->
+                val url = link.absUrl("href").takeIf(String::isNotBlank) ?: return@mapNotNull null
+                url.takeIf { decodedQueryParam(it, "bo_table") == boardTable }
+            }
             .distinct()
     }
 
     internal fun parseBoardRows(html: String, baseUrl: String): List<BoardRow> {
         val doc = Jsoup.parse(html, baseUrl)
         val rows = LinkedHashMap<String, BoardRow>()
+        val boardTable = decodedQueryParam(baseUrl, "bo_table")?.takeIf(String::isNotBlank) ?: "javfc2"
         doc.select("#fboardlist .list-item").forEach { item ->
-            val link = item.selectFirst("h2 a[href*='bo_table=javfc2'][href*='wr_id=']") ?: return@forEach
+            val link = item.selectFirst("h2 a[href*='bo_table=$boardTable'][href*='wr_id=']") ?: return@forEach
             val url = link.absUrl("href").takeIf(String::isNotBlank) ?: return@forEach
+            if (decodedQueryParam(url, "bo_table") != boardTable) return@forEach
             val id = queryParam(url, "wr_id")?.takeIf(String::isNotBlank) ?: return@forEach
             val title = link.text().trim().takeIf(String::isNotBlank) ?: "게시물 $id"
             val commentCount = parseBoardCommentCount(item, title)

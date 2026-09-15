@@ -1,5 +1,6 @@
 package com.shaterguy.fc2weeklyranker.search
 
+import androidx.room.ColumnInfo
 import androidx.room.Dao
 import androidx.room.Database
 import androidx.room.Entity
@@ -11,6 +12,8 @@ import androidx.room.Query
 import androidx.room.RoomDatabase
 import androidx.room.Transaction
 import androidx.room.Upsert
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import com.shaterguy.fc2weeklyranker.network.RemoteSearchPost
 import kotlinx.coroutines.flow.Flow
 
@@ -33,6 +36,7 @@ internal data class SearchSessionEntity(
     val totalPages: Int,
     val errorMessage: String?,
     val updatedAtEpochMillis: Long,
+    @ColumnInfo(defaultValue = "'FC2'") val sourceKey: String = "FC2",
 )
 
 @Entity(
@@ -52,21 +56,21 @@ internal data class SearchResultEntity(
 
 @Dao
 internal abstract class SearchDao {
-    @Query("SELECT * FROM search_session WHERE slot = 1 LIMIT 1")
-    abstract fun observeSession(): Flow<SearchSessionEntity?>
+    @Query("SELECT * FROM search_session WHERE slot = 1 AND sourceKey = :sourceKey LIMIT 1")
+    abstract fun observeSession(sourceKey: String = "FC2"): Flow<SearchSessionEntity?>
 
     @Query(
         """
         SELECT r.* FROM search_results r
         INNER JOIN search_session s ON s.token = r.sessionToken
-        WHERE s.slot = 1
+        WHERE s.slot = 1 AND s.sourceKey = :sourceKey
         ORDER BY r.sequence ASC
         """,
     )
-    abstract fun observeResults(): Flow<List<SearchResultEntity>>
+    abstract fun observeResults(sourceKey: String = "FC2"): Flow<List<SearchResultEntity>>
 
-    @Query("SELECT * FROM search_session WHERE slot = 1 LIMIT 1")
-    abstract suspend fun currentSession(): SearchSessionEntity?
+    @Query("SELECT * FROM search_session WHERE slot = 1 AND sourceKey = :sourceKey LIMIT 1")
+    abstract suspend fun currentSession(sourceKey: String = "FC2"): SearchSessionEntity?
 
     @Upsert
     protected abstract suspend fun upsertSession(session: SearchSessionEntity)
@@ -82,11 +86,12 @@ internal abstract class SearchDao {
         UPDATE search_session
         SET nextPage = :nextPage, totalPages = :totalPages, errorMessage = NULL,
             updatedAtEpochMillis = :updatedAt
-        WHERE slot = 1 AND token = :token AND status = 'RUNNING'
+        WHERE slot = 1 AND token = :token AND sourceKey = :sourceKey AND status = 'RUNNING'
         """,
     )
     protected abstract suspend fun updateProgress(
         token: String,
+        sourceKey: String,
         nextPage: Int,
         totalPages: Int,
         updatedAt: Long,
@@ -137,7 +142,7 @@ internal abstract class SearchDao {
 
     @Transaction
     open suspend fun prepareSession(request: SearchRequest): SearchSessionEntity {
-        currentSession()?.takeIf { it.token == request.token }?.let { return it }
+        currentSession(request.sourceKey)?.takeIf { it.token == request.token }?.let { return it }
         clearResults()
         return SearchSessionEntity(
             token = request.token,
@@ -148,6 +153,7 @@ internal abstract class SearchDao {
             totalPages = 0,
             errorMessage = null,
             updatedAtEpochMillis = System.currentTimeMillis(),
+            sourceKey = request.sourceKey,
         ).also { upsertSession(it) }
     }
 
@@ -158,8 +164,9 @@ internal abstract class SearchDao {
         totalPages: Int,
         posts: List<RemoteSearchPost>,
         updatedAt: Long,
+        sourceKey: String = "FC2",
     ): Boolean {
-        val current = currentSession()
+        val current = currentSession(sourceKey)
         if (current?.token != token || current.status != SearchStatus.RUNNING) return false
         if (posts.isNotEmpty()) {
             val baseSequence = page.toLong() * PAGE_SEQUENCE_STRIDE
@@ -175,7 +182,7 @@ internal abstract class SearchDao {
                 },
             )
         }
-        return updateProgress(token, page + 1, totalPages, updatedAt) == 1
+        return updateProgress(token, sourceKey, page + 1, totalPages, updatedAt) == 1
     }
 
     companion object {
@@ -185,9 +192,17 @@ internal abstract class SearchDao {
 
 @Database(
     entities = [SearchSessionEntity::class, SearchResultEntity::class],
-    version = 1,
+    version = 2,
     exportSchema = true,
 )
 internal abstract class SearchDatabase : RoomDatabase() {
     abstract fun searchDao(): SearchDao
+
+    companion object {
+        val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE search_session ADD COLUMN sourceKey TEXT NOT NULL DEFAULT 'FC2'")
+            }
+        }
+    }
 }

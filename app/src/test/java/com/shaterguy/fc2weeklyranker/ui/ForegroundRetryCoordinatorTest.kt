@@ -1,5 +1,6 @@
 package com.shaterguy.fc2weeklyranker.ui
 
+import com.shaterguy.fc2weeklyranker.domain.ContentMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -13,7 +14,7 @@ class ForegroundRetryCoordinatorTest {
         val coordinator = ForegroundRetryCoordinator()
         coordinator.onForeground()
         val action = coordinator.actionStarted()
-        val intent = RetryIntent.Refresh(1234L, 7L, 8L, 9L)
+        val intent = RetryIntent.Refresh(1234L, 7L, 8L, 9L, ContentMode.FC2)
 
         coordinator.onBackground()
         assertNull(coordinator.failed(intent, action))
@@ -26,7 +27,7 @@ class ForegroundRetryCoordinatorTest {
         val coordinator = ForegroundRetryCoordinator()
         coordinator.onForeground()
         val action = coordinator.actionStarted()
-        val intent = RetryIntent.Refresh(1234L, 9L, 11L, 10L)
+        val intent = RetryIntent.Refresh(1234L, 9L, 11L, 10L, ContentMode.FC2)
 
         coordinator.onBackground()
         assertNull(coordinator.onForeground())
@@ -40,7 +41,7 @@ class ForegroundRetryCoordinatorTest {
         val coordinator = ForegroundRetryCoordinator()
         coordinator.onForeground()
         val action = coordinator.actionStarted()
-        val intent = RetryIntent.Refresh(1234L, 1L, 2L, 3L)
+        val intent = RetryIntent.Refresh(1234L, 1L, 2L, 3L, ContentMode.FC2)
 
         assertNull(coordinator.failed(intent, action))
         coordinator.onBackground()
@@ -54,7 +55,7 @@ class ForegroundRetryCoordinatorTest {
         val oldAction = coordinator.actionStarted()
         coordinator.onBackground()
         coordinator.invalidate()
-        val intent = RetryIntent.Refresh(1234L, 1L, 2L, 3L)
+        val intent = RetryIntent.Refresh(1234L, 1L, 2L, 3L, ContentMode.FC2)
 
         assertNull(coordinator.failed(intent, oldAction))
         assertNull(coordinator.onForeground())

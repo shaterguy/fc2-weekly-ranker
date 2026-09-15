@@ -29,6 +29,33 @@ class BoardListParsingTest {
     }
 
     @Test
+    fun `jav board row is parsed when board url selects javc`() {
+        val html = """
+            <form id='fboardlist'>
+              <div class='list-item'>
+                <h2><a href='/bbs/board.php?bo_table=javc&wr_id=8123'>ABP-8123</a></h2>
+                <div class='meta'>M Manager <span class='comments'><b>17</b></span> <span>8,120</span></div>
+              </div>
+              <div class='list-item'>
+                <h2><a href='/bbs/board.php?bo_table=javfc2&wr_id=8123'>FC2-8123</a></h2>
+                <div class='meta'>M Manager <span class='comments'><b>99</b></span> <span>9,999</span></div>
+              </div>
+            </form>
+        """.trimIndent()
+
+        val rows = parser.parseBoardRows(
+            html,
+            "https://example.test/bbs/board.php?bo_table=javc&page=1",
+        )
+
+        assertEquals(1, rows.size)
+        assertEquals("8123", rows.single().id)
+        assertEquals("ABP-8123", rows.single().title)
+        assertEquals(17, rows.single().commentCount)
+        assertEquals("https://example.test/bbs/board.php?bo_table=javc&wr_id=8123", rows.single().url)
+    }
+
+    @Test
     fun `board row fallback uses first metric after title only when comments and views are both visible`() {
         val html = """
             <form id='fboardlist'>

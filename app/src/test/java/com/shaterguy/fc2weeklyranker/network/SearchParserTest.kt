@@ -72,6 +72,32 @@ class SearchParserTest {
     }
 
     @Test
+    fun `jav search page keeps javc and excludes javfc2 when onetable selects javc`() {
+        val html = """
+            <div id='at-main'>
+              <div class='search-media'>
+                <div class='media'><div class='media-body'><div class='media-heading'>
+                  <a href='./board.php?bo_table=javc&wr_id=321'>JAV title</a>
+                </div></div></div>
+              </div>
+              <div class='search-media'>
+                <div class='media'><div class='media-body'><div class='media-heading'>
+                  <a href='./board.php?bo_table=javfc2&wr_id=321'>FC2 title</a>
+                </div></div></div>
+              </div>
+            </div>
+        """.trimIndent()
+        val pageUrl = "https://example.test/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=needle&sop=and&gr_id=&srows=1000&onetable=javc&page=1"
+
+        val parsed = client.parseSearchPage(html, pageUrl)
+
+        assertEquals(1, parsed.posts.size)
+        assertEquals("321", parsed.posts.single().id)
+        assertEquals("JAV title", parsed.posts.single().title)
+        assertEquals("https://example.test/bbs/board.php?bo_table=javc&wr_id=321", parsed.posts.single().url)
+    }
+
+    @Test
     fun `empty global search is a normal completed first page`() {
         val pageUrl = "https://example.test/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=no-result&sop=and&gr_id=&srows=1000&onetable=&page=1"
 

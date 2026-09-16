@@ -14,7 +14,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicInteger
-import kotlin.system.measureTimeMillis
 
 class AvseeClientBulkTagTest {
     @Test
@@ -23,6 +22,7 @@ class AvseeClientBulkTagTest {
         val maxActive = AtomicInteger()
         val requestedPages = Collections.synchronizedList(mutableListOf<Int>())
         val totalPages = 8
+        val query = "bulk"
         val client = AvseeClient(
             interceptingClient { request ->
                 val page = request.url.queryParameter("page")?.toIntOrNull() ?: 1
@@ -31,14 +31,14 @@ class AvseeClientBulkTagTest {
                 maxActive.updateAndGet { previous -> maxOf(previous, current) }
                 try {
                     Thread.sleep((totalPages - page + 1L) * 12L)
-                    tagPage(page = page, totalPages = totalPages, rowsPerPage = 3)
+                    tagPage(page = page, totalPages = totalPages, rowsPerPage = 3, query = query)
                 } finally {
                     active.decrementAndGet()
                 }
             },
         )
 
-        val posts = client.searchTagPosts("https://example.test", "bulk")
+        val posts = client.searchTagPosts("https://example.test", query)
 
         assertEquals((1..totalPages).flatMap { page -> idsForPage(page, 3) }, posts.map(RemoteTagPost::id))
         assertEquals((1..totalPages).toSet(), requestedPages.toSet())
@@ -49,16 +49,17 @@ class AvseeClientBulkTagTest {
     @Test
     fun `tag pagination frontier expands when a later page reveals more matching pages`() = runBlocking {
         val requestedPages = Collections.synchronizedList(mutableListOf<Int>())
+        val query = "frontier"
         val client = AvseeClient(
             interceptingClient { request ->
                 val page = request.url.queryParameter("page")?.toIntOrNull() ?: 1
                 requestedPages += page
                 val advertisedLastPage = if (page >= 4) 8 else 4
-                tagPage(page = page, totalPages = advertisedLastPage, rowsPerPage = 2)
+                tagPage(page = page, totalPages = advertisedLastPage, rowsPerPage = 2, query = query)
             },
         )
 
-        val posts = client.searchTagPosts("https://example.test", "frontier")
+        val posts = client.searchTagPosts("https://example.test", query)
 
         assertEquals((1..8).flatMap { page -> idsForPage(page, 2) }, posts.map(RemoteTagPost::id))
         assertEquals((1..8).toSet(), requestedPages.toSet())
@@ -71,8 +72,9 @@ class AvseeClientBulkTagTest {
     }
 
     private suspend fun benchmarkTagCase(totalPages: Int, rowsPerPage: Int, expectedCount: Int) {
+        val query = "benchmark"
         val htmlByPage = (1..totalPages).associateWith { page ->
-            tagPage(page = page, totalPages = totalPages, rowsPerPage = rowsPerPage)
+            tagPage(page = page, totalPages = totalPages, rowsPerPage = rowsPerPage, query = query)
         }
         val delayMillis = 100L
         val http = interceptingClient { request ->
@@ -82,28 +84,26 @@ class AvseeClientBulkTagTest {
         }
         val parser = AvseeClient(http)
 
-        serialTagSearch(http, parser, "https://example.test", "benchmark").also { posts ->
+        serialTagSearch(http, parser, "https://example.test", query).also { posts ->
             assertEquals(expectedCount, posts.size)
         }
-        parser.searchTagPosts("https://example.test", "benchmark").also { posts ->
+        parser.searchTagPosts("https://example.test", query).also { posts ->
             assertEquals(expectedCount, posts.size)
         }
 
-        val serialSamples = MutableList(5) {
-            var result: List<RemoteTagPost> = emptyList()
-            val elapsed = measureTimeMillis {
-                result = serialTagSearch(http, parser, "https://example.test", "benchmark")
-            }
+        val serialSamples = mutableListOf<Long>()
+        repeat(5) {
+            val startedAt = System.nanoTime()
+            val result = serialTagSearch(http, parser, "https://example.test", query)
+            serialSamples += (System.nanoTime() - startedAt) / 1_000_000L
             assertEquals(expectedCount, result.size)
-            elapsed
         }
-        val candidateSamples = MutableList(5) {
-            var result: List<RemoteTagPost> = emptyList()
-            val elapsed = measureTimeMillis {
-                result = parser.searchTagPosts("https://example.test", "benchmark")
-            }
+        val candidateSamples = mutableListOf<Long>()
+        repeat(5) {
+            val startedAt = System.nanoTime()
+            val result = parser.searchTagPosts("https://example.test", query)
+            candidateSamples += (System.nanoTime() - startedAt) / 1_000_000L
             assertEquals(expectedCount, result.size)
-            elapsed
         }
         val serialMedian = median(serialSamples)
         val candidateMedian = median(candidateSamples)
@@ -158,7 +158,7 @@ class AvseeClientBulkTagTest {
         }
         .build()
 
-    private fun tagPage(page: Int, totalPages: Int, rowsPerPage: Int): String = buildString {
+    private fun tagPage(page: Int, totalPages: Int, rowsPerPage: Int, query: String): String = buildString {
         append("<div class='tagbox-media'>")
         idsForPage(page, rowsPerPage).forEachIndexed { index, id ->
             append("<div class='media'><div class='media-body'>")
@@ -173,7 +173,9 @@ class AvseeClientBulkTagTest {
             append(10_000 + page * rowsPerPage + index)
             append("</div></div></div>")
         }
-        append("</div><ul class='pagination'><li><a href='/bbs/tag.php?q=benchmark&eq=&page=")
+        append("</div><ul class='pagination'><li><a href='/bbs/tag.php?q=")
+        append(query)
+        append("&eq=&page=")
         append(totalPages)
         append("'>")
         append(totalPages)

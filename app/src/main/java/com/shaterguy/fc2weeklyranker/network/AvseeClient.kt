@@ -4,15 +4,25 @@ import com.shaterguy.fc2weeklyranker.domain.DateWindow
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import java.io.IOException
 import java.net.ConnectException
 import java.net.NoRouteToHostException
 import java.net.ProtocolException
@@ -22,15 +32,17 @@ import java.net.URI
 import java.net.URLDecoder
 import java.net.URLEncoder
 import java.net.UnknownHostException
+import java.security.cert.CertificateException
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.ZoneId
-import java.security.cert.CertificateException
 import java.util.Collections
-import javax.net.ssl.SSLException
 import java.util.LinkedHashMap
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
+import javax.net.ssl.SSLException
 
 private const val SEARCH_PATH = "/bbs/search.php"
 private const val TAG_PATH = "/bbs/tag.php"
@@ -74,6 +86,9 @@ class AvseeClient(
     private val http = http.newBuilder()
         .retryOnConnectionFailure(false)
         .build()
+    private val networkPermits = Semaphore(MAX_CONCURRENT_HTTP_REQUESTS)
+    private val crawlCacheGeneration = AtomicLong(0L)
+
     private data class CrawlBoardPage(
         val number: Int,
         val url: String,
@@ -115,32 +130,49 @@ class AvseeClient(
         boardTable: String = "javfc2",
     ): List<RemoteRankPost> = withContext(ioDispatcher) {
         val out = LinkedHashMap<String, RemoteRankPost>()
-        val dateCache = knownDates.toMutableMap()
+        val dateCache = ConcurrentHashMap<String, LocalDate>().apply { putAll(knownDates) }
         val pageCache = mutableMapOf<Int, CrawlBoardPage>()
         var boardRequestCount = 0
 
-        suspend fun loadPage(page: Int): CrawlBoardPage {
-            require(page in 1..MAX_BOARD_PAGE) { "게시판 페이지가 안전 범위를 벗어났습니다: $page" }
-            pageCache[page]?.let { return it }
-            check(boardRequestCount < MAX_CRAWL_BOARD_REQUESTS) {
-                "게시판 탐색 요청이 안전 상한을 초과했습니다. 원문 정렬 상태를 확인해 주세요."
+        suspend fun loadPagesOrdered(pages: List<Int>): List<CrawlBoardPage> {
+            val requested = pages.distinct()
+            requested.forEach { page ->
+                require(page in 1..MAX_BOARD_PAGE) { "게시판 페이지가 안전 범위를 벗어났습니다: $page" }
             }
-            boardRequestCount += 1
-            val boardUrl = "$baseUrl${boardPath(boardTable)}&page=$page"
-            val rows = parseBoardRows(fetchForCrawl(boardUrl), boardUrl)
-            val snapshot = if (rows.isEmpty()) {
-                CrawlBoardPage(page, boardUrl, rows, null, null)
-            } else {
-                val firstDate = resolveBoardRowDate(rows.first(), boardUrl, window.upperInclusive, dateCache)
-                val lastDate = if (rows.size == 1) firstDate else resolveBoardRowDate(rows.last(), boardUrl, window.upperInclusive, dateCache)
-                check(!firstDate.isBefore(lastDate)) {
-                    "게시판 작성일 내림차순 전제가 깨졌습니다. 안전을 위해 날짜 자동 분류를 중단합니다."
+            val missing = requested.filterNot(pageCache::containsKey)
+            if (missing.isNotEmpty()) {
+                check(boardRequestCount <= MAX_CRAWL_BOARD_REQUESTS - missing.size) {
+                    "게시판 탐색 요청이 안전 상한을 초과했습니다. 원문 정렬 상태를 확인해 주세요."
                 }
-                CrawlBoardPage(page, boardUrl, rows, firstDate, lastDate)
+                boardRequestCount += missing.size
+                val loaded = coroutineScope {
+                    missing.map { page ->
+                        async {
+                            val boardUrl = "$baseUrl${boardPath(boardTable)}&page=$page"
+                            val rows = parseBoardRows(fetchForCrawl(boardUrl), boardUrl)
+                            if (rows.isEmpty()) {
+                                CrawlBoardPage(page, boardUrl, rows, null, null)
+                            } else {
+                                val firstDate = resolveBoardRowDate(rows.first(), boardUrl, window.upperInclusive, dateCache)
+                                val lastDate = if (rows.size == 1) {
+                                    firstDate
+                                } else {
+                                    resolveBoardRowDate(rows.last(), boardUrl, window.upperInclusive, dateCache)
+                                }
+                                check(!firstDate.isBefore(lastDate)) {
+                                    "게시판 작성일 내림차순 전제가 깨졌습니다. 안전을 위해 날짜 자동 분류를 중단합니다."
+                                }
+                                CrawlBoardPage(page, boardUrl, rows, firstDate, lastDate)
+                            }
+                        }
+                    }.awaitAll()
+                }
+                loaded.forEach { snapshot -> pageCache[snapshot.number] = snapshot }
             }
-            pageCache[page] = snapshot
-            return snapshot
+            return requested.map(pageCache::getValue)
         }
+
+        suspend fun loadPage(page: Int): CrawlBoardPage = loadPagesOrdered(listOf(page)).single()
 
         suspend fun lastNonEmptyPage(lowNonEmpty: Int, highEmpty: Int): Int {
             var low = lowNonEmpty + 1
@@ -193,38 +225,68 @@ class AvseeClient(
 
         var page = startPage
         var previousLastDate: LocalDate? = null
-        while (page <= MAX_BOARD_PAGE) {
-            val snapshot = loadPage(page)
-            if (snapshot.rows.isEmpty()) break
-            val firstDate = snapshot.firstDate ?: break
-            previousLastDate?.let { previous ->
-                check(!previous.isBefore(firstDate)) {
-                    "게시판 페이지 간 작성일 내림차순 전제가 깨졌습니다. 안전을 위해 크롤링을 중단합니다."
+        var stop = false
+        while (page <= MAX_BOARD_PAGE && !stop) {
+            val batchEnd = minOf(MAX_BOARD_PAGE, page + MAX_CONCURRENT_HTTP_REQUESTS - 1)
+            val snapshots = loadPagesOrdered((page..batchEnd).toList())
+            val included = mutableListOf<CrawlBoardPage>()
+
+            for (snapshot in snapshots) {
+                if (snapshot.rows.isEmpty()) {
+                    stop = true
+                    break
+                }
+                val firstDate = snapshot.firstDate ?: run {
+                    stop = true
+                    break
+                }
+                previousLastDate?.let { previous ->
+                    check(!previous.isBefore(firstDate)) {
+                        "게시판 페이지 간 작성일 내림차순 전제가 깨졌습니다. 안전을 위해 크롤링을 중단합니다."
+                    }
+                }
+                if (firstDate.isBefore(window.startDate)) {
+                    stop = true
+                    break
+                }
+                included += snapshot
+                previousLastDate = snapshot.lastDate
+                if (snapshot.lastDate!!.isBefore(window.startDate)) {
+                    stop = true
+                    break
                 }
             }
-            if (firstDate.isBefore(window.startDate)) break
 
-            val dates = resolveBoardDates(snapshot.rows, snapshot.url, window.upperInclusive, dateCache)
-            snapshot.rows.forEachIndexed { index, row ->
-                val date = dates[index]
-                if (!date.isBefore(window.startDate) && !date.isAfter(window.endDate)) {
-                    out.putIfAbsent(
-                        row.id,
-                        RemoteRankPost(
-                            id = row.id,
-                            url = row.url,
-                            title = row.title,
-                            postedAt = date.atStartOfDay(SEOUL).toInstant(),
-                            commentCount = row.commentCount,
-                        ),
-                    )
+            val resolved = coroutineScope {
+                included.map { snapshot ->
+                    async {
+                        snapshot to resolveBoardDates(snapshot.rows, snapshot.url, window.upperInclusive, dateCache)
+                    }
+                }.awaitAll()
+            }
+            resolved.forEach { (snapshot, dates) ->
+                snapshot.rows.forEachIndexed { index, row ->
+                    val date = dates[index]
+                    if (!date.isBefore(window.startDate) && !date.isAfter(window.endDate)) {
+                        out.putIfAbsent(
+                            row.id,
+                            RemoteRankPost(
+                                id = row.id,
+                                url = row.url,
+                                title = row.title,
+                                postedAt = date.atStartOfDay(SEOUL).toInstant(),
+                                commentCount = row.commentCount,
+                            ),
+                        )
+                    }
                 }
+                if (dates.last().isBefore(window.startDate)) stop = true
             }
 
-            previousLastDate = dates.last()
-            if (dates.last().isBefore(window.startDate)) break
-            check(page < MAX_BOARD_PAGE) { "게시판 목표 구간 수집이 페이지 안전 상한에 도달했습니다." }
-            page += 1
+            if (!stop) {
+                check(batchEnd < MAX_BOARD_PAGE) { "게시판 목표 구간 수집이 페이지 안전 상한에 도달했습니다." }
+                page = batchEnd + 1
+            }
         }
         out.values.toList()
     }
@@ -265,13 +327,24 @@ class AvseeClient(
         val out = LinkedHashMap<String, RemoteTagPost>()
         first.posts.forEach { post -> out.putIfAbsent(post.id, post) }
 
+        var discoveredLastPage = first.totalPages
         var page = 2
-        while (page <= first.totalPages) {
+        while (page <= discoveredLastPage) {
             currentCoroutineContext().ensureActive()
-            val pageUrl = buildTagSearchUrl(baseUrl, term, page)
-            val parsed = parseTagPage(fetch(pageUrl, firstUrl), pageUrl)
-            parsed.posts.forEach { post -> out.putIfAbsent(post.id, post) }
-            page += 1
+            val batchEnd = minOf(discoveredLastPage, page + MAX_CONCURRENT_HTTP_REQUESTS - 1)
+            val parsedPages = coroutineScope {
+                (page..batchEnd).map { currentPage ->
+                    async {
+                        val pageUrl = buildTagSearchUrl(baseUrl, term, currentPage)
+                        parseTagPage(fetch(pageUrl, firstUrl), pageUrl)
+                    }
+                }.awaitAll()
+            }
+            parsedPages.forEach { parsed ->
+                parsed.posts.forEach { post -> out.putIfAbsent(post.id, post) }
+                discoveredLastPage = maxOf(discoveredLastPage, parsed.totalPages)
+            }
+            page = batchEnd + 1
         }
         out.values.toList()
     }
@@ -368,7 +441,10 @@ class AvseeClient(
     }
 
     internal fun clearCrawlCache() {
-        crawlHtmlCache.clear()
+        synchronized(crawlHtmlCache) {
+            crawlCacheGeneration.incrementAndGet()
+            crawlHtmlCache.clear()
+        }
     }
 
     suspend fun loadDetail(url: String): RemotePost = withContext(ioDispatcher) {
@@ -683,8 +759,17 @@ class AvseeClient(
     }
 
     private suspend fun fetchForCrawl(url: String, referer: String? = null): String {
-        crawlHtmlCache[url]?.let { return it }
-        return fetch(url, referer).also { crawlHtmlCache[url] = it }
+        val generation = crawlCacheGeneration.get()
+        synchronized(crawlHtmlCache) {
+            crawlHtmlCache[url]?.let { return it }
+        }
+        val html = fetch(url, referer)
+        synchronized(crawlHtmlCache) {
+            if (crawlCacheGeneration.get() == generation) {
+                crawlHtmlCache[url] = html
+            }
+        }
+        return html
     }
 
     private suspend fun fetch(url: String, referer: String? = null): String {
@@ -695,10 +780,36 @@ class AvseeClient(
             .apply { if (referer != null) header("Referer", referer) }
             .build()
         return retryTransientGet(sleep = retrySleep) {
-            http.newCall(request).execute().use { response ->
-                check(response.isSuccessful) { "HTTP_${response.code}" }
-                response.body.string()
-            }
+            executeRequest(request)
+        }
+    }
+
+    private suspend fun executeRequest(request: Request): String = networkPermits.withPermit {
+        suspendCancellableCoroutine { continuation ->
+            val call = http.newCall(request)
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(
+                object : Callback {
+                    override fun onFailure(call: Call, e: IOException) {
+                        continuation.tryResumeWithException(e)?.let(continuation::completeResume)
+                    }
+
+                    override fun onResponse(call: Call, response: Response) {
+                        val result = runCatching {
+                            response.use {
+                                check(it.isSuccessful) { "HTTP_${it.code}" }
+                                it.body.string()
+                            }
+                        }
+                        result.fold(
+                            onSuccess = { body -> continuation.tryResume(body)?.let(continuation::completeResume) },
+                            onFailure = { error ->
+                                continuation.tryResumeWithException(error)?.let(continuation::completeResume)
+                            },
+                        )
+                    }
+                },
+            )
         }
     }
 
@@ -724,6 +835,7 @@ class AvseeClient(
         private const val MAX_TAG_PAGE = 1_000_000
         private const val MAX_CRAWL_BOARD_REQUESTS = 2_048
         private const val MAX_CRAWL_CACHE_ENTRIES = 256
+        private const val MAX_CONCURRENT_HTTP_REQUESTS = 4
     }
 }
 
@@ -768,7 +880,7 @@ internal fun isTransientNetworkError(error: Throwable): Boolean {
 internal suspend fun <T> retryTransientGet(
     delaysMillis: List<Long> = GET_RETRY_DELAYS_MILLIS,
     sleep: suspend (Long) -> Unit = { delay(it) },
-    request: () -> T,
+    request: suspend () -> T,
 ): T {
     var retryIndex = 0
     while (true) {

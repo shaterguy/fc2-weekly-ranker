@@ -17,7 +17,6 @@ import org.junit.Test
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
-import java.util.Collections
 import java.util.concurrent.atomic.AtomicInteger
 
 class AvseeClientHistoricalPerformanceTest {
@@ -84,6 +83,22 @@ class AvseeClientHistoricalPerformanceTest {
             return LegacyProbe(page, row.id, date)
         }
 
+        fun lastNonEmptyPage(lowNonEmpty: Int, highEmpty: Int): Int {
+            var low = lowNonEmpty + 1
+            var high = highEmpty - 1
+            var result = lowNonEmpty
+            while (low <= high) {
+                val mid = low + (high - low) / 2
+                if (load(mid).date == null) {
+                    high = mid - 1
+                } else {
+                    result = mid
+                    low = mid + 1
+                }
+            }
+            return result
+        }
+
         val first = load(1)
         val firstDate = checkNotNull(first.date)
         var startPage = 1
@@ -92,8 +107,15 @@ class AvseeClientHistoricalPerformanceTest {
             var high = 2
             while (true) {
                 val probe = load(high)
-                val date = checkNotNull(probe.date)
-                if (!date.isAfter(window.endDate)) break
+                if (probe.date == null) {
+                    val tailPage = lastNonEmptyPage(low, high)
+                    val tail = load(tailPage)
+                    val tailDate = checkNotNull(tail.date)
+                    if (tailDate.isAfter(window.endDate)) return@withContext emptyList()
+                    high = tailPage
+                    break
+                }
+                if (!probe.date.isAfter(window.endDate)) break
                 low = high
                 high *= 2
             }
@@ -122,7 +144,6 @@ class AvseeClientHistoricalPerformanceTest {
     private fun historicalFixture(delayMillis: Long): HistoricalFixture {
         val active = AtomicInteger()
         val maxActive = AtomicInteger()
-        val requestedPages = Collections.synchronizedList(mutableListOf<Int>())
         val firstDate = LocalDate.of(2026, 9, 1)
         val http = interceptingClient { request ->
             val current = active.incrementAndGet()
@@ -135,7 +156,6 @@ class AvseeClientHistoricalPerformanceTest {
                     detail(id, "${firstDate.minusDays((page - 1).toLong())} 12:00")
                 } else {
                     val page = request.url.queryParameter("page")?.toIntOrNull() ?: 1
-                    requestedPages += page
                     if (page <= 100) singleRowBoard(page) else emptyBoard()
                 }
             } finally {

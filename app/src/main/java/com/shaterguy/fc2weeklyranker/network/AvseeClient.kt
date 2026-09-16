@@ -43,6 +43,8 @@ import java.util.LinkedHashMap
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import javax.net.ssl.SSLException
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 private const val SEARCH_PATH = "/bbs/search.php"
 private const val TAG_PATH = "/bbs/tag.php"
@@ -791,7 +793,7 @@ class AvseeClient(
             call.enqueue(
                 object : Callback {
                     override fun onFailure(call: Call, e: IOException) {
-                        continuation.tryResumeWithException(e)?.let(continuation::completeResume)
+                        continuation.resumeWithException(e)
                     }
 
                     override fun onResponse(call: Call, response: Response) {
@@ -802,10 +804,8 @@ class AvseeClient(
                             }
                         }
                         result.fold(
-                            onSuccess = { body -> continuation.tryResume(body)?.let(continuation::completeResume) },
-                            onFailure = { error ->
-                                continuation.tryResumeWithException(error)?.let(continuation::completeResume)
-                            },
+                            onSuccess = { body -> continuation.resume(body) },
+                            onFailure = { error -> continuation.resumeWithException(error) },
                         )
                     }
                 },

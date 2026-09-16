@@ -130,42 +130,70 @@ class AvseeClient(
         val pageCache = mutableMapOf<Int, CrawlBoardPage>()
         var boardRequestCount = 0
 
-        suspend fun loadPage(page: Int): CrawlBoardPage {
-            require(page in 1..MAX_BOARD_PAGE) { "게시판 페이지가 안전 범위를 벗어났습니다: $page" }
-            pageCache[page]?.let { return it }
-            check(boardRequestCount < MAX_CRAWL_BOARD_REQUESTS) {
-                "게시판 탐색 요청이 안전 상한을 초과했습니다. 원문 정렬 상태를 확인해 주세요."
+        suspend fun loadPagesOrdered(pages: List<Int>): List<CrawlBoardPage> {
+            val requested = pages.distinct()
+            requested.forEach { page ->
+                require(page in 1..MAX_BOARD_PAGE) { "게시판 페이지가 안전 범위를 벗어났습니다: $page" }
             }
-            boardRequestCount += 1
-            val boardUrl = "$baseUrl${boardPath(boardTable)}&page=$page"
-            val rows = parseBoardRows(fetchForCrawl(boardUrl), boardUrl)
-            val snapshot = if (rows.isEmpty()) {
-                CrawlBoardPage(page, boardUrl, rows, null, null)
-            } else {
-                val dates = if (rows.size == 1) {
-                    val date = resolveBoardRowDate(rows.first(), boardUrl, window.upperInclusive, dateCache)
-                    date to date
-                } else {
-                    coroutineScope {
-                        val first = async {
-                            resolveBoardRowDate(rows.first(), boardUrl, window.upperInclusive, dateCache)
-                        }
-                        val last = async {
-                            resolveBoardRowDate(rows.last(), boardUrl, window.upperInclusive, dateCache)
-                        }
-                        first.await() to last.await()
-                    }
+            val missing = requested.filterNot(pageCache::containsKey)
+            if (missing.isNotEmpty()) {
+                check(boardRequestCount <= MAX_CRAWL_BOARD_REQUESTS - missing.size) {
+                    "게시판 탐색 요청이 안전 상한을 초과했습니다. 원문 정렬 상태를 확인해 주세요."
                 }
-                val firstDate = dates.first
-                val lastDate = dates.second
-                check(!firstDate.isBefore(lastDate)) {
-                    "게시판 작성일 내림차순 전제가 깨졌습니다. 안전을 위해 날짜 자동 분류를 중단합니다."
+                boardRequestCount += missing.size
+                val loaded = coroutineScope {
+                    missing.map { page ->
+                        async {
+                            val boardUrl = "$baseUrl${boardPath(boardTable)}&page=$page"
+                            val rows = parseBoardRows(fetchForCrawl(boardUrl), boardUrl)
+                            if (rows.isEmpty()) {
+                                CrawlBoardPage(page, boardUrl, rows, null, null)
+                            } else {
+                                val dates = if (rows.size == 1) {
+                                    val date = resolveBoardRowDate(
+                                        rows.first(),
+                                        boardUrl,
+                                        window.upperInclusive,
+                                        dateCache,
+                                    )
+                                    date to date
+                                } else {
+                                    coroutineScope {
+                                        val first = async {
+                                            resolveBoardRowDate(
+                                                rows.first(),
+                                                boardUrl,
+                                                window.upperInclusive,
+                                                dateCache,
+                                            )
+                                        }
+                                        val last = async {
+                                            resolveBoardRowDate(
+                                                rows.last(),
+                                                boardUrl,
+                                                window.upperInclusive,
+                                                dateCache,
+                                            )
+                                        }
+                                        first.await() to last.await()
+                                    }
+                                }
+                                val firstDate = dates.first
+                                val lastDate = dates.second
+                                check(!firstDate.isBefore(lastDate)) {
+                                    "게시판 작성일 내림차순 전제가 깨졌습니다. 안전을 위해 날짜 자동 분류를 중단합니다."
+                                }
+                                CrawlBoardPage(page, boardUrl, rows, firstDate, lastDate)
+                            }
+                        }
+                    }.awaitAll()
                 }
-                CrawlBoardPage(page, boardUrl, rows, firstDate, lastDate)
+                loaded.forEach { snapshot -> pageCache[snapshot.number] = snapshot }
             }
-            pageCache[page] = snapshot
-            return snapshot
+            return requested.map(pageCache::getValue)
         }
+
+        suspend fun loadPage(page: Int): CrawlBoardPage = loadPagesOrdered(listOf(page)).single()
 
         suspend fun lastNonEmptyPage(lowNonEmpty: Int, highEmpty: Int): Int {
             var low = lowNonEmpty + 1
@@ -190,19 +218,62 @@ class AvseeClient(
         if (firstPage.lastDate!!.isAfter(window.endDate)) {
             var low = 1
             var high = 2
-            while (true) {
-                val probe = loadPage(high)
-                if (probe.rows.isEmpty()) {
-                    val tailPage = lastNonEmptyPage(low, high)
+            val second = loadPage(2)
+            if (second.rows.isEmpty()) {
+                val tailPage = lastNonEmptyPage(1, 2)
+                val tail = loadPage(tailPage)
+                if (tail.lastDate!!.isAfter(window.endDate)) return@withContext emptyList()
+                high = tailPage
+            } else if (!second.lastDate!!.isAfter(window.endDate)) {
+                high = 2
+            } else {
+                low = 2
+                val fourth = loadPage(4)
+                if (fourth.rows.isEmpty()) {
+                    val tailPage = lastNonEmptyPage(low, 4)
                     val tail = loadPage(tailPage)
                     if (tail.lastDate!!.isAfter(window.endDate)) return@withContext emptyList()
                     high = tailPage
-                    break
+                } else if (!fourth.lastDate!!.isAfter(window.endDate)) {
+                    high = 4
+                } else {
+                    low = 4
+                    var nextProbe = 8
+                    var bracketFound = false
+                    while (!bracketFound) {
+                        val probePages = mutableListOf<Int>()
+                        var candidate = nextProbe
+                        while (probePages.size < MAX_CONCURRENT_HTTP_REQUESTS) {
+                            probePages += candidate
+                            if (candidate >= MAX_BOARD_PAGE) break
+                            candidate = (candidate * 2).coerceAtMost(MAX_BOARD_PAGE)
+                        }
+                        val probes = loadPagesOrdered(probePages)
+                        for (probe in probes) {
+                            if (probe.rows.isEmpty()) {
+                                val tailPage = lastNonEmptyPage(low, probe.number)
+                                val tail = loadPage(tailPage)
+                                if (tail.lastDate!!.isAfter(window.endDate)) return@withContext emptyList()
+                                high = tailPage
+                                bracketFound = true
+                                break
+                            }
+                            if (!probe.lastDate!!.isAfter(window.endDate)) {
+                                high = probe.number
+                                bracketFound = true
+                                break
+                            }
+                            low = probe.number
+                        }
+                        if (!bracketFound) {
+                            val lastProbe = probePages.last()
+                            check(lastProbe < MAX_BOARD_PAGE) {
+                                "게시판 과거 탐색이 페이지 안전 상한에 도달했습니다."
+                            }
+                            nextProbe = (lastProbe * 2).coerceAtMost(MAX_BOARD_PAGE)
+                        }
+                    }
                 }
-                if (!probe.lastDate!!.isAfter(window.endDate)) break
-                low = high
-                check(high < MAX_BOARD_PAGE) { "게시판 과거 탐색이 페이지 안전 상한에 도달했습니다." }
-                high = (high * 2).coerceAtMost(MAX_BOARD_PAGE)
             }
 
             var left = low + 1
@@ -216,40 +287,118 @@ class AvseeClient(
             startPage = left
         }
 
-        var page = startPage
-        var previousLastDate: LocalDate? = null
-        while (page <= MAX_BOARD_PAGE) {
-            val snapshot = loadPage(page)
-            if (snapshot.rows.isEmpty()) break
-            val firstDate = snapshot.firstDate ?: break
-            previousLastDate?.let { previous ->
-                check(!previous.isBefore(firstDate)) {
-                    "게시판 페이지 간 작성일 내림차순 전제가 깨졌습니다. 안전을 위해 크롤링을 중단합니다."
+        val useBulkCollection =
+            startPage >= HISTORICAL_BULK_START_PAGE ||
+                (startPage == 1 && firstPage.rows.size >= BULK_BOARD_ROW_THRESHOLD)
+
+        if (useBulkCollection) {
+            var page = startPage
+            var previousLastDate: LocalDate? = null
+            var stop = false
+            while (page <= MAX_BOARD_PAGE && !stop) {
+                val batchEnd = minOf(MAX_BOARD_PAGE, page + MAX_CONCURRENT_HTTP_REQUESTS - 1)
+                val snapshots = loadPagesOrdered((page..batchEnd).toList())
+                val included = mutableListOf<CrawlBoardPage>()
+                for (snapshot in snapshots) {
+                    if (snapshot.rows.isEmpty()) {
+                        stop = true
+                        break
+                    }
+                    val firstDate = snapshot.firstDate ?: run {
+                        stop = true
+                        break
+                    }
+                    previousLastDate?.let { previous ->
+                        check(!previous.isBefore(firstDate)) {
+                            "게시판 페이지 간 작성일 내림차순 전제가 깨졌습니다. 안전을 위해 크롤링을 중단합니다."
+                        }
+                    }
+                    if (firstDate.isBefore(window.startDate)) {
+                        stop = true
+                        break
+                    }
+                    included += snapshot
+                    previousLastDate = snapshot.lastDate
+                    if (snapshot.lastDate!!.isBefore(window.startDate)) {
+                        stop = true
+                        break
+                    }
+                }
+
+                val resolved = coroutineScope {
+                    included.map { snapshot ->
+                        async {
+                            snapshot to resolveBoardDates(
+                                snapshot.rows,
+                                snapshot.url,
+                                window.upperInclusive,
+                                dateCache,
+                            )
+                        }
+                    }.awaitAll()
+                }
+                resolved.forEach { (snapshot, dates) ->
+                    snapshot.rows.forEachIndexed { index, row ->
+                        val date = dates[index]
+                        if (!date.isBefore(window.startDate) && !date.isAfter(window.endDate)) {
+                            out.putIfAbsent(
+                                row.id,
+                                RemoteRankPost(
+                                    id = row.id,
+                                    url = row.url,
+                                    title = row.title,
+                                    postedAt = date.atStartOfDay(SEOUL).toInstant(),
+                                    commentCount = row.commentCount,
+                                ),
+                            )
+                        }
+                    }
+                    if (dates.last().isBefore(window.startDate)) stop = true
+                }
+
+                if (!stop) {
+                    check(batchEnd < MAX_BOARD_PAGE) {
+                        "게시판 목표 구간 수집이 페이지 안전 상한에 도달했습니다."
+                    }
+                    page = batchEnd + 1
                 }
             }
-            if (firstDate.isBefore(window.startDate)) break
-
-            val dates = resolveBoardDates(snapshot.rows, snapshot.url, window.upperInclusive, dateCache)
-            snapshot.rows.forEachIndexed { index, row ->
-                val date = dates[index]
-                if (!date.isBefore(window.startDate) && !date.isAfter(window.endDate)) {
-                    out.putIfAbsent(
-                        row.id,
-                        RemoteRankPost(
-                            id = row.id,
-                            url = row.url,
-                            title = row.title,
-                            postedAt = date.atStartOfDay(SEOUL).toInstant(),
-                            commentCount = row.commentCount,
-                        ),
-                    )
+        } else {
+            var page = startPage
+            var previousLastDate: LocalDate? = null
+            while (page <= MAX_BOARD_PAGE) {
+                val snapshot = loadPage(page)
+                if (snapshot.rows.isEmpty()) break
+                val firstDate = snapshot.firstDate ?: break
+                previousLastDate?.let { previous ->
+                    check(!previous.isBefore(firstDate)) {
+                        "게시판 페이지 간 작성일 내림차순 전제가 깨졌습니다. 안전을 위해 크롤링을 중단합니다."
+                    }
                 }
-            }
+                if (firstDate.isBefore(window.startDate)) break
 
-            previousLastDate = dates.last()
-            if (dates.last().isBefore(window.startDate)) break
-            check(page < MAX_BOARD_PAGE) { "게시판 목표 구간 수집이 페이지 안전 상한에 도달했습니다." }
-            page += 1
+                val dates = resolveBoardDates(snapshot.rows, snapshot.url, window.upperInclusive, dateCache)
+                snapshot.rows.forEachIndexed { index, row ->
+                    val date = dates[index]
+                    if (!date.isBefore(window.startDate) && !date.isAfter(window.endDate)) {
+                        out.putIfAbsent(
+                            row.id,
+                            RemoteRankPost(
+                                id = row.id,
+                                url = row.url,
+                                title = row.title,
+                                postedAt = date.atStartOfDay(SEOUL).toInstant(),
+                                commentCount = row.commentCount,
+                            ),
+                        )
+                    }
+                }
+
+                previousLastDate = dates.last()
+                if (dates.last().isBefore(window.startDate)) break
+                check(page < MAX_BOARD_PAGE) { "게시판 목표 구간 수집이 페이지 안전 상한에 도달했습니다." }
+                page += 1
+            }
         }
         out.values.toList()
     }
@@ -785,6 +934,8 @@ class AvseeClient(
         private const val MAX_CRAWL_BOARD_REQUESTS = 2_048
         private const val MAX_CRAWL_CACHE_ENTRIES = 256
         private const val MAX_CONCURRENT_HTTP_REQUESTS = 4
+        private const val BULK_BOARD_ROW_THRESHOLD = 25
+        private const val HISTORICAL_BULK_START_PAGE = 32
     }
 }
 

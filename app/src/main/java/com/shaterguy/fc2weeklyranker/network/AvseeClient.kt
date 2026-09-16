@@ -10,19 +10,15 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
-import okhttp3.Call
-import okhttp3.Callback
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.Response
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
-import java.io.IOException
 import java.net.ConnectException
 import java.net.NoRouteToHostException
 import java.net.ProtocolException
@@ -43,8 +39,6 @@ import java.util.LinkedHashMap
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import javax.net.ssl.SSLException
-import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
 
 private const val SEARCH_PATH = "/bbs/search.php"
 private const val TAG_PATH = "/bbs/tag.php"
@@ -136,45 +130,42 @@ class AvseeClient(
         val pageCache = mutableMapOf<Int, CrawlBoardPage>()
         var boardRequestCount = 0
 
-        suspend fun loadPagesOrdered(pages: List<Int>): List<CrawlBoardPage> {
-            val requested = pages.distinct()
-            requested.forEach { page ->
-                require(page in 1..MAX_BOARD_PAGE) { "게시판 페이지가 안전 범위를 벗어났습니다: $page" }
+        suspend fun loadPage(page: Int): CrawlBoardPage {
+            require(page in 1..MAX_BOARD_PAGE) { "게시판 페이지가 안전 범위를 벗어났습니다: $page" }
+            pageCache[page]?.let { return it }
+            check(boardRequestCount < MAX_CRAWL_BOARD_REQUESTS) {
+                "게시판 탐색 요청이 안전 상한을 초과했습니다. 원문 정렬 상태를 확인해 주세요."
             }
-            val missing = requested.filterNot(pageCache::containsKey)
-            if (missing.isNotEmpty()) {
-                check(boardRequestCount <= MAX_CRAWL_BOARD_REQUESTS - missing.size) {
-                    "게시판 탐색 요청이 안전 상한을 초과했습니다. 원문 정렬 상태를 확인해 주세요."
-                }
-                boardRequestCount += missing.size
-                val loaded = coroutineScope {
-                    missing.map { page ->
-                        async {
-                            val boardUrl = "$baseUrl${boardPath(boardTable)}&page=$page"
-                            val rows = parseBoardRows(fetchForCrawl(boardUrl), boardUrl)
-                            if (rows.isEmpty()) {
-                                CrawlBoardPage(page, boardUrl, rows, null, null)
-                            } else {
-                                val firstDate = resolveBoardRowDate(rows.first(), boardUrl, window.upperInclusive, dateCache)
-                                val lastDate = if (rows.size == 1) {
-                                    firstDate
-                                } else {
-                                    resolveBoardRowDate(rows.last(), boardUrl, window.upperInclusive, dateCache)
-                                }
-                                check(!firstDate.isBefore(lastDate)) {
-                                    "게시판 작성일 내림차순 전제가 깨졌습니다. 안전을 위해 날짜 자동 분류를 중단합니다."
-                                }
-                                CrawlBoardPage(page, boardUrl, rows, firstDate, lastDate)
-                            }
+            boardRequestCount += 1
+            val boardUrl = "$baseUrl${boardPath(boardTable)}&page=$page"
+            val rows = parseBoardRows(fetchForCrawl(boardUrl), boardUrl)
+            val snapshot = if (rows.isEmpty()) {
+                CrawlBoardPage(page, boardUrl, rows, null, null)
+            } else {
+                val dates = if (rows.size == 1) {
+                    val date = resolveBoardRowDate(rows.first(), boardUrl, window.upperInclusive, dateCache)
+                    date to date
+                } else {
+                    coroutineScope {
+                        val first = async {
+                            resolveBoardRowDate(rows.first(), boardUrl, window.upperInclusive, dateCache)
                         }
-                    }.awaitAll()
+                        val last = async {
+                            resolveBoardRowDate(rows.last(), boardUrl, window.upperInclusive, dateCache)
+                        }
+                        first.await() to last.await()
+                    }
                 }
-                loaded.forEach { snapshot -> pageCache[snapshot.number] = snapshot }
+                val firstDate = dates.first
+                val lastDate = dates.second
+                check(!firstDate.isBefore(lastDate)) {
+                    "게시판 작성일 내림차순 전제가 깨졌습니다. 안전을 위해 날짜 자동 분류를 중단합니다."
+                }
+                CrawlBoardPage(page, boardUrl, rows, firstDate, lastDate)
             }
-            return requested.map(pageCache::getValue)
+            pageCache[page] = snapshot
+            return snapshot
         }
-
-        suspend fun loadPage(page: Int): CrawlBoardPage = loadPagesOrdered(listOf(page)).single()
 
         suspend fun lastNonEmptyPage(lowNonEmpty: Int, highEmpty: Int): Int {
             var low = lowNonEmpty + 1
@@ -227,68 +218,38 @@ class AvseeClient(
 
         var page = startPage
         var previousLastDate: LocalDate? = null
-        var stop = false
-        while (page <= MAX_BOARD_PAGE && !stop) {
-            val batchEnd = minOf(MAX_BOARD_PAGE, page + MAX_CONCURRENT_HTTP_REQUESTS - 1)
-            val snapshots = loadPagesOrdered((page..batchEnd).toList())
-            val included = mutableListOf<CrawlBoardPage>()
+        while (page <= MAX_BOARD_PAGE) {
+            val snapshot = loadPage(page)
+            if (snapshot.rows.isEmpty()) break
+            val firstDate = snapshot.firstDate ?: break
+            previousLastDate?.let { previous ->
+                check(!previous.isBefore(firstDate)) {
+                    "게시판 페이지 간 작성일 내림차순 전제가 깨졌습니다. 안전을 위해 크롤링을 중단합니다."
+                }
+            }
+            if (firstDate.isBefore(window.startDate)) break
 
-            for (snapshot in snapshots) {
-                if (snapshot.rows.isEmpty()) {
-                    stop = true
-                    break
-                }
-                val firstDate = snapshot.firstDate ?: run {
-                    stop = true
-                    break
-                }
-                previousLastDate?.let { previous ->
-                    check(!previous.isBefore(firstDate)) {
-                        "게시판 페이지 간 작성일 내림차순 전제가 깨졌습니다. 안전을 위해 크롤링을 중단합니다."
-                    }
-                }
-                if (firstDate.isBefore(window.startDate)) {
-                    stop = true
-                    break
-                }
-                included += snapshot
-                previousLastDate = snapshot.lastDate
-                if (snapshot.lastDate!!.isBefore(window.startDate)) {
-                    stop = true
-                    break
+            val dates = resolveBoardDates(snapshot.rows, snapshot.url, window.upperInclusive, dateCache)
+            snapshot.rows.forEachIndexed { index, row ->
+                val date = dates[index]
+                if (!date.isBefore(window.startDate) && !date.isAfter(window.endDate)) {
+                    out.putIfAbsent(
+                        row.id,
+                        RemoteRankPost(
+                            id = row.id,
+                            url = row.url,
+                            title = row.title,
+                            postedAt = date.atStartOfDay(SEOUL).toInstant(),
+                            commentCount = row.commentCount,
+                        ),
+                    )
                 }
             }
 
-            val resolved = coroutineScope {
-                included.map { snapshot ->
-                    async {
-                        snapshot to resolveBoardDates(snapshot.rows, snapshot.url, window.upperInclusive, dateCache)
-                    }
-                }.awaitAll()
-            }
-            resolved.forEach { (snapshot, dates) ->
-                snapshot.rows.forEachIndexed { index, row ->
-                    val date = dates[index]
-                    if (!date.isBefore(window.startDate) && !date.isAfter(window.endDate)) {
-                        out.putIfAbsent(
-                            row.id,
-                            RemoteRankPost(
-                                id = row.id,
-                                url = row.url,
-                                title = row.title,
-                                postedAt = date.atStartOfDay(SEOUL).toInstant(),
-                                commentCount = row.commentCount,
-                            ),
-                        )
-                    }
-                }
-                if (dates.last().isBefore(window.startDate)) stop = true
-            }
-
-            if (!stop) {
-                check(batchEnd < MAX_BOARD_PAGE) { "게시판 목표 구간 수집이 페이지 안전 상한에 도달했습니다." }
-                page = batchEnd + 1
-            }
+            previousLastDate = dates.last()
+            if (dates.last().isBefore(window.startDate)) break
+            check(page < MAX_BOARD_PAGE) { "게시판 목표 구간 수집이 페이지 안전 상한에 도달했습니다." }
+            page += 1
         }
         out.values.toList()
     }
@@ -787,29 +748,17 @@ class AvseeClient(
     }
 
     private suspend fun executeRequest(request: Request): String = networkPermits.withPermit {
-        suspendCancellableCoroutine { continuation ->
-            val call = http.newCall(request)
-            continuation.invokeOnCancellation { call.cancel() }
-            call.enqueue(
-                object : Callback {
-                    override fun onFailure(call: Call, e: IOException) {
-                        continuation.resumeWithException(e)
-                    }
-
-                    override fun onResponse(call: Call, response: Response) {
-                        val result = runCatching {
-                            response.use {
-                                check(it.isSuccessful) { "HTTP_${it.code}" }
-                                it.body.string()
-                            }
-                        }
-                        result.fold(
-                            onSuccess = { body -> continuation.resume(body) },
-                            onFailure = { error -> continuation.resumeWithException(error) },
-                        )
-                    }
-                },
-            )
+        val call = http.newCall(request)
+        try {
+            runInterruptible(ioDispatcher) {
+                call.execute().use { response ->
+                    check(response.isSuccessful) { "HTTP_${response.code}" }
+                    response.body.string()
+                }
+            }
+        } catch (error: CancellationException) {
+            call.cancel()
+            throw error
         }
     }
 

@@ -169,7 +169,7 @@ class AvseeClientBulkTagTest {
             append("</a></div>")
             append("<div class='media-info text-muted'><i class='fa fa-comment'></i><span>")
             append((page + index) % 97)
-            append("</span><i class='fa fa-eye'></i>")
+            append("</span> <i class='fa fa-eye'></i> ")
             append(10_000 + page * rowsPerPage + index)
             append("</div></div></div>")
         }

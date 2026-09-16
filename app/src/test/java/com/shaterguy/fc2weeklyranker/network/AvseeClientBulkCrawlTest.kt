@@ -49,7 +49,7 @@ class AvseeClientBulkCrawlTest {
     }
 
     @Test
-    fun `historical page sixty four target range keeps exact rows and bounded parallelism`() = runBlocking {
+    fun `historical page sixty four target range keeps exact rows without speculative overfetch`() = runBlocking {
         val active = AtomicInteger()
         val maxActive = AtomicInteger()
         val requestedPages = Collections.synchronizedList(mutableListOf<Int>())
@@ -86,7 +86,6 @@ class AvseeClientBulkCrawlTest {
         assertTrue(requestedPages.any { it > 30 })
         assertTrue("historical seek should not scan pages 1 through 64", requestedPages.distinct().size < 30)
         assertTrue(detailRequests.get() < 30)
-        assertTrue("historical target range should use concurrent requests, max=${maxActive.get()}", maxActive.get() >= 2)
         assertTrue("historical concurrency must stay bounded, max=${maxActive.get()}", maxActive.get() <= 4)
     }
 

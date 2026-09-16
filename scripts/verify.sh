@@ -64,17 +64,18 @@ gradle --no-daemon --stacktrace \
   :app:assembleDebugAndroidTest \
   :external-stream-receiver:assembleDebug
 
+shopt -s nullglob
+test_xml=(app/build/test-results/testDebugUnitTest/TEST-*.xml)
+shopt -u nullglob
+if (( ${#test_xml[@]} == 0 )); then
+  echo 'ERROR: unit test result XML is missing.' >&2
+  exit 1
+fi
+
 SMOOTHNESS_TEST='app/src/test/java/com/shaterguy/fc2weeklyranker/media/ExternalVideoTransportSmoothnessTest.kt'
 if [[ -f "$SMOOTHNESS_TEST" ]]; then
-  shopt -s nullglob
-  smoothness_xml=(app/build/test-results/testDebugUnitTest/TEST-*.xml)
-  shopt -u nullglob
-  if (( ${#smoothness_xml[@]} == 0 )); then
-    echo 'ERROR: smoothness test result XML is missing.' >&2
-    exit 1
-  fi
   for marker in FC2_SMOOTHNESS_METRIC FC2_READ_AHEAD_METRIC FC2_PRODUCTION_LATENCY_METRIC FC2_PRODUCTION_SHORT_RANGE_METRIC; do
-    metric="$(grep -h -o "${marker}[^<]*" "${smoothness_xml[@]}" | tail -n 1 || true)"
+    metric="$(grep -h -o "${marker}[^<]*" "${test_xml[@]}" | tail -n 1 || true)"
     if [[ -z "$metric" ]]; then
       echo "ERROR: $marker was not emitted by the smoothness fixture." >&2
       exit 1
@@ -82,3 +83,19 @@ if [[ -f "$SMOOTHNESS_TEST" ]]; then
     printf '%s\n' "$metric"
   done
 fi
+
+mkdir -p build
+BULK_METRIC_FILE='build/bulk-performance-metrics.txt'
+grep -h -o 'FC2_BULK_[^<]*' "${test_xml[@]}" > "$BULK_METRIC_FILE" || true
+for marker in \
+  'FC2_BULK_TAG_METRIC count=10000' \
+  'FC2_BULK_TAG_METRIC count=30000' \
+  'FC2_BULK_CRAWL_METRIC scenario=historical64' \
+  'FC2_BULK_CRAWL_METRIC scenario=latest300-cold' \
+  'FC2_BULK_CRAWL_METRIC scenario=latest300-warm'; do
+  if ! grep -Fq "$marker" "$BULK_METRIC_FILE"; then
+    echo "ERROR: required bulk-performance metric missing: $marker" >&2
+    exit 1
+  fi
+done
+cat "$BULK_METRIC_FILE"

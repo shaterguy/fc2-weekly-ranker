@@ -30,6 +30,7 @@ fi
 if [[ -f scripts/verify_dev32_to_dev33_update.sh ]]; then
   bash -n scripts/verify_dev32_to_dev33_update.sh
 fi
+bash -n scripts/verify_dev34_to_dev35_update.sh
 
 MAIN='app/src/main/java/com/shaterguy/fc2weeklyranker/MainActivity.kt'
 LAUNCHER='app/src/main/java/com/shaterguy/fc2weeklyranker/media/ExternalVideoPlayerLauncher.kt'

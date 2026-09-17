@@ -9,12 +9,14 @@ import com.shaterguy.fc2weeklyranker.data.PostEntity
 import com.shaterguy.fc2weeklyranker.domain.ContentMode
 import com.shaterguy.fc2weeklyranker.network.RemoteTag
 import com.shaterguy.fc2weeklyranker.network.RemoteTagPost
+import com.shaterguy.fc2weeklyranker.network.TagSearchStreamer
 import com.shaterguy.fc2weeklyranker.network.isTransientNetworkError
 import com.shaterguy.fc2weeklyranker.repo.AppRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -27,12 +29,19 @@ internal data class DetailSyncResult(
     val detailCommentCount: Int?,
 )
 
+internal data class TagSearchProgress(
+    val completedPages: Int,
+    val totalPages: Int,
+)
+
 class TagFeatureViewModel(application: Application) : AndroidViewModel(application) {
     private val repo = AppGraph.repository
     private val source = AppGraph.sourceClient
+    private val tagSearchStreamer = TagSearchStreamer(AppGraph.httpClient, source)
     private val mutableTagQuery = MutableStateFlow("")
     private val mutableTagResults = MutableStateFlow<List<RemoteTagPost>>(emptyList())
     private val mutableTagMessage = MutableStateFlow<String?>(null)
+    private val mutableTagProgress = MutableStateFlow<TagSearchProgress?>(null)
     private val tagLoading = MutableStateFlow(false)
     private val mutableTagOpeningPostId = MutableStateFlow<String?>(null)
     private val mutableFavoriteTags = MutableStateFlow<Set<String>>(emptySet())
@@ -48,6 +57,7 @@ class TagFeatureViewModel(application: Application) : AndroidViewModel(applicati
     val tagQuery = mutableTagQuery.stateIn(viewModelScope, SharingStarted.Eagerly, "")
     val tagResults = mutableTagResults.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
     val tagMessage = mutableTagMessage.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+    val tagProgress = mutableTagProgress.stateIn(viewModelScope, SharingStarted.Eagerly, null)
     val isTagLoading = tagLoading.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     val tagOpeningPostId = mutableTagOpeningPostId.stateIn(viewModelScope, SharingStarted.Eagerly, null)
     val favoriteTags = mutableFavoriteTags.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
@@ -73,6 +83,7 @@ class TagFeatureViewModel(application: Application) : AndroidViewModel(applicati
             mutableTagQuery.value = ""
             mutableTagResults.value = emptyList()
             mutableTagMessage.value = null
+            mutableTagProgress.value = null
             mutableTagOpeningPostId.value = null
             tagLoading.value = false
             return
@@ -86,23 +97,32 @@ class TagFeatureViewModel(application: Application) : AndroidViewModel(applicati
         mutableTagQuery.value = term
         mutableTagResults.value = emptyList()
         mutableTagMessage.value = null
+        mutableTagProgress.value = null
         mutableTagOpeningPostId.value = null
         tagLoading.value = true
 
         tagSearchJob = viewModelScope.launch {
             try {
                 val baseUrl = repo.settings.baseUrl(requestMode).first()
-                val results = source.searchTagPosts(baseUrl, term, requestMode.boardTable).map { post ->
-                    post.copy(id = requestMode.localPostId(post.id))
+                tagSearchStreamer.search(baseUrl, term, requestMode.boardTable).collect { snapshot ->
+                    if (!isCurrentTagRequest(searchVersion, startModeVersion, requestMode)) return@collect
+                    mutableTagResults.value = snapshot.posts.map { post ->
+                        post.copy(id = requestMode.localPostId(post.id))
+                    }
+                    mutableTagProgress.value = TagSearchProgress(
+                        completedPages = snapshot.completedPages,
+                        totalPages = snapshot.totalPages,
+                    )
+                    mutableTagMessage.value = null
                 }
                 if (!isCurrentTagRequest(searchVersion, startModeVersion, requestMode)) return@launch
-                mutableTagResults.value = results
-                mutableTagMessage.value = if (results.isEmpty()) "태그 검색 결과가 없습니다." else null
+                mutableTagMessage.value = if (mutableTagResults.value.isEmpty()) "태그 검색 결과가 없습니다." else null
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
                 if (isCurrentTagRequest(searchVersion, startModeVersion, requestMode)) {
-                    mutableTagMessage.value = "태그 검색 실패: ${safeMessage(error)}"
+                    val prefix = if (mutableTagResults.value.isEmpty()) "태그 검색 실패" else "태그 검색 일부 완료"
+                    mutableTagMessage.value = "$prefix: ${safeMessage(error)}"
                 }
             } finally {
                 if (isCurrentTagRequest(searchVersion, startModeVersion, requestMode)) tagLoading.value = false
@@ -214,6 +234,7 @@ class TagFeatureViewModel(application: Application) : AndroidViewModel(applicati
         mutableTagQuery.value = ""
         mutableTagResults.value = emptyList()
         mutableTagMessage.value = null
+        mutableTagProgress.value = null
         mutableTagOpeningPostId.value = null
         tagLoading.value = false
     }

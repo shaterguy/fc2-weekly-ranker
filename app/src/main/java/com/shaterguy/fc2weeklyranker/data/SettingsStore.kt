@@ -22,7 +22,8 @@ class SettingsStore(context: Context, private val clockMillis: () -> Long = { Sy
         dataStore.data.map { ContentMode.fromSourceKey(it[CONTENT_MODE]) }
     val baseUrl: Flow<String> = selectedContentMode.flatMapLatest { mode -> baseUrl(mode) }
     val visitedPostIds: Flow<Set<String>> = dataStore.data.map { it[VISITED_POST_IDS].orEmpty() }
-    val javFavoriteTags: Flow<Set<String>> = dataStore.data.map { it[JAV_FAVORITE_TAGS].orEmpty() }
+    val javFavoriteTags: Flow<Set<String>> = favoriteTags(ContentMode.JAV)
+    val fc2FavoriteTags: Flow<Set<String>> = favoriteTags(ContentMode.FC2)
     val fullscreenGestureSensitivity: Flow<String> =
         dataStore.data.map { it[FULLSCREEN_GESTURE_SENSITIVITY] ?: DEFAULT_FULLSCREEN_GESTURE_SENSITIVITY }
 
@@ -77,14 +78,20 @@ class SettingsStore(context: Context, private val clockMillis: () -> Long = { Sy
         dataStore.edit { it[FULLSCREEN_GESTURE_SENSITIVITY] = value }
     }
 
-    suspend fun toggleJavFavoriteTag(query: String) {
+    fun favoriteTags(mode: ContentMode): Flow<Set<String>> =
+        dataStore.data.map { it[favoriteTagsKey(mode)].orEmpty() }
+
+    suspend fun toggleFavoriteTag(query: String, mode: ContentMode) {
         val tag = query.trim()
         if (tag.isEmpty()) return
+        val key = favoriteTagsKey(mode)
         dataStore.edit { prefs ->
-            val current = prefs[JAV_FAVORITE_TAGS].orEmpty()
-            prefs[JAV_FAVORITE_TAGS] = if (tag in current) current - tag else current + tag
+            val current = prefs[key].orEmpty()
+            prefs[key] = if (tag in current) current - tag else current + tag
         }
     }
+
+    suspend fun toggleJavFavoriteTag(query: String) = toggleFavoriteTag(query, ContentMode.JAV)
 
     suspend fun isRankingWindowCovered(key: String): Boolean =
         dataStore.data.first()[RANKING_COVERED_WINDOWS].orEmpty().contains(key)
@@ -107,6 +114,9 @@ class SettingsStore(context: Context, private val clockMillis: () -> Long = { Sy
     private fun baseUrlKey(mode: ContentMode): Preferences.Key<String> =
         if (mode == ContentMode.FC2) BASE_URL else JAV_BASE_URL
 
+    private fun favoriteTagsKey(mode: ContentMode): Preferences.Key<Set<String>> =
+        if (mode == ContentMode.FC2) FC2_FAVORITE_TAGS else JAV_FAVORITE_TAGS
+
     companion object {
         const val DEFAULT_BASE_URL = "https://01.avsee.is"
         const val DEFAULT_FULLSCREEN_GESTURE_SENSITIVITY = "NORMAL"
@@ -117,6 +127,7 @@ class SettingsStore(context: Context, private val clockMillis: () -> Long = { Sy
         private val JAV_BASE_URL = stringPreferencesKey("jav_base_url")
         private val VISITED_POST_IDS = stringSetPreferencesKey("visited_post_ids")
         private val JAV_FAVORITE_TAGS = stringSetPreferencesKey("jav_favorite_tags")
+        private val FC2_FAVORITE_TAGS = stringSetPreferencesKey("fc2_favorite_tags")
         private val RANKING_COVERED_WINDOWS = stringSetPreferencesKey("ranking_covered_windows_v1")
         private val FULLSCREEN_GESTURE_SENSITIVITY = stringPreferencesKey("fullscreen_gesture_sensitivity")
     }

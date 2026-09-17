@@ -11,7 +11,9 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.runInterruptible
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -60,6 +62,8 @@ data class RemotePost(
     val recommendationCount: Int,
     val media: List<RemoteMedia>,
     val tags: List<RemoteTag> = emptyList(),
+    val detailRecommendationCount: Int? = null,
+    val detailCommentCount: Int? = null,
 )
 data class RemoteRankPost(val id: String, val url: String, val title: String, val postedAt: Instant, val commentCount: Int)
 data class RemoteSearchPost(val id: String, val url: String, val title: String, val occurrenceCount: Int = 1)
@@ -430,12 +434,13 @@ class AvseeClient(
     suspend fun searchTagPosts(
         baseUrl: String,
         query: String,
+        boardTable: String = "javc",
     ): List<RemoteTagPost> = withContext(ioDispatcher) {
         val term = query.trim()
         require(term.isNotEmpty()) { "태그를 입력해 주세요." }
 
         val firstUrl = buildTagSearchUrl(baseUrl, term, 1)
-        val first = parseTagPage(fetch(firstUrl), firstUrl)
+        val first = parseTagPage(fetch(firstUrl), firstUrl, boardTable)
         val out = LinkedHashMap<String, RemoteTagPost>()
         first.posts.forEach { post -> out.putIfAbsent(post.id, post) }
 
@@ -448,7 +453,7 @@ class AvseeClient(
                 (page..batchEnd).map { currentPage ->
                     async {
                         val pageUrl = buildTagSearchUrl(baseUrl, term, currentPage)
-                        parseTagPage(fetch(pageUrl, firstUrl), pageUrl)
+                        parseTagPage(fetch(pageUrl, firstUrl), pageUrl, boardTable)
                     }
                 }.awaitAll()
             }
@@ -513,13 +518,13 @@ class AvseeClient(
         return SearchPage(posts.values.toList(), totalPages)
     }
 
-    internal fun parseTagPage(html: String, pageUrl: String): TagPage {
+    internal fun parseTagPage(html: String, pageUrl: String, boardTable: String = "javc"): TagPage {
         val doc = Jsoup.parse(html, pageUrl)
         val posts = LinkedHashMap<String, RemoteTagPost>()
         doc.select(".tagbox-media .media").forEach { row ->
-            val link = row.selectFirst(".media-heading a[href*='bo_table=javc'][href*='wr_id=']") ?: return@forEach
+            val link = row.selectFirst(".media-heading a[href*='bo_table=$boardTable'][href*='wr_id=']") ?: return@forEach
             val url = link.absUrl("href").takeIf(String::isNotBlank) ?: return@forEach
-            if (decodedQueryParam(url, "bo_table") != "javc") return@forEach
+            if (decodedQueryParam(url, "bo_table") != boardTable) return@forEach
             val id = decodedQueryParam(url, "wr_id")?.takeIf(String::isNotBlank) ?: return@forEach
             val title = link.text().trim().takeIf(String::isNotBlank) ?: "게시물 $id"
             val (commentCount, viewCount) = parseTagMetrics(row.selectFirst(".media-info")) ?: return@forEach
@@ -604,8 +609,19 @@ class AvseeClient(
             ?: "게시물 $id"
         val postedAt = parsePostedAt(doc, referenceInstant) ?: error("게시시각을 찾을 수 없습니다.")
         val media = if (includeMedia) parseMedia(doc, detailUrl) else emptyList()
-        val tags = if (decodedQueryParam(detailUrl, "bo_table") == "javc") parseDetailTags(doc) else emptyList()
-        return RemotePost(id, detailUrl, title, postedAt, parseRecommendation(doc), media, tags)
+        val boardTable = decodedQueryParam(detailUrl, "bo_table")
+        val tags = if (boardTable == "javc" || boardTable == "javfc2") parseDetailTags(doc) else emptyList()
+        return RemotePost(
+            id = id,
+            url = detailUrl,
+            title = title,
+            postedAt = postedAt,
+            recommendationCount = parseRecommendation(doc),
+            media = media,
+            tags = tags,
+            detailRecommendationCount = parseDetailRecommendationCount(doc),
+            detailCommentCount = parseDetailCommentCount(doc),
+        )
     }
 
     private fun mergeSearchPost(out: LinkedHashMap<String, RemoteSearchPost>, post: RemoteSearchPost) {
@@ -659,16 +675,19 @@ class AvseeClient(
     ): List<LocalDate> {
         require(rows.isNotEmpty())
         val resolved = arrayOfNulls<LocalDate>(rows.size)
+        val probeLocks = Array(rows.size) { Mutex() }
 
-        suspend fun probe(index: Int): LocalDate {
-            resolved[index]?.let { return it }
+        suspend fun probe(index: Int): LocalDate = probeLocks[index].withLock {
+            resolved[index]?.let { return@withLock it }
             val parsed = resolveBoardRowDate(rows[index], boardUrl, referenceInstant, dateCache)
             resolved[index] = parsed
-            return parsed
+            parsed
         }
 
         suspend fun resolveSequential(start: Int, end: Int) {
-            for (index in start..end) probe(index)
+            coroutineScope {
+                (start..end).map { index -> async { probe(index) } }.awaitAll()
+            }
             for (index in start until end) {
                 val current = resolved[index] ?: error("게시일자 판정 누락: ${rows[index].id}")
                 val next = resolved[index + 1] ?: error("게시일자 판정 누락: ${rows[index + 1].id}")
@@ -702,8 +721,12 @@ class AvseeClient(
                     resolveSequential(start, end)
                     return
                 }
-                resolveSegment(start, mid)
-                resolveSegment(mid, end)
+                coroutineScope {
+                    listOf(
+                        async { resolveSegment(start, mid) },
+                        async { resolveSegment(mid, end) },
+                    ).awaitAll()
+                }
             } catch (error: CancellationException) {
                 throw error
             } catch (_: IllegalStateException) {
@@ -820,6 +843,32 @@ class AvseeClient(
         return (referenceYear - 1..referenceYear + 1)
             .mapNotNull { year -> localInstant(year, month, day, hour, minute, secondText) }
             .minByOrNull { candidate -> Duration.between(candidate, referenceInstant).abs() }
+    }
+
+    private fun parseDetailRecommendationCount(doc: Document): Int? {
+        doc.selectFirst("#wr_good")?.text()?.let(::parseCountToken)?.let { return it }
+        doc.selectFirst(".view-good")?.let { scope ->
+            parseCountToken(scope.text())?.let { return it }
+        }
+        return parseMetricAfterMarker(doc.selectFirst(".view-head .panel-heading .ellipsis"), ".fa-thumbs-up")
+    }
+
+    private fun parseDetailCommentCount(doc: Document): Int? {
+        parseMetricAfterMarker(doc.selectFirst(".view-head .panel-heading .ellipsis"), ".fa-comment")?.let { return it }
+        val fallback = doc.selectFirst(".view-comment") ?: return null
+        if (fallback.selectFirst(".fa-commenting, .fa-comment") == null) return null
+        return parseCountToken(fallback.text())
+    }
+
+    private fun parseMetricAfterMarker(scope: Element?, markerSelector: String): Int? {
+        val marker = scope?.selectFirst(markerSelector) ?: return null
+        var node = marker.nextElementSibling()
+        while (node != null) {
+            parseCountToken(node.text())?.let { return it }
+            if (node.selectFirst(".fa-comment, .fa-eye, .fa-thumbs-up") != null) break
+            node = node.nextElementSibling()
+        }
+        return null
     }
 
     private fun parseRecommendation(doc: Document): Int {

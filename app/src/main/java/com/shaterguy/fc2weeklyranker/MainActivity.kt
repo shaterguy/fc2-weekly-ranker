@@ -110,6 +110,7 @@ private data class TopDestination(val route: String, val label: String, val glyp
 private val fc2Destinations = listOf(
     TopDestination("ranking", "랭킹", "▦"),
     TopDestination("search", "검색", "⌕"),
+    TopDestination("tags", "태그", "#"),
     TopDestination("favorites", "즐겨찾기", "♥"),
     TopDestination("downloads", "다운로드", "↓"),
     TopDestination("settings", "설정", "⚙"),
@@ -191,12 +192,6 @@ private fun RankerApp(vm: MainViewModel, tagVm: TagFeatureViewModel) {
 
     LaunchedEffect(contentMode, route) {
         tagVm.onContentModeChanged(contentMode)
-        if (contentMode != ContentMode.JAV && route in setOf("tags", "tag-results")) {
-            nav.navigate("ranking") {
-                popUpTo("ranking") { inclusive = false }
-                launchSingleTop = true
-            }
-        }
     }
 
     Scaffold(
@@ -238,7 +233,7 @@ private fun RankerApp(vm: MainViewModel, tagVm: TagFeatureViewModel) {
                 }
             }
             composable("tags") {
-                TagScreen(tagVm) { query ->
+                TagScreen(tagVm, contentMode) { query ->
                     tagVm.searchTagPosts(query)
                     nav.navigate("tag-results") { launchSingleTop = true }
                 }
@@ -476,6 +471,8 @@ private fun VideoDetailScreen(
     var syncSucceeded by remember(postId) { mutableStateOf(false) }
     var activeMediaExpected by remember(postId) { mutableStateOf(false) }
     var detailTags by remember(postId) { mutableStateOf<List<RemoteTag>>(emptyList()) }
+    var detailRecommendationCount by remember(postId) { mutableStateOf<Int?>(null) }
+    var detailCommentCount by remember(postId) { mutableStateOf<Int?>(null) }
     val neighbors = remember(postId, navigationPostIds, previousPost?.id, nextPost?.id) {
         if (navigationPostIds.isNotEmpty()) {
             detailPostNeighbors(navigationPostIds, postId)
@@ -495,12 +492,16 @@ private fun VideoDetailScreen(
         syncSucceeded = false
         activeMediaExpected = false
         detailTags = emptyList()
+        detailRecommendationCount = null
+        detailCommentCount = null
         vm.openPost(postId)
         val result = tagVm.loadDetail(postId)
         if (result != null) {
             refreshStartedAt = result.refreshStartedAtEpochMillis
             activeMediaExpected = result.hasActiveMedia
             detailTags = result.tags
+            detailRecommendationCount = result.detailRecommendationCount
+            detailCommentCount = result.detailCommentCount
             syncSucceeded = true
         }
         syncFinished = true
@@ -521,6 +522,12 @@ private fun VideoDetailScreen(
                     } else {
                         Text(
                             "${formatDate(currentPost.postedAtEpochMillis)} · 댓글 ${currentPost.recommendationCount} · 일평균 ${"%.2f".format(currentPost.dailyRate)}",
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                    if (syncFinished) {
+                        Text(
+                            "추천 ${detailRecommendationCount?.toString() ?: "확인 불가"} · 댓글 ${detailCommentCount?.toString() ?: "확인 불가"}",
                             style = MaterialTheme.typography.bodyMedium,
                         )
                     }

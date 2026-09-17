@@ -16,7 +16,7 @@ import java.time.LocalDate
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicInteger
 
-class AvseeClientMixedDateBaselineTest {
+class AvseeClientMixedDatePerformanceTest {
     @Test
     fun `mixed-date latest page emits reproducible baseline metric`() {
         runSample(delayMillis = 100L)
@@ -30,7 +30,7 @@ class AvseeClientMixedDateBaselineTest {
         val medianRequests = samples.map { it.requestCount }.sorted()[samples.size / 2]
         val maxConcurrency = samples.maxOf { it.maxActive }
         println(
-            "DEV36_MIXED_DATE_BASELINE source=dev35 scenario=latest24-mixed delay_ms=100 " +
+            "DEV36_MIXED_DATE_CANDIDATE source=dev36 scenario=latest24-mixed delay_ms=100 " +
                 "median_ms=$medianMillis median_requests=$medianRequests max_concurrency=$maxConcurrency",
         )
     }

@@ -2,7 +2,6 @@ package com.shaterguy.fc2weeklyranker.network
 
 import okhttp3.OkHttpClient
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.Instant
 
@@ -53,7 +52,7 @@ class JavTagParserTest {
     }
 
     @Test
-    fun `fc2 detail never exposes jav tag ui data`() {
+    fun `fc2 detail exposes the same tag ui data contract`() {
         val html = """
             <html><body>
               <h1>FC2 title</h1>
@@ -68,7 +67,8 @@ class JavTagParserTest {
             includeMedia = false,
         )
 
-        assertTrue(post.tags.isEmpty())
+        assertEquals(listOf("#tag"), post.tags.map(RemoteTag::label))
+        assertEquals(listOf("#tag"), post.tags.map(RemoteTag::query))
     }
 
     @Test

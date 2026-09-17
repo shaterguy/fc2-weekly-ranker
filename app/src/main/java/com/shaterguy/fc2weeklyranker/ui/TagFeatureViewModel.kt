@@ -23,6 +23,8 @@ internal data class DetailSyncResult(
     val refreshStartedAtEpochMillis: Long,
     val hasActiveMedia: Boolean,
     val tags: List<RemoteTag>,
+    val detailRecommendationCount: Int?,
+    val detailCommentCount: Int?,
 )
 
 class TagFeatureViewModel(application: Application) : AndroidViewModel(application) {
@@ -33,6 +35,7 @@ class TagFeatureViewModel(application: Application) : AndroidViewModel(applicati
     private val mutableTagMessage = MutableStateFlow<String?>(null)
     private val tagLoading = MutableStateFlow(false)
     private val mutableTagOpeningPostId = MutableStateFlow<String?>(null)
+    private val mutableFavoriteTags = MutableStateFlow<Set<String>>(emptySet())
     private val detailLoading = MutableStateFlow(false)
     private val mutableDetailMessage = MutableStateFlow<String?>(null)
     private var currentMode = ContentMode.FC2
@@ -40,30 +43,37 @@ class TagFeatureViewModel(application: Application) : AndroidViewModel(applicati
     private var tagSearchVersion = 0L
     private var detailVersion = 0L
     private var tagSearchJob: Job? = null
+    private var favoriteTagsJob: Job? = null
 
     val tagQuery = mutableTagQuery.stateIn(viewModelScope, SharingStarted.Eagerly, "")
     val tagResults = mutableTagResults.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
     val tagMessage = mutableTagMessage.stateIn(viewModelScope, SharingStarted.Eagerly, null)
     val isTagLoading = tagLoading.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     val tagOpeningPostId = mutableTagOpeningPostId.stateIn(viewModelScope, SharingStarted.Eagerly, null)
-    val favoriteTags = repo.settings.javFavoriteTags.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
+    val favoriteTags = mutableFavoriteTags.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
     val isDetailLoading = detailLoading.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     val detailMessage = mutableDetailMessage.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
+    init { refreshFavoriteTags(ContentMode.FC2) }
+
     fun onContentModeChanged(mode: ContentMode) {
         if (mode == currentMode) return
+        clearTagFeatureState()
         currentMode = mode
         modeVersion += 1
-        if (mode != ContentMode.JAV) clearTagFeatureState()
+        refreshFavoriteTags(mode)
     }
 
     fun searchTagPosts(query: String) {
-        if (currentMode != ContentMode.JAV) return
         val term = query.trim()
         if (term.isEmpty()) {
+            tagSearchVersion += 1
+            tagSearchJob?.cancel()
+            tagSearchJob = null
             mutableTagQuery.value = ""
             mutableTagResults.value = emptyList()
             mutableTagMessage.value = null
+            mutableTagOpeningPostId.value = null
             tagLoading.value = false
             return
         }
@@ -72,6 +82,7 @@ class TagFeatureViewModel(application: Application) : AndroidViewModel(applicati
         tagSearchVersion += 1
         val searchVersion = tagSearchVersion
         val startModeVersion = modeVersion
+        val requestMode = currentMode
         mutableTagQuery.value = term
         mutableTagResults.value = emptyList()
         mutableTagMessage.value = null
@@ -80,30 +91,31 @@ class TagFeatureViewModel(application: Application) : AndroidViewModel(applicati
 
         tagSearchJob = viewModelScope.launch {
             try {
-                val baseUrl = repo.settings.baseUrl(ContentMode.JAV).first()
-                val results = source.searchTagPosts(baseUrl, term).map { post ->
-                    post.copy(id = ContentMode.JAV.localPostId(post.id))
+                val baseUrl = repo.settings.baseUrl(requestMode).first()
+                val results = source.searchTagPosts(baseUrl, term, requestMode.boardTable).map { post ->
+                    post.copy(id = requestMode.localPostId(post.id))
                 }
-                if (!isCurrentTagRequest(searchVersion, startModeVersion)) return@launch
+                if (!isCurrentTagRequest(searchVersion, startModeVersion, requestMode)) return@launch
                 mutableTagResults.value = results
                 mutableTagMessage.value = if (results.isEmpty()) "태그 검색 결과가 없습니다." else null
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                if (isCurrentTagRequest(searchVersion, startModeVersion)) {
+                if (isCurrentTagRequest(searchVersion, startModeVersion, requestMode)) {
                     mutableTagMessage.value = "태그 검색 실패: ${safeMessage(error)}"
                 }
             } finally {
-                if (isCurrentTagRequest(searchVersion, startModeVersion)) tagLoading.value = false
+                if (isCurrentTagRequest(searchVersion, startModeVersion, requestMode)) tagLoading.value = false
             }
         }
     }
 
     fun openTagPost(post: RemoteTagPost, onReady: (String) -> Unit) {
-        if (currentMode != ContentMode.JAV || mutableTagOpeningPostId.value != null) return
+        if (mutableTagOpeningPostId.value != null) return
         val searchVersion = tagSearchVersion
         val startModeVersion = modeVersion
-        val localId = ContentMode.JAV.localPostId(ContentMode.JAV.remotePostId(post.id))
+        val requestMode = currentMode
+        val localId = requestMode.localPostId(requestMode.remotePostId(post.id))
         mutableTagOpeningPostId.value = localId
         mutableTagMessage.value = null
 
@@ -121,17 +133,17 @@ class TagFeatureViewModel(application: Application) : AndroidViewModel(applicati
                         dailyRate = 0.0,
                         snapshotKey = SEARCH_SNAPSHOT_KEY,
                         fetchedAtEpochMillis = now,
-                        sourceKey = ContentMode.JAV.sourceKey,
+                        sourceKey = requestMode.sourceKey,
                     )
                     AppGraph.database.withTransaction {
                         if (dao.byId(localId) == null) dao.upsert(listOf(placeholder))
                     }
                 }
-                if (isCurrentTagRequest(searchVersion, startModeVersion)) onReady(localId)
+                if (isCurrentTagRequest(searchVersion, startModeVersion, requestMode)) onReady(localId)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                if (isCurrentTagRequest(searchVersion, startModeVersion)) {
+                if (isCurrentTagRequest(searchVersion, startModeVersion, requestMode)) {
                     mutableTagMessage.value = "게시물 열기 실패: ${safeMessage(error)}"
                 }
             } finally {
@@ -161,7 +173,9 @@ class TagFeatureViewModel(application: Application) : AndroidViewModel(applicati
                 hasActiveMedia = current.any {
                     it.sourceKind == AppRepository.SOURCE_DIRECT || it.sourceKind == AppRepository.SOURCE_IFRAME
                 },
-                tags = if (mode == ContentMode.JAV) detail.tags else emptyList(),
+                tags = detail.tags,
+                detailRecommendationCount = detail.detailRecommendationCount,
+                detailCommentCount = detail.detailCommentCount,
             )
         } catch (error: CancellationException) {
             throw error
@@ -174,8 +188,15 @@ class TagFeatureViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     fun toggleFavoriteTag(query: String) {
-        if (currentMode != ContentMode.JAV || query.isBlank()) return
-        viewModelScope.launch { repo.settings.toggleJavFavoriteTag(query) }
+        if (query.isBlank()) return
+        val requestMode = currentMode
+        val startModeVersion = modeVersion
+        viewModelScope.launch {
+            repo.settings.toggleFavoriteTag(query, requestMode)
+            if (currentMode == requestMode && modeVersion == startModeVersion) {
+                mutableFavoriteTags.value = repo.settings.favoriteTags(requestMode).first()
+            }
+        }
     }
 
     fun clearTagMessage() {
@@ -197,8 +218,17 @@ class TagFeatureViewModel(application: Application) : AndroidViewModel(applicati
         tagLoading.value = false
     }
 
-    private fun isCurrentTagRequest(searchVersion: Long, startModeVersion: Long): Boolean =
-        currentMode == ContentMode.JAV &&
+    private fun refreshFavoriteTags(mode: ContentMode) {
+        favoriteTagsJob?.cancel()
+        val startModeVersion = modeVersion
+        favoriteTagsJob = viewModelScope.launch {
+            val tags = repo.settings.favoriteTags(mode).first()
+            if (currentMode == mode && modeVersion == startModeVersion) mutableFavoriteTags.value = tags
+        }
+    }
+
+    private fun isCurrentTagRequest(searchVersion: Long, startModeVersion: Long, requestMode: ContentMode): Boolean =
+        currentMode == requestMode &&
             modeVersion == startModeVersion &&
             tagSearchVersion == searchVersion
 

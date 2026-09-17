@@ -37,6 +37,7 @@ class AvseeClientDev36RedTest {
             </div>
             """.trimIndent(),
             "https://example.test/bbs/tag.php?q=test&eq=&page=1",
+            "javfc2",
         )
 
         assertEquals(listOf("10"), page.posts.map { it.id })

@@ -298,7 +298,7 @@ jobs:
             -e class com.shaterguy.fc2weeklyranker.media.ExternalVideoStreamProviderInstrumentedTest,com.shaterguy.fc2weeklyranker.media.NativeFullscreenAssistantInstrumentedTest,com.shaterguy.fc2weeklyranker.search.SearchDatabaseInstrumentedTest,com.shaterguy.fc2weeklyranker.data.SettingsStoreInstrumentedTest \
             com.shaterguy.fc2weeklyranker.dev.test/androidx.test.runner.AndroidJUnitRunner \
             | tee "$INSTRUMENTATION_OUTPUT"
-          grep -Fq 'OK (6 tests)' "$INSTRUMENTATION_OUTPUT"
+          grep -Fq 'OK (7 tests)' "$INSTRUMENTATION_OUTPUT"
 
           REUSE_ADB=1 bash scripts/verify_dev35_to_dev36_update.sh "$CURRENT_APK"
           adb shell dumpsys package com.shaterguy.fc2weeklyranker | grep -Fq 'versionName=0.1.0'

@@ -47,6 +47,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          python3 .selfrun/normalize_apply.py
           python3 .selfrun/apply_dev36.py
           python3 .selfrun/finalize_dev36.py
       - name: Verify targeted GREEN and performance improvement
@@ -97,7 +98,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rm -f .selfrun/apply_dev36.py .selfrun/finalize_dev36.py .github/workflows/selfrun-dev36-work.yml
+          rm -f .selfrun/apply_dev36.py .selfrun/finalize_dev36.py .selfrun/normalize_apply.py .github/workflows/selfrun-dev36-work.yml
           rmdir .selfrun 2>/dev/null || true
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'

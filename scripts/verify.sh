@@ -32,6 +32,7 @@ if [[ -f scripts/verify_dev32_to_dev33_update.sh ]]; then
 fi
 bash -n scripts/verify_dev34_to_dev35_update.sh
 bash -n scripts/verify_dev35_to_dev36_update.sh
+bash -n scripts/verify_dev36_to_dev37_update.sh
 
 MAIN='app/src/main/java/com/shaterguy/fc2weeklyranker/MainActivity.kt'
 LAUNCHER='app/src/main/java/com/shaterguy/fc2weeklyranker/media/ExternalVideoPlayerLauncher.kt'
@@ -47,6 +48,10 @@ grep -Fq 'contentDescription = "영상 ${index + 1} 외부 플레이어로 열�
 grep -Fq 'android:name=".media.ExternalVideoStreamProvider"' "$MANIFEST"
 grep -Fq 'android:exported="false"' "$MANIFEST"
 grep -Fq 'android:grantUriPermissions="true"' "$MANIFEST"
+grep -Fq 'RankerTheme' "$MAIN"
+grep -Fq 'android:theme="@style/Theme.FC2WeeklyRanker"' "$MANIFEST"
+test -f app/src/main/res/values/themes.xml
+test -f app/src/main/res/values-night/themes.xml
 if grep -Fq 'setDataAndType(Uri.parse(url), "video/*")' "$MAIN"; then
   echo 'ERROR: external-player action still exposes the raw upstream URL.' >&2
   exit 1
@@ -101,3 +106,12 @@ for marker in \
   fi
 done
 cat "$BULK_METRIC_FILE"
+
+for marker in FC2_DEV37_TAG_STREAM_METRIC FC2_DEV37_CRAWL_METRIC; do
+  metric="$(grep -h -o "${marker}[^<]*" "${test_xml[@]}" | tail -n 1 || true)"
+  if [[ -z "$metric" ]]; then
+    echo "ERROR: required DEV37 metric missing: $marker" >&2
+    exit 1
+  fi
+  printf '%s\n' "$metric"
+done

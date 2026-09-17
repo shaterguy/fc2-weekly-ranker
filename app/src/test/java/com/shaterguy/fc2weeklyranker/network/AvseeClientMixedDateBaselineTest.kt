@@ -15,6 +15,7 @@ import java.time.Instant
 import java.time.LocalDate
 import java.util.concurrent.atomic.AtomicInteger
 
+// W1 diagnostic fixture: production source remains the exact dev35 baseline.
 class AvseeClientMixedDateBaselineTest {
     @Test
     fun `mixed-date latest page emits reproducible baseline metric`() {

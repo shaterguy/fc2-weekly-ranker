@@ -983,7 +983,7 @@ class AvseeClient(
         private const val MAX_CRAWL_BOARD_REQUESTS = 2_048
         private const val MAX_CRAWL_CACHE_ENTRIES = 256
         private const val MAX_CONCURRENT_HTTP_REQUESTS = 4
-        private const val BULK_BOARD_ROW_THRESHOLD = 2
+        private const val BULK_BOARD_ROW_THRESHOLD = 20
         private const val HISTORICAL_BULK_START_PAGE = 32
     }
 }

@@ -56,7 +56,7 @@ extract_cert_sha256() {
   openssl x509 -in "$cert_pem" -outform DER | sha256sum | awk '{print $1}' | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]'
 }
 
-OLD_CERT_SHA256="$(extract_cert_sha256 "$OLD_APK" fc2-dev38)"
+OLD_CERT_SHA256="$(extract_cert_sha256 "$OLD_APK" fc2-dev37)"
 CURRENT_CERT_SHA256="$(extract_cert_sha256 "$CURRENT_APK" fc2-dev38)"
 [[ "$OLD_CERT_SHA256" == "$PINNED_TEST_CERT_SHA256" ]]
 [[ "$CURRENT_CERT_SHA256" == "$PINNED_TEST_CERT_SHA256" ]]
@@ -85,10 +85,10 @@ adb shell am start -W -n "$DEV_PACKAGE/com.shaterguy.fc2weeklyranker.MainActivit
 sleep 4
 adb shell am force-stop "$DEV_PACKAGE"
 sleep 1
-adb shell dumpsys package "$DEV_PACKAGE" | grep -Fq 'versionName=0.2.0-dev38'
+adb shell dumpsys package "$DEV_PACKAGE" | grep -Fq 'versionName=0.2.0-dev37'
 adb shell "run-as $DEV_PACKAGE sh -c 'mkdir -p files && printf dev37-to-dev38-marker > files/dev38-update-marker.txt'"
 
-OLD_DB_DIR="$RUNNER_TEMP/dev38-update-db"
+OLD_DB_DIR="$RUNNER_TEMP/dev37-update-db"
 mkdir -p "$OLD_DB_DIR"
 adb exec-out run-as "$DEV_PACKAGE" cat databases/ranker.db > "$OLD_DB_DIR/ranker.db"
 for suffix in -wal -shm; do
@@ -105,7 +105,7 @@ import sys
 path = sys.argv[1]
 con = sqlite3.connect(path)
 if con.execute("PRAGMA user_version").fetchone()[0] != 4:
-    raise SystemExit("DEV38 ranker database is not v4")
+    raise SystemExit("DEV37 ranker database is not v4")
 con.execute("PRAGMA foreign_keys=ON")
 con.execute("DELETE FROM favorites WHERE postId='dev37-update-marker'")
 con.execute("DELETE FROM posts WHERE id='dev37-update-marker'")

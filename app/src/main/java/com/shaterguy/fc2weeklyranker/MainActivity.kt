@@ -81,6 +81,7 @@ import com.shaterguy.fc2weeklyranker.ui.SearchScreen
 import com.shaterguy.fc2weeklyranker.ui.TagFeatureViewModel
 import com.shaterguy.fc2weeklyranker.ui.TagResultsScreen
 import com.shaterguy.fc2weeklyranker.ui.TagScreen
+import com.shaterguy.fc2weeklyranker.ui.theme.RankerTheme
 import java.net.URI
 import java.time.Instant
 import java.time.ZoneId
@@ -92,7 +93,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { MaterialTheme { RankerApp(mainViewModel, tagFeatureViewModel) } }
+        setContent { RankerTheme { RankerApp(mainViewModel, tagFeatureViewModel) } }
     }
 
     override fun onStart() {

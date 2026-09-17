@@ -29,7 +29,7 @@ internal data class DetailSyncResult(
     val detailCommentCount: Int?,
 )
 
-internal data class TagSearchProgress(
+data class TagSearchProgress(
     val completedPages: Int,
     val totalPages: Int,
 )

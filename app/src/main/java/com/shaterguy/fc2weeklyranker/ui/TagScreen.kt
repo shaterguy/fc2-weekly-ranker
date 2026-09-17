@@ -115,6 +115,7 @@ fun TagResultsScreen(
     val results by vm.tagResults.collectAsState()
     val loading by vm.isTagLoading.collectAsState()
     val message by vm.tagMessage.collectAsState()
+    val progress by vm.tagProgress.collectAsState()
     val openingPostId by vm.tagOpeningPostId.collectAsState()
     val favorites by vm.favoriteTags.collectAsState()
     var sortName by rememberSaveable(query) { mutableStateOf(TagSortMode.ORIGINAL.name) }
@@ -162,13 +163,14 @@ fun TagResultsScreen(
         if (loading) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 CircularProgressIndicator(Modifier.padding(8.dp))
-                Text("태그 게시물을 불러오는 중…")
+                val pageText = progress?.let { " · 페이지 ${it.completedPages}/${it.totalPages}" }.orEmpty()
+                Text("태그 게시물을 불러오는 중… ${displayed.size}건$pageText")
             }
         }
         if (message != null) {
             TextButton(onClick = vm::clearTagMessage) { Text(message!!) }
         }
-        if (!loading && message == null) {
+        if (query.isNotBlank()) {
             Text("게시물 ${displayed.size}건", style = MaterialTheme.typography.bodyMedium)
         }
 
@@ -176,6 +178,7 @@ fun TagResultsScreen(
             items(displayed, key = { it.id }) { post ->
                 Card(
                     Modifier
+                        .animateItem()
                         .fillMaxWidth()
                         .clickable(enabled = openingPostId == null) { onPost(post, postIds) }
                         .semantics { contentDescription = "태그 검색 결과 게시물: ${post.title}" },

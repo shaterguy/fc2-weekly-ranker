@@ -94,12 +94,14 @@ jobs:
           grep -Fq 'fc2_favorite_tags' app/src/main/java/com/shaterguy/fc2weeklyranker/data/SettingsStore.kt
           grep -Fq 'detailRecommendationCount' app/src/main/java/com/shaterguy/fc2weeklyranker/network/AvseeClient.kt
           grep -Fq 'detailCommentCount' app/src/main/java/com/shaterguy/fc2weeklyranker/network/AvseeClient.kt
-      - name: Commit verified work tree
+      - name: Commit verified product tree
         shell: bash
         run: |
           set -euo pipefail
-          rm -f .selfrun/apply_dev36.py .selfrun/finalize_dev36.py .selfrun/normalize_apply.py .github/workflows/selfrun-dev36-work.yml
+          rm -f .selfrun/apply_dev36.py .selfrun/finalize_dev36.py .selfrun/normalize_apply.py
           rmdir .selfrun 2>/dev/null || true
+          rm -rf tools/__pycache__
+          git restore --source=HEAD -- .github/workflows/android-test.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A

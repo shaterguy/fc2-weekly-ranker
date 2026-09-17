@@ -30,6 +30,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.shaterguy.fc2weeklyranker.domain.ContentMode
 import com.shaterguy.fc2weeklyranker.network.RemoteTagPost
 
 internal enum class TagSortMode { ORIGINAL, COMMENTS, VIEWS }
@@ -56,6 +57,7 @@ internal fun sortTagResults(
 @Composable
 fun TagScreen(
     vm: TagFeatureViewModel,
+    contentMode: ContentMode,
     onSearch: (String) -> Unit,
 ) {
     val favorites by vm.favoriteTags.collectAsState()
@@ -66,7 +68,7 @@ fun TagScreen(
         Modifier.fillMaxSize().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Text("JAV 태그", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        Text("${contentMode.sourceKey} 태그", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         Text("태그 검색 결과의 댓글수·조회수를 확인하고 정렬할 수 있습니다.")
         Row(
             Modifier.fillMaxWidth(),

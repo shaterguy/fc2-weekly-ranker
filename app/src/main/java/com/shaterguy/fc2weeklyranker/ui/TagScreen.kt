@@ -175,10 +175,9 @@ fun TagResultsScreen(
         }
 
         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(displayed, key = { it.id }) { post ->
+            items(displayed) { post ->
                 Card(
                     Modifier
-                        .animateItem()
                         .fillMaxWidth()
                         .clickable(enabled = openingPostId == null) { onPost(post, postIds) }
                         .semantics { contentDescription = "태그 검색 결과 게시물: ${post.title}" },

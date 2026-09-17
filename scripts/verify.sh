@@ -33,6 +33,7 @@ fi
 bash -n scripts/verify_dev34_to_dev35_update.sh
 bash -n scripts/verify_dev35_to_dev36_update.sh
 bash -n scripts/verify_dev36_to_dev37_update.sh
+bash -n scripts/verify_dev37_to_dev38_update.sh
 
 MAIN='app/src/main/java/com/shaterguy/fc2weeklyranker/MainActivity.kt'
 LAUNCHER='app/src/main/java/com/shaterguy/fc2weeklyranker/media/ExternalVideoPlayerLauncher.kt'

@@ -169,7 +169,7 @@ fun SearchScreen(
         }
 
         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(displayedResults, key = { it.id }) { post ->
+            items(displayedResults) { post ->
                 Card(
                     Modifier
                         .fillMaxWidth()

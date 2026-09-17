@@ -128,6 +128,9 @@ private val javDestinations = listOf(
 private fun destinationsFor(mode: ContentMode): List<TopDestination> =
     if (mode == ContentMode.JAV) javDestinations else fc2Destinations
 
+internal fun bottomNavigationRoute(route: String): String =
+    if (route == "tag-results") "tags" else route
+
 internal data class DetailPostNeighbors(val previousId: String?, val nextId: String?)
 
 internal fun detailPostNeighbors(postIds: List<String>, currentPostId: String): DetailPostNeighbors {
@@ -178,7 +181,9 @@ private fun RankerApp(vm: MainViewModel, tagVm: TagFeatureViewModel) {
     val route = backStack?.destination?.route.orEmpty()
     val contentMode by vm.selectedContentMode.collectAsState()
     val destinations = remember(contentMode) { destinationsFor(contentMode) }
-    val showBottom = destinations.any { it.route == route }
+    val bottomRoute = bottomNavigationRoute(route)
+    val showTop = destinations.any { it.route == route }
+    val showBottom = destinations.any { it.route == bottomRoute }
     val rankingPosts by vm.rankedPosts.collectAsState()
     val rankingPostIds = remember(rankingPosts) { rankingPosts.map { it.post.id } }
     val favoritePosts by vm.favorites.collectAsState()
@@ -197,14 +202,14 @@ private fun RankerApp(vm: MainViewModel, tagVm: TagFeatureViewModel) {
 
     Scaffold(
         topBar = {
-            if (showBottom) ContentModeSelector(contentMode, vm::selectContentMode)
+            if (showTop) ContentModeSelector(contentMode, vm::selectContentMode)
         },
         bottomBar = {
             if (showBottom) {
                 NavigationBar {
                     destinations.forEach { destination ->
                         NavigationBarItem(
-                            selected = route == destination.route,
+                            selected = bottomRoute == destination.route,
                             onClick = { nav.navigate(destination.route) { launchSingleTop = true } },
                             icon = { Text(destination.glyph) },
                             label = { Text(destination.label) },
@@ -348,7 +353,7 @@ private fun RankingScreen(vm: MainViewModel, onPost: (String) -> Unit) {
         StatusLine(loading, message, vm::clearMessage)
         if (!loading && posts.isEmpty()) Text("이 기간에 표시할 게시물이 없습니다.", Modifier.padding(vertical = 24.dp))
         LazyColumn(contentPadding = PaddingValues(bottom = 20.dp)) {
-            itemsIndexed(posts, key = { _, ranked -> ranked.post.id }) { index, ranked ->
+            itemsIndexed(posts) { index, ranked ->
                 val post = ranked.post
                 PostCard(
                     rank = index + 1,
@@ -400,7 +405,7 @@ private fun FavoritesScreen(vm: MainViewModel, onPost: (String) -> Unit) {
         Spacer(Modifier.height(8.dp))
         if (posts.isEmpty()) Text("저장한 게시물이 없습니다.")
         LazyColumn {
-            itemsIndexed(posts, key = { _, post -> post.id }) { index, post ->
+            itemsIndexed(posts) { index, post ->
                 PostCard(
                     rank = index + 1,
                     post = post,
@@ -611,11 +616,11 @@ private fun VideoDetailScreen(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
                 contentPadding = PaddingValues(bottom = 24.dp),
             ) {
-                itemsIndexed(directVideos, key = { _, video -> video.id }) { index, video ->
+                itemsIndexed(directVideos) { index, video ->
                     VideoCard(vm, index, video, nativeVideoController)
                 }
                 if (detailTags.isNotEmpty()) {
-                    item(key = "detail-tags") {
+                    item {
                         Column(
                             Modifier.fillMaxWidth().padding(top = 4.dp),
                             verticalArrangement = Arrangement.spacedBy(6.dp),

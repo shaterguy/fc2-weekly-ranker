@@ -245,8 +245,10 @@ private fun RankerApp(vm: MainViewModel, tagVm: TagFeatureViewModel) {
                 }
             }
             composable("tag-results") {
+                val visitedPostIds by vm.visitedPostIds.collectAsState()
                 TagResultsScreen(
                     vm = tagVm,
+                    visitedPostIds = visitedPostIds,
                     onBack = { nav.popBackStack() },
                     onPost = { post, postIds ->
                         tagVm.openTagPost(post) { id -> openDetail(id, "tag-results", postIds) }

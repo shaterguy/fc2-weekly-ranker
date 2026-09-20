@@ -108,6 +108,7 @@ fun TagScreen(
 @Composable
 fun TagResultsScreen(
     vm: TagFeatureViewModel,
+    visitedPostIds: Set<String>,
     onBack: () -> Unit,
     onPost: (RemoteTagPost, List<String>) -> Unit,
 ) {
@@ -176,14 +177,25 @@ fun TagResultsScreen(
 
         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             items(displayed) { post ->
+                val visited = isVisitedPost(post.id, visitedPostIds)
                 Card(
                     Modifier
                         .fillMaxWidth()
                         .clickable(enabled = openingPostId == null) { onPost(post, postIds) }
-                        .semantics { contentDescription = "태그 검색 결과 게시물: ${post.title}" },
+                        .semantics {
+                            contentDescription = if (visited) {
+                                "방문한 태그 검색 결과 게시물: ${post.title}"
+                            } else {
+                                "태그 검색 결과 게시물: ${post.title}"
+                            }
+                        },
                 ) {
                     Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text(post.title, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            post.title,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (visited) MaterialTheme.colorScheme.outline else MaterialTheme.colorScheme.onSurface,
+                        )
                         Text(
                             "댓글 ${post.commentCount} · 조회 ${post.viewCount}",
                             style = MaterialTheme.typography.bodyMedium,

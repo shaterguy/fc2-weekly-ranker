@@ -51,4 +51,31 @@ class SettingsStoreInstrumentedTest {
             if (tag in cleanup.javFavoriteTags.first()) cleanup.toggleJavFavoriteTag(tag)
         }
     }
+
+    @Test
+    fun visitedPostPersistsAcrossStoreWrappers() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val marker = "selfrun-dev39-visited-marker"
+        val phase = InstrumentationRegistry.getArguments().getString("visitedPersistencePhase") ?: "roundtrip"
+        val first = SettingsStore(context)
+
+        when (phase) {
+            "seed" -> {
+                first.markPostVisited(marker)
+                assertTrue(marker in first.visitedPostIds.first())
+            }
+            "verify" -> {
+                assertTrue(marker in first.visitedPostIds.first())
+                val reopened = SettingsStore(context)
+                assertTrue(marker in reopened.visitedPostIds.first())
+            }
+            "roundtrip" -> {
+                first.markPostVisited(marker)
+                assertTrue(marker in first.visitedPostIds.first())
+                val reopened = SettingsStore(context)
+                assertTrue(marker in reopened.visitedPostIds.first())
+            }
+            else -> error("unknown visitedPersistencePhase: $phase")
+        }
+    }
 }

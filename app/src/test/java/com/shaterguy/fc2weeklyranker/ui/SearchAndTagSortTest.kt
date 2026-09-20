@@ -4,6 +4,8 @@ import com.shaterguy.fc2weeklyranker.domain.ContentMode
 import com.shaterguy.fc2weeklyranker.network.RemoteSearchPost
 import com.shaterguy.fc2weeklyranker.network.RemoteTagPost
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SearchAndTagSortTest {
@@ -48,5 +50,18 @@ class SearchAndTagSortTest {
         assertEquals("jav:123", ContentMode.JAV.localPostId("123"))
         assertEquals("123", ContentMode.JAV.remotePostId("jav:123"))
         assertEquals("123", ContentMode.FC2.localPostId("123"))
+    }
+
+    @Test
+    fun `visited membership respects source-local post IDs`() {
+        val visited = setOf(
+            ContentMode.FC2.localPostId("123"),
+            ContentMode.JAV.localPostId("456"),
+        )
+
+        assertTrue(isVisitedPost(ContentMode.FC2.localPostId("123"), visited))
+        assertFalse(isVisitedPost(ContentMode.JAV.localPostId("123"), visited))
+        assertTrue(isVisitedPost(ContentMode.JAV.localPostId("456"), visited))
+        assertFalse(isVisitedPost(ContentMode.FC2.localPostId("456"), visited))
     }
 }

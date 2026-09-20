@@ -48,6 +48,8 @@ internal fun sortSearchResults(
         .map { it.value }
 }
 
+internal fun isVisitedPost(postId: String, visitedPostIds: Set<String>): Boolean = postId in visitedPostIds
+
 @Composable
 fun SearchScreen(
     vm: MainViewModel,
@@ -60,6 +62,7 @@ fun SearchScreen(
     val progress by vm.searchProgress.collectAsState()
     val message by vm.searchMessage.collectAsState()
     val openingPostId by vm.searchOpeningPostId.collectAsState()
+    val visitedPostIds by vm.visitedPostIds.collectAsState()
     var query by rememberSaveable(mode.sourceKey) { mutableStateOf("") }
     var hasSearched by rememberSaveable(mode.sourceKey) { mutableStateOf(false) }
     var sortName by rememberSaveable(mode.sourceKey) { mutableStateOf(SearchSortMode.FIRST_SEEN.name) }
@@ -170,14 +173,25 @@ fun SearchScreen(
 
         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             items(displayedResults) { post ->
+                val visited = isVisitedPost(post.id, visitedPostIds)
                 Card(
                     Modifier
                         .fillMaxWidth()
                         .clickable(enabled = openingPostId == null) { onPost(post, resultIds) }
-                        .semantics { contentDescription = "검색 결과 게시물: ${post.title}" },
+                        .semantics {
+                            contentDescription = if (visited) {
+                                "방문한 검색 결과 게시물: ${post.title}"
+                            } else {
+                                "검색 결과 게시물: ${post.title}"
+                            }
+                        },
                 ) {
                     Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text(post.title, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            post.title,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (visited) MaterialTheme.colorScheme.outline else MaterialTheme.colorScheme.onSurface,
+                        )
                         Text("검색 결과 출현 ${post.occurrenceCount}회", style = MaterialTheme.typography.bodyMedium)
                         Text(
                             if (openingPostId == post.id) "게시물을 여는 중…" else "앱에서 게시물 보기",

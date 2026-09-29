@@ -150,60 +150,28 @@ internal class WebViewApplicationPageTransport(
         url: String,
         referer: String?,
     ): PageResult {
-        val stateKey = "__fc2WeeklyRankerFetch"
-        val quotedUrl = JSONObject.quote(url)
-        val quotedReferrer = JSONObject.quote(
-            referer?.takeIf { isAllowedUrl(current, it) } ?: "${current.origin}/",
-        )
-        val startScript = """
-            (() => {
-              window.$stateKey = { state: "loading" };
-              fetch($quotedUrl, {
-                credentials: "include",
-                redirect: "follow",
-                cache: "no-store",
-                referrer: $quotedReferrer
-              }).then(async (response) => {
-                const body = await response.text();
-                window.$stateKey = {
-                  state: "done",
-                  status: response.status,
-                  url: response.url,
-                  body: body.slice(0, $MAX_BODY_CHARS),
-                  truncated: body.length > $MAX_BODY_CHARS
-                };
-              }).catch((error) => {
-                window.$stateKey = { state: "error", message: String(error) };
-              });
-              return true;
-            })();
-        """.trimIndent()
-        evaluate(current.webView, startScript)
-
+        val headers = referer?.takeIf { isAllowedUrl(current, it) }?.let { mapOf("Referer" to it) }.orEmpty()
+        withContext(Dispatchers.Main.immediate) { current.webView.loadUrl(url, headers) }
         return withTimeout(FETCH_TIMEOUT_MILLIS) {
             var completed: PageResult? = null
             while (completed == null) {
-                val raw = evaluate(
-                    current.webView,
-                    "JSON.stringify(window.$stateKey || null)",
-                )
-                val decoded = decodeEvaluateString(raw)
-                val state = decoded?.takeIf { it != "null" }?.let(::JSONObject)
-                when (state?.optString("state")) {
-                    "done" -> {
-                        check(!state.optBoolean("truncated")) { "페이지 응답이 안전 크기 상한을 초과했습니다." }
-                        completed = PageResult(
-                            status = state.optInt("status"),
-                            finalUrl = state.optString("url"),
-                            body = state.optString("body"),
-                        )
+                val snapshot = pageSnapshot(current.webView)
+                if (snapshot != null && snapshot.optString("ready") == "complete" && isAllowedUrl(current, snapshot.optString("url"))) {
+                    val body = pageHtml(current.webView)
+                    if (body != null) {
+                        check(body.length <= MAX_BODY_CHARS) { "페이지 응답이 안전 크기 상한을 초과했습니다." }
+                        completed = PageResult(200, snapshot.optString("url"), body)
                     }
-                    "error" -> error("브라우저 페이지 요청 실패: ${state.optString("message").take(160)}")
-                    else -> delay(POLL_MILLIS)
                 }
+                if (completed == null) delay(POLL_MILLIS)
             }
             completed
         }
+    }
+
+    private suspend fun pageHtml(webView: WebView): String? {
+        val raw = evaluate(webView, "document.documentElement ? document.documentElement.outerHTML : null")
+        return decodeEvaluateString(raw)
     }
 
     private suspend fun pageSnapshot(webView: WebView): JSONObject? {

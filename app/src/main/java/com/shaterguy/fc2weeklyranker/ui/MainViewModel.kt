@@ -145,7 +145,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val isSearchCancelling = searchCancelling.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     val searchProgress = mutableSearchProgress.stateIn(viewModelScope, SharingStarted.Eagerly, null)
     val searchOpeningPostId = mutableSearchOpeningPostId.stateIn(viewModelScope, SharingStarted.Eagerly, null)
-    val baseUrl = repo.settings.baseUrl.stateIn(viewModelScope, SharingStarted.Eagerly, "https://01.avsee.is")
+    val baseUrl = repo.settings.baseUrl.stateIn(viewModelScope, SharingStarted.Eagerly, ContentMode.FC2.defaultBaseUrl)
     val anchorEpochMillis = mutableContentMode
         .flatMapLatest { mode ->
             combine(repo.settings.anchorEpochMillis(mode), localAnchor) { stored, local ->

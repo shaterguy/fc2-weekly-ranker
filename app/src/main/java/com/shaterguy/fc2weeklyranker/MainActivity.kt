@@ -435,7 +435,7 @@ private fun SettingsScreen(vm: MainViewModel) {
             value = input,
             onValueChange = { input = it },
             label = { Text("사이트 기본 주소") },
-            supportingText = { Text("예: https://01.avsee.is · HTTPS 기본 주소만 저장됩니다.") },
+            supportingText = { Text("예: https://02.avsee.is · HTTPS 기본 주소만 저장됩니다.") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )

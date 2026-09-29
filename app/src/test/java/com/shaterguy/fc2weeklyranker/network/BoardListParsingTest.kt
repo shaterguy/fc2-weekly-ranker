@@ -83,4 +83,18 @@ class BoardListParsingTest {
         val failure = runCatching { parser.parseBoardRows(html, "https://example.test") }.exceptionOrNull()
         assertTrue(failure?.message?.contains("댓글수") == true)
     }
+
+    @Test
+    fun `pretty path board links preserve source isolation`() {
+        val html = "<form id='fboardlist'><div class='list-item'><h2><a href='/javfc2/123'>Current row</a></h2><div><i class='fa fa-comment'></i>12 <i class='fa fa-eye'></i>340</div></div><div class='list-item'><h2><a href='/javc/456'>Other source</a></h2><div><i class='fa fa-comment'></i>99 <i class='fa fa-eye'></i>999</div></div></form>"
+        val rows = parser.parseBoardRows(
+            html,
+            "https://example.test/bbs/board.php?bo_table=javfc2&page=1",
+        )
+
+        assertEquals(1, rows.size)
+        assertEquals("123", rows.single().id)
+        assertEquals("https://example.test/javfc2/123", rows.single().url)
+        assertEquals(12, rows.single().commentCount)
+    }
 }

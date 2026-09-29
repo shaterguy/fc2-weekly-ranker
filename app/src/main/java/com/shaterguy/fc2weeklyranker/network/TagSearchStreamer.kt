@@ -46,7 +46,7 @@ class TagSearchStreamer(
 
         val firstUrl = parser.buildTagSearchUrl(baseUrl, term, 1)
         val first = withContextIo {
-            parser.parseTagPage(fetch(firstUrl), firstUrl, boardTable)
+            parser.parseTagPage(parser.fetchApplicationPage(firstUrl), firstUrl, boardTable)
         }
         val pages = mutableMapOf(1 to first)
         var discoveredLastPage = first.totalPages
@@ -75,7 +75,7 @@ class TagSearchStreamer(
                     val currentPage = nextPage++
                     inFlight[currentPage] = async(ioDispatcher) {
                         val pageUrl = parser.buildTagSearchUrl(baseUrl, term, currentPage)
-                        parser.parseTagPage(fetch(pageUrl, firstUrl), pageUrl, boardTable)
+                        parser.parseTagPage(parser.fetchApplicationPage(pageUrl, firstUrl), pageUrl, boardTable)
                     }
                 }
             }

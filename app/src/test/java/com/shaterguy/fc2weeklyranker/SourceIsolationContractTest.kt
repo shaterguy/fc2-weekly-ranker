@@ -29,7 +29,7 @@ class SourceIsolationContractTest {
         assertEquals("javc", boardTable.invoke(jav))
         assertEquals("FC2", sourceKey.invoke(fc2))
         assertEquals("JAV", sourceKey.invoke(jav))
-        assertEquals("https://01.avsee.is", defaultBaseUrl.invoke(fc2))
+        assertEquals("https://02.avsee.is", defaultBaseUrl.invoke(fc2))
         assertEquals("https://02.avsee.is", defaultBaseUrl.invoke(jav))
         assertEquals("8123", localPostId.invoke(fc2, "8123"))
         assertEquals("jav:8123", localPostId.invoke(jav, "8123"))

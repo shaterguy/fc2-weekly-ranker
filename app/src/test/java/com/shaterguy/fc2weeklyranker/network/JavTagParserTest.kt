@@ -63,10 +63,11 @@ class JavTagParserTest {
 
         val post = client.parseDetail(
             html = html,
-            detailUrl = "https://example.test/bbs/board.php?bo_table=javfc2&wr_id=99",
+            detailUrl = "https://example.test/javfc2/99",
             includeMedia = false,
         )
 
+        assertEquals("99", post.id)
         assertEquals(listOf("#tag"), post.tags.map(RemoteTag::label))
         assertEquals(listOf("#tag"), post.tags.map(RemoteTag::query))
     }
@@ -77,7 +78,7 @@ class JavTagParserTest {
             <div class='tagbox-media'>
               <div class='media'>
                 <div class='media-body'>
-                  <div class='media-heading'><a href='/bbs/board.php?bo_table=javc&wr_id=2009446'><b>MIDA-575 title</b></a></div>
+                  <div class='media-heading'><a href='/javc/2009446'><b>MIDA-575 title</b></a></div>
                   <div class='media-info text-muted'>
                     <i class='fa fa-comment'></i><span class='red'>21</span><span class='sp'></span>
                     <i class='fa fa-eye'></i>30,859
@@ -109,6 +110,6 @@ class JavTagParserTest {
         assertEquals("MIDA-575 title", post.title)
         assertEquals(21, post.commentCount)
         assertEquals(30_859, post.viewCount)
-        assertEquals("https://example.test/bbs/board.php?bo_table=javc&wr_id=2009446", post.url)
+        assertEquals("https://example.test/javc/2009446", post.url)
     }
 }

@@ -4,6 +4,18 @@ import java.net.IDN
 import java.net.URI
 
 object BaseUrlPolicy {
+    const val CURRENT_OFFICIAL_ORIGIN = "https://02.avsee.is"
+    const val LEGACY_OFFICIAL_ORIGIN = "https://01.avsee.is"
+
+    fun canonicalizeOfficialOrigin(value: String): String {
+        val normalized = value.trim().trimEnd('/')
+        return if (normalized.equals(LEGACY_OFFICIAL_ORIGIN, ignoreCase = true)) {
+            CURRENT_OFFICIAL_ORIGIN
+        } else {
+            value
+        }
+    }
+
     fun normalize(input: String): Result<String> = runCatching {
         val uri = URI(input.trim())
         require(uri.scheme.equals("https", ignoreCase = true)) { "HTTPS 주소만 사용할 수 있습니다." }
@@ -15,6 +27,6 @@ object BaseUrlPolicy {
         require(asciiHost.contains('.')) { "공개 도메인 형식의 주소가 필요합니다." }
         require(asciiHost != "localhost" && !asciiHost.endsWith(".local")) { "로컬 주소는 사용할 수 없습니다." }
         require(!asciiHost.matches(Regex("^\\d{1,3}(?:\\.\\d{1,3}){3}$"))) { "IP 주소 직접 입력은 사용할 수 없습니다." }
-        "https://$asciiHost"
+        canonicalizeOfficialOrigin("https://$asciiHost")
     }
 }

@@ -329,18 +329,10 @@ internal class BackgroundSearchClient(
     ): SearchPage = withContext(Dispatchers.IO) {
         val pageUrl = parser.buildSearchUrl(baseUrl, query, page, mode.boardTable)
         val firstUrl = parser.buildSearchUrl(baseUrl, query, 1, mode.boardTable)
-        val request = Request.Builder().url(pageUrl)
-            .get()
-            .header("User-Agent", AvseeClient.USER_AGENT)
-            .header("Accept-Language", "ko-KR,ko;q=0.9,en;q=0.7")
-            .apply { if (page > 1) header("Referer", firstUrl) }
-            .build()
-        val html = retryTransientGet(sleep = retrySleep) {
-            http.newCall(request).execute().use { response ->
-                check(response.isSuccessful) { "HTTP_${response.code}" }
-                response.body.string()
-            }
-        }
+        val html = parser.fetchApplicationPage(
+            pageUrl,
+            firstUrl.takeIf { page > 1 },
+        )
         parser.parseSearchPage(html, pageUrl)
     }
 }

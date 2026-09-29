@@ -82,6 +82,7 @@ class AvseeClient(
     http: OkHttpClient,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val retrySleep: suspend (Long) -> Unit = { delay(it) },
+    private val applicationPageTransport: ApplicationPageTransport? = null,
 ) {
     private val http = http.newBuilder()
         .retryOnConnectionFailure(false)
@@ -491,10 +492,11 @@ class AvseeClient(
         val posts = LinkedHashMap<String, RemoteSearchPost>()
         val boardTable = decodedQueryParam(pageUrl, "onetable")?.takeIf(String::isNotBlank) ?: "javfc2"
         doc.select("#at-main .search-media .media").forEach { row ->
-            val link = row.selectFirst(".media-heading a[href*='bo_table=$boardTable'][href*='wr_id=']") ?: return@forEach
+            val link = row.select(".media-heading a[href]")
+                .firstOrNull { postIdFromUrl(it.absUrl("href"), boardTable) != null }
+                ?: return@forEach
             val url = link.absUrl("href").takeIf(String::isNotBlank) ?: return@forEach
-            if (decodedQueryParam(url, "bo_table") != boardTable) return@forEach
-            val id = decodedQueryParam(url, "wr_id")?.takeIf(String::isNotBlank) ?: return@forEach
+            val id = postIdFromUrl(url, boardTable) ?: return@forEach
             val title = link.text().trim().takeIf(String::isNotBlank) ?: "게시물 $id"
             val normalized = RemoteSearchPost(id, url.substringBefore('#'), title)
             val existing = posts[id]
@@ -521,11 +523,12 @@ class AvseeClient(
     internal fun parseTagPage(html: String, pageUrl: String, boardTable: String = "javc"): TagPage {
         val doc = Jsoup.parse(html, pageUrl)
         val posts = LinkedHashMap<String, RemoteTagPost>()
-        doc.select(".tagbox-media .media").forEach { row ->
-            val link = row.selectFirst(".media-heading a[href*='bo_table=$boardTable'][href*='wr_id=']") ?: return@forEach
+        doc.select(".tagbox-media .media, .post-wrap .media").forEach { row ->
+            val link = row.select(".media-heading a[href], a[href]")
+                .firstOrNull { postIdFromUrl(it.absUrl("href"), boardTable) != null }
+                ?: return@forEach
             val url = link.absUrl("href").takeIf(String::isNotBlank) ?: return@forEach
-            if (decodedQueryParam(url, "bo_table") != boardTable) return@forEach
-            val id = decodedQueryParam(url, "wr_id")?.takeIf(String::isNotBlank) ?: return@forEach
+            val id = postIdFromUrl(url, boardTable) ?: return@forEach
             val title = link.text().trim().takeIf(String::isNotBlank) ?: "게시물 $id"
             val (commentCount, viewCount) = parseTagMetrics(row.selectFirst(".media-info")) ?: return@forEach
             posts.putIfAbsent(
@@ -570,11 +573,11 @@ class AvseeClient(
 
     internal fun parseBoardLinks(html: String, baseUrl: String): List<String> {
         val doc = Jsoup.parse(html, baseUrl)
-        val boardTable = decodedQueryParam(baseUrl, "bo_table")?.takeIf(String::isNotBlank) ?: "javfc2"
-        return doc.select("#fboardlist .list-item h2 a[href*='bo_table=$boardTable'][href*='wr_id=']")
+        val boardTable = boardTableFromUrl(baseUrl) ?: "javfc2"
+        return doc.select("#fboardlist .list-item h2 a[href]")
             .mapNotNull { link ->
                 val url = link.absUrl("href").takeIf(String::isNotBlank) ?: return@mapNotNull null
-                url.takeIf { decodedQueryParam(it, "bo_table") == boardTable }
+                url.takeIf { postIdFromUrl(it, boardTable) != null }
             }
             .distinct()
     }
@@ -582,12 +585,13 @@ class AvseeClient(
     internal fun parseBoardRows(html: String, baseUrl: String): List<BoardRow> {
         val doc = Jsoup.parse(html, baseUrl)
         val rows = LinkedHashMap<String, BoardRow>()
-        val boardTable = decodedQueryParam(baseUrl, "bo_table")?.takeIf(String::isNotBlank) ?: "javfc2"
+        val boardTable = boardTableFromUrl(baseUrl) ?: "javfc2"
         doc.select("#fboardlist .list-item").forEach { item ->
-            val link = item.selectFirst("h2 a[href*='bo_table=$boardTable'][href*='wr_id=']") ?: return@forEach
+            val link = item.select("h2 a[href]")
+                .firstOrNull { postIdFromUrl(it.absUrl("href"), boardTable) != null }
+                ?: return@forEach
             val url = link.absUrl("href").takeIf(String::isNotBlank) ?: return@forEach
-            if (decodedQueryParam(url, "bo_table") != boardTable) return@forEach
-            val id = queryParam(url, "wr_id")?.takeIf(String::isNotBlank) ?: return@forEach
+            val id = postIdFromUrl(url, boardTable) ?: return@forEach
             val title = link.text().trim().takeIf(String::isNotBlank) ?: "게시물 $id"
             val commentCount = parseBoardCommentCount(item, title)
                 ?: error("게시판 댓글수를 찾을 수 없습니다. 사이트 목록 형식이 변경되었는지 확인해 주세요. (post=$id)")
@@ -603,13 +607,13 @@ class AvseeClient(
         includeMedia: Boolean = true,
     ): RemotePost {
         val doc = Jsoup.parse(html, detailUrl)
-        val id = queryParam(detailUrl, "wr_id") ?: detailUrl.substringAfterLast('=').take(80)
+        val id = postIdFromUrl(detailUrl) ?: detailUrl.substringAfterLast('/').substringBefore('?').take(80)
         val title = listOf("#bo_v_title .bo_v_tit", "#bo_v_title", "h1", "h2")
             .firstNotNullOfOrNull { selector -> doc.selectFirst(selector)?.text()?.trim()?.takeIf(String::isNotBlank) }
             ?: "게시물 $id"
         val postedAt = parsePostedAt(doc, referenceInstant) ?: error("게시시각을 찾을 수 없습니다.")
         val media = if (includeMedia) parseMedia(doc, detailUrl) else emptyList()
-        val boardTable = decodedQueryParam(detailUrl, "bo_table")
+        val boardTable = boardTableFromUrl(detailUrl)
         val tags = if (boardTable == "javc" || boardTable == "javfc2") parseDetailTags(doc) else emptyList()
         return RemotePost(
             id = id,
@@ -933,7 +937,8 @@ class AvseeClient(
         return html
     }
 
-    private suspend fun fetch(url: String, referer: String? = null): String {
+    internal suspend fun fetchApplicationPage(url: String, referer: String? = null): String {
+        applicationPageTransport?.let { return it.fetch(url, referer) }
         val request = Request.Builder().url(url)
             .get()
             .header("User-Agent", UA)
@@ -944,6 +949,9 @@ class AvseeClient(
             executeRequest(request)
         }
     }
+
+    private suspend fun fetch(url: String, referer: String? = null): String =
+        fetchApplicationPage(url, referer)
 
     private suspend fun executeRequest(request: Request): String = networkPermits.withPermit {
         val call = http.newCall(request)
@@ -965,6 +973,22 @@ class AvseeClient(
 
     private fun tagSignature(url: String): List<String> =
         listOf("q", "eq").map { key -> decodedQueryParam(url, key).orEmpty() }
+
+    private fun boardTableFromUrl(url: String): String? {
+        decodedQueryParam(url, "bo_table")?.takeIf { it == "javfc2" || it == "javc" }?.let { return it }
+        val segments = runCatching { URI(url).path.orEmpty().trim('/').split('/') }.getOrDefault(emptyList())
+        return segments.firstOrNull()?.takeIf { it == "javfc2" || it == "javc" }
+    }
+
+    private fun postIdFromUrl(url: String, expectedBoardTable: String? = null): String? {
+        val queryBoard = decodedQueryParam(url, "bo_table")
+        val queryId = decodedQueryParam(url, "wr_id")?.takeIf(String::isNotBlank)
+        if (queryId != null && (expectedBoardTable == null || queryBoard == expectedBoardTable)) return queryId
+        val segments = runCatching { URI(url).path.orEmpty().trim('/').split('/') }.getOrDefault(emptyList())
+        if (segments.size != 2 || segments[0] !in setOf("javfc2", "javc")) return null
+        if (expectedBoardTable != null && segments[0] != expectedBoardTable) return null
+        return segments[1].takeIf { id -> id.isNotBlank() && id.all(Char::isDigit) }
+    }
 
     private fun decodedQueryParam(url: String, key: String): String? =
         queryParam(url, key)?.let { value -> runCatching { URLDecoder.decode(value, "UTF-8") }.getOrDefault(value) }

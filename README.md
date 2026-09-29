@@ -12,10 +12,10 @@ Android app for browsing the configured `javfc2` board in fixed seven-day window
 
 ## TEST channel
 
-- Historical TEST lineage starts at `v0.1.0-dev1`; the current development target is `v0.2.0-dev38`.
-- Source version: `0.2.0-dev38`, `versionCode=62`.
+- Historical TEST lineage starts at `v0.1.0-dev1`; the current development target is `v0.2.0-dev40`.
+- Source version: `0.2.0-dev40`, `versionCode=64`.
 - TEST application ID: `com.shaterguy.fc2weeklyranker.dev`.
-- The configured default origin is `https://01.avsee.is`; users can replace it in Settings after a board-and-detail parsing connection check.
+- The configured official origin is `https://02.avsee.is`. Existing exact `https://01.avsee.is` settings migrate to 02, while unrelated custom HTTPS origins remain unchanged. Application pages are fetched through the app WebView session so Cloudflare/browser-session state stays in the browser context.
 - FC2 search starts immediately when the user taps Search in a process-lifetime coroutine runner instead of waiting for an OS-scheduled job. The active token and coroutine job are tracked directly so replacement, cancellation, and foreground recovery observe the actual execution. Search session, page progress, and results remain persisted in a dedicated Room database, and transient socket aborts keep the existing bounded in-run retry behavior.
 - The anchor instant is persisted in DataStore and changes only when the user explicitly refreshes it.
 - Page `n` covers `anchorDate-(7n+6)` through `anchorDate-7n` in `Asia/Seoul`.

@@ -7,6 +7,7 @@ import androidx.room.Room
 import com.shaterguy.fc2weeklyranker.data.AppDatabase
 import com.shaterguy.fc2weeklyranker.data.SettingsStore
 import com.shaterguy.fc2weeklyranker.network.AvseeClient
+import com.shaterguy.fc2weeklyranker.network.WebViewApplicationPageTransport
 import com.shaterguy.fc2weeklyranker.repo.AppRepository
 import com.shaterguy.fc2weeklyranker.search.SearchDatabase
 import com.shaterguy.fc2weeklyranker.search.SearchScheduler
@@ -23,6 +24,7 @@ class RankerApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         AppGraph.initialize(this)
+        recoveryScope.launch { AppGraph.settings.migrateLegacyOfficialOrigins() }
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
             override fun onActivityStarted(activity: Activity) {
                 recoveryScope.launch { runCatching { AppGraph.repository.recoverDownloads() } }
@@ -69,7 +71,10 @@ object AppGraph {
             .followRedirects(true)
             .followSslRedirects(false)
             .build()
-        sourceClient = AvseeClient(httpClient)
+        sourceClient = AvseeClient(
+            httpClient,
+            applicationPageTransport = WebViewApplicationPageTransport(app, AvseeClient.USER_AGENT),
+        )
         repository = AppRepository(app, database, settings, sourceClient)
         searchScheduler = SearchScheduler(app)
     }

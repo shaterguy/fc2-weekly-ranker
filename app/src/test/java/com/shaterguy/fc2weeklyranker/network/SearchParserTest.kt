@@ -121,4 +121,14 @@ class SearchParserTest {
         val html = "<div id='at-main'></div><a href='/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=other&sop=and&gr_id=&srows=1000&onetable=javfc2&page=100'>other</a>"
         assertEquals(4, client.parseSearchPage(html, pageUrl).totalPages)
     }
+
+    @Test
+    fun `pretty path search rows stay inside requested source`() {
+        val html = "<div id='at-main'><div class='search-media'><div class='media'><div class='media-heading'><a href='/javfc2/123'>FC2 hit</a></div></div><div class='media'><div class='media-heading'><a href='/javc/456'>other hit</a></div></div></div></div>"
+        val pageUrl = "https://example.test/bbs/search.php?stx=needle&onetable=javfc2&page=1"
+        val parsed = client.parseSearchPage(html, pageUrl)
+
+        assertEquals(listOf("123"), parsed.posts.map { it.id })
+        assertEquals("https://example.test/javfc2/123", parsed.posts.single().url)
+    }
 }

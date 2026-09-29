@@ -8,6 +8,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.shaterguy.fc2weeklyranker.domain.ContentMode
+import com.shaterguy.fc2weeklyranker.network.BaseUrlPolicy
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
@@ -31,7 +32,9 @@ class SettingsStore(context: Context, private val clockMillis: () -> Long = { Sy
         dataStore.data.map { it[anchorKey(mode)] }
 
     fun baseUrl(mode: ContentMode): Flow<String> =
-        dataStore.data.map { it[baseUrlKey(mode)] ?: mode.defaultBaseUrl }
+        dataStore.data.map {
+            BaseUrlPolicy.canonicalizeOfficialOrigin(it[baseUrlKey(mode)] ?: mode.defaultBaseUrl)
+        }
 
     suspend fun ensureAnchor(mode: ContentMode = ContentMode.FC2): Long {
         val key = anchorKey(mode)
@@ -72,6 +75,18 @@ class SettingsStore(context: Context, private val clockMillis: () -> Long = { Sy
 
     suspend fun setBaseUrl(normalizedBaseUrl: String, mode: ContentMode = ContentMode.FC2) {
         dataStore.edit { it[baseUrlKey(mode)] = normalizedBaseUrl }
+    }
+
+
+
+    suspend fun migrateLegacyOfficialOrigins() {
+        dataStore.edit { prefs ->
+            listOf(BASE_URL, JAV_BASE_URL).forEach { key ->
+                val current = prefs[key] ?: return@forEach
+                val migrated = BaseUrlPolicy.canonicalizeOfficialOrigin(current)
+                if (migrated != current) prefs[key] = migrated
+            }
+        }
     }
 
     suspend fun setFullscreenGestureSensitivity(value: String) {
@@ -118,7 +133,7 @@ class SettingsStore(context: Context, private val clockMillis: () -> Long = { Sy
         if (mode == ContentMode.FC2) FC2_FAVORITE_TAGS else JAV_FAVORITE_TAGS
 
     companion object {
-        const val DEFAULT_BASE_URL = "https://01.avsee.is"
+        const val DEFAULT_BASE_URL = "https://02.avsee.is"
         const val DEFAULT_FULLSCREEN_GESTURE_SENSITIVITY = "NORMAL"
         private val ANCHOR = longPreferencesKey("anchor_epoch_millis")
         private val JAV_ANCHOR = longPreferencesKey("jav_anchor_epoch_millis")

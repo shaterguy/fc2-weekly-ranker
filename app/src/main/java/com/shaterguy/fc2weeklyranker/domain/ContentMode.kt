@@ -5,7 +5,7 @@ enum class ContentMode(
     val boardTable: String,
     val defaultBaseUrl: String,
 ) {
-    FC2("FC2", "javfc2", "https://01.avsee.is"),
+    FC2("FC2", "javfc2", "https://02.avsee.is"),
     JAV("JAV", "javc", "https://02.avsee.is"),
     ;
 

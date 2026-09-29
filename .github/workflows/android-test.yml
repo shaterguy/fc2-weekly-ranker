@@ -58,6 +58,7 @@ jobs:
           test -f scripts/verify_dev36_to_dev37_update.sh
           test -f scripts/verify_dev37_to_dev38_update.sh
           test -f scripts/verify_dev39_to_dev40_update.sh
+          test -f scripts/verify_dev40_to_dev41_update.sh
           grep -Fq 'TopDestination("search", "검색"' app/src/main/java/com/shaterguy/fc2weeklyranker/MainActivity.kt
           grep -Fq 'TopDestination("tags", "태그"' app/src/main/java/com/shaterguy/fc2weeklyranker/MainActivity.kt
           grep -Fq 'TopDestination("downloads", "다운로드"' app/src/main/java/com/shaterguy/fc2weeklyranker/MainActivity.kt
@@ -246,7 +247,7 @@ jobs:
           adb shell am force-stop com.shaterguy.fc2weeklyranker.dev
           sleep 1
 
-          NEW_DB_DIR="$RUNNER_TEMP/dev40-db"
+          NEW_DB_DIR="$RUNNER_TEMP/dev41-db"
           mkdir -p "$NEW_DB_DIR"
           adb exec-out run-as com.shaterguy.fc2weeklyranker.dev cat databases/ranker.db > "$NEW_DB_DIR/ranker.db"
           for suffix in -wal -shm; do
@@ -290,7 +291,7 @@ jobs:
           PY
 
           adb shell dumpsys package com.shaterguy.fc2weeklyranker | grep -Fq 'versionName=0.1.0'
-          adb shell dumpsys package com.shaterguy.fc2weeklyranker.dev | grep -Fq 'versionName=0.2.0-dev40'
+          adb shell dumpsys package com.shaterguy.fc2weeklyranker.dev | grep -Fq 'versionName=0.2.0-dev41'
 
           RECEIVER_APK="$(find external-stream-receiver/build/outputs/apk/debug -maxdepth 1 -type f -name '*.apk' -print -quit)"
           TEST_CANDIDATE="$(find app/build/outputs/apk/androidTest/debug -maxdepth 1 -type f -name '*.apk' -print -quit)"
@@ -304,17 +305,19 @@ jobs:
           adb install -r "$RECEIVER_APK"
           adb install -r -t "$TEST_APK"
           FIXTURE_BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/test-fixtures/external-stream"
+          WEBVIEW_FIXTURE_BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/test-fixtures/webview-navigation"
           INSTRUMENTATION_OUTPUT="$RUNNER_TEMP/runtime-instrumentation.txt"
           adb shell am instrument -w \
             -e fixtureBaseUrl "$FIXTURE_BASE" \
-            -e class com.shaterguy.fc2weeklyranker.media.ExternalVideoStreamProviderInstrumentedTest,com.shaterguy.fc2weeklyranker.media.NativeFullscreenAssistantInstrumentedTest,com.shaterguy.fc2weeklyranker.search.SearchDatabaseInstrumentedTest,com.shaterguy.fc2weeklyranker.data.SettingsStoreInstrumentedTest \
+            -e webViewFixtureBaseUrl "$WEBVIEW_FIXTURE_BASE" \
+            -e class com.shaterguy.fc2weeklyranker.media.ExternalVideoStreamProviderInstrumentedTest,com.shaterguy.fc2weeklyranker.media.NativeFullscreenAssistantInstrumentedTest,com.shaterguy.fc2weeklyranker.search.SearchDatabaseInstrumentedTest,com.shaterguy.fc2weeklyranker.data.SettingsStoreInstrumentedTest,com.shaterguy.fc2weeklyranker.network.WebViewApplicationPageTransportInstrumentedTest \
             com.shaterguy.fc2weeklyranker.dev.test/androidx.test.runner.AndroidJUnitRunner \
             | tee "$INSTRUMENTATION_OUTPUT"
-          grep -Fq 'OK (8 tests)' "$INSTRUMENTATION_OUTPUT"
+          grep -Fq 'OK (10 tests)' "$INSTRUMENTATION_OUTPUT"
 
-          REUSE_ADB=1 bash scripts/verify_dev39_to_dev40_update.sh "$CURRENT_APK"
+          REUSE_ADB=1 bash scripts/verify_dev40_to_dev41_update.sh "$CURRENT_APK"
           adb shell dumpsys package com.shaterguy.fc2weeklyranker | grep -Fq 'versionName=0.1.0'
-          adb shell dumpsys package com.shaterguy.fc2weeklyranker.dev | grep -Fq 'versionName=0.2.0-dev40'
+          adb shell dumpsys package com.shaterguy.fc2weeklyranker.dev | grep -Fq 'versionName=0.2.0-dev41'
       - name: Upload signed TEST evidence
         if: steps.sign.outputs.configured == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

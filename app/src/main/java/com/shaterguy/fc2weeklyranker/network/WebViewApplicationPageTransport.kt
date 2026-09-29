@@ -156,7 +156,11 @@ internal class WebViewApplicationPageTransport(
             var completed: PageResult? = null
             while (completed == null) {
                 val snapshot = pageSnapshot(current.webView)
-                if (snapshot != null && snapshot.optString("ready") == "complete" && isAllowedUrl(current, snapshot.optString("url"))) {
+                if (
+                    snapshot != null &&
+                    snapshot.optString("ready") == "complete" &&
+                    isRequestedDocument(current, url, snapshot.optString("url"))
+                ) {
                     val body = pageHtml(current.webView)
                     if (body != null) {
                         check(body.length <= MAX_BODY_CHARS) { "페이지 응답이 안전 크기 상한을 초과했습니다." }
@@ -168,6 +172,28 @@ internal class WebViewApplicationPageTransport(
             completed
         }
     }
+
+    private fun isRequestedDocument(
+        current: BrowserSession,
+        requestedUrl: String,
+        observedUrl: String,
+    ): Boolean = runCatching {
+        val requested = Uri.parse(requestedUrl)
+        val observed = Uri.parse(observedUrl)
+        if (
+            !observed.scheme.equals("https", ignoreCase = true) ||
+            observed.host.orEmpty().lowercase() !in current.allowedHosts ||
+            requested.path.orEmpty() != observed.path.orEmpty()
+        ) {
+            return@runCatching false
+        }
+        val requestedNames = requested.queryParameterNames
+        val observedNames = observed.queryParameterNames
+        requestedNames == observedNames &&
+            requestedNames.all { name ->
+                requested.getQueryParameters(name) == observed.getQueryParameters(name)
+            }
+    }.getOrDefault(false)
 
     private suspend fun pageHtml(webView: WebView): String? {
         val raw = evaluate(webView, "document.documentElement ? document.documentElement.outerHTML : null")

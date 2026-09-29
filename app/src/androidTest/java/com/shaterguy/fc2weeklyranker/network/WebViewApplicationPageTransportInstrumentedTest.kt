@@ -18,8 +18,10 @@ class WebViewApplicationPageTransportInstrumentedTest {
     fun generalSearchWaitsForRequestedWebViewDocument() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val transport = WebViewApplicationPageTransport(context, AvseeClient.USER_AGENT)
-        val target = fixtureBaseUrl() +
-            "/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=selfrun-search&sop=and&page=1"
+        // raw.githubusercontent.com intentionally canonicalizes away query strings in WebView.
+        // The real query-matching contract is covered by JVM tests; this device test proves that
+        // browser navigation leaves the bootstrap document and reaches the requested search path.
+        val target = fixtureBaseUrl() + "/bbs/search.php"
         val html = transport.fetch(target)
         assertTrue(html.contains("SELF_RUN_GENERAL_SEARCH_WEBVIEW_FIXTURE"))
         assertTrue(html.contains("search-page-marker"))
@@ -30,7 +32,8 @@ class WebViewApplicationPageTransportInstrumentedTest {
     fun tagSearchWaitsForRequestedWebViewDocument() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val transport = WebViewApplicationPageTransport(context, AvseeClient.USER_AGENT)
-        val target = fixtureBaseUrl() + "/bbs/tag.php?q=selfrun-tag&eq=&page=1"
+        // Keep the device fixture path-only for the same CDN canonicalization reason above.
+        val target = fixtureBaseUrl() + "/bbs/tag.php"
         val html = transport.fetch(target)
         assertTrue(html.contains("SELF_RUN_TAG_SEARCH_WEBVIEW_FIXTURE"))
         assertTrue(html.contains("tag-page-marker"))

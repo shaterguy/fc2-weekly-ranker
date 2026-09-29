@@ -95,7 +95,9 @@ internal class WebViewApplicationPageTransport(
         val webView = createWebView(allowedHosts)
         val created = BrowserSession(origin, allowedHosts, webView)
         session = created
-        bootstrap(created)
+        if (target.host.lowercase() in OFFICIAL_HOSTS) {
+            bootstrap(created)
+        }
         return created
     }
 

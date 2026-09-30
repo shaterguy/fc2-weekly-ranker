@@ -12,8 +12,8 @@ Android app for browsing the configured `javfc2` board in fixed seven-day window
 
 ## TEST channel
 
-- Historical TEST lineage starts at `v0.1.0-dev1`; the current development target is `v0.2.0-dev42`.
-- Source version: `0.2.0-dev42`, `versionCode=66`.
+- Historical TEST lineage starts at `v0.1.0-dev1`; the current development target is `v0.2.0-dev43`.
+- Source version: `0.2.0-dev43`, `versionCode=67`.
 - TEST application ID: `com.shaterguy.fc2weeklyranker.dev`.
 - The configured official origin is `https://02.avsee.is`. Existing exact `https://01.avsee.is` settings migrate to 02, while unrelated custom HTTPS origins remain unchanged. Application pages are fetched through the app WebView session so Cloudflare/browser-session state stays in the browser context.
 - DEV42 search and tag requests may return a newly loaded document after DOMContentLoaded when the existing parser already recognizes results, without waiting for unrelated images or frames. Placeholder rows remain pending until their link and required tag metrics are usable. Complete empty pages follow the existing empty-result behavior. These checks do not establish completion of future asynchronous rows or pagination; tag pages do not encode the selected board, so readiness accepts either supported board. Synthetic browser timing and parser tests cover this contract; an actual source-site session is still a separate runtime check.

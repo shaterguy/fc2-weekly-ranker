@@ -4,6 +4,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -36,14 +37,18 @@ class WebViewHttpErrorInstrumentedTest {
     fun subresource404DoesNotFailTheMainDocumentOrNextNavigation() = withTransport { transport, events ->
         val html = transport.fetch("$ORIGIN/subresource.html")
         assertTrue(html.contains("NEUTRAL_DOCUMENT_WITH_IMAGE"))
-        assertTrue("subresource callback was not exercised", synchronized(events) { events.any { "http_error status=404 main=false" in it } })
+        withTimeout(5_000) {
+            while (!synchronized(events) { events.any { "http_error status=404 main=false" in it } }) {
+                delay(25)
+            }
+        }
         assertTrue(transport.fetch("$ORIGIN/ok.html").contains("NEUTRAL_EMPTY_DOCUMENT"))
     }
 
     @Test
     fun mainFrameReadFailureDoesNotReturnABrowserErrorDocument() = withTransport { transport, events ->
         val failure = runCatching { withTimeout(10_000) { transport.fetch("$ORIGIN/read-failure.html") } }.exceptionOrNull()
-        assertTrue("expected an explicit WebView load failure, got $failure",
+        assertTrue("expected an explicit WebView load failure, got $failure; events=$events",
             failure is IllegalStateException && causes(failure).any { "WEBVIEW_ERROR_" in it })
         assertTrue("main-frame load callback was not exercised", synchronized(events) { events.any { "load_error" in it && "main=true" in it } })
         assertTrue(transport.fetch("$ORIGIN/ok.html").contains("NEUTRAL_EMPTY_DOCUMENT"))
@@ -51,7 +56,7 @@ class WebViewHttpErrorInstrumentedTest {
 
     private fun verifyHttpFailure(status: Int) = withTransport { transport, events ->
         val failure = runCatching { withTimeout(10_000) { transport.fetch("$ORIGIN/status-$status.html") } }.exceptionOrNull()
-        assertTrue("HTTP $status was accepted as success or lost its status: $failure",
+        assertTrue("HTTP $status was accepted as success or lost its status: $failure; events=$events",
             failure is IllegalStateException && causes(failure).any { "HTTP_$status" in it })
         assertTrue("main-frame HTTP callback was not exercised", synchronized(events) { events.any { "http_error status=$status main=true" in it } })
         assertTrue("failed navigation poisoned a later successful request",

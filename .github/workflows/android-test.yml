@@ -59,7 +59,7 @@ jobs:
           test -f scripts/verify_dev37_to_dev38_update.sh
           test -f scripts/verify_dev39_to_dev40_update.sh
           test -f scripts/verify_dev40_to_dev41_update.sh
-          test -f scripts/verify_dev44_to_dev44_update.sh
+          test -f scripts/verify_dev43_to_dev44_update.sh
           grep -Fq 'TopDestination("search", "검색"' app/src/main/java/com/shaterguy/fc2weeklyranker/MainActivity.kt
           grep -Fq 'TopDestination("tags", "태그"' app/src/main/java/com/shaterguy/fc2weeklyranker/MainActivity.kt
           grep -Fq 'TopDestination("downloads", "다운로드"' app/src/main/java/com/shaterguy/fc2weeklyranker/MainActivity.kt
@@ -320,7 +320,7 @@ jobs:
           grep -Fq 'OK (18 tests)' "$INSTRUMENTATION_OUTPUT"
           python3 scripts/ci_source_fixture.py verify
 
-          REUSE_ADB=1 bash scripts/verify_dev44_to_dev44_update.sh "$CURRENT_APK"
+          REUSE_ADB=1 bash scripts/verify_dev43_to_dev44_update.sh "$CURRENT_APK"
           adb shell dumpsys package com.shaterguy.fc2weeklyranker | grep -Fq 'versionName=0.1.0'
           adb shell dumpsys package com.shaterguy.fc2weeklyranker.dev | grep -Fq 'versionName=0.2.0-dev44'
       - name: Upload signed TEST evidence

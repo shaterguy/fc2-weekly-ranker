@@ -44,7 +44,7 @@ class WebViewHttpErrorInstrumentedTest {
     fun mainFrameReadFailureDoesNotReturnABrowserErrorDocument() = withTransport { transport, events ->
         val failure = runCatching { withTimeout(10_000) { transport.fetch("$ORIGIN/read-failure.html") } }.exceptionOrNull()
         assertTrue("expected an explicit WebView load failure, got $failure",
-            failure is IllegalStateException && causes(failure).any { "WEBVIEW_ERROR_" in it } })
+            failure is IllegalStateException && causes(failure).any { "WEBVIEW_ERROR_" in it })
         assertTrue("main-frame load callback was not exercised", synchronized(events) { events.any { "load_error" in it && "main=true" in it } })
         assertTrue(transport.fetch("$ORIGIN/ok.html").contains("NEUTRAL_EMPTY_DOCUMENT"))
     }
@@ -52,7 +52,7 @@ class WebViewHttpErrorInstrumentedTest {
     private fun verifyHttpFailure(status: Int) = withTransport { transport, events ->
         val failure = runCatching { withTimeout(10_000) { transport.fetch("$ORIGIN/status-$status.html") } }.exceptionOrNull()
         assertTrue("HTTP $status was accepted as success or lost its status: $failure",
-            failure is IllegalStateException && causes(failure).any { "HTTP_$status" in it } })
+            failure is IllegalStateException && causes(failure).any { "HTTP_$status" in it })
         assertTrue("main-frame HTTP callback was not exercised", synchronized(events) { events.any { "http_error status=$status main=true" in it } })
         assertTrue("failed navigation poisoned a later successful request",
             transport.fetch("$ORIGIN/ok.html").contains("NEUTRAL_EMPTY_DOCUMENT"))

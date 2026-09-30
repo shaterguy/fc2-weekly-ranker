@@ -12,10 +12,11 @@ Android app for browsing the configured `javfc2` board in fixed seven-day window
 
 ## TEST channel
 
-- Historical TEST lineage starts at `v0.1.0-dev1`; the current development target is `v0.2.0-dev41`.
-- Source version: `0.2.0-dev40`, `versionCode=65`.
+- Historical TEST lineage starts at `v0.1.0-dev1`; the current development target is `v0.2.0-dev42`.
+- Source version: `0.2.0-dev42`, `versionCode=66`.
 - TEST application ID: `com.shaterguy.fc2weeklyranker.dev`.
 - The configured official origin is `https://02.avsee.is`. Existing exact `https://01.avsee.is` settings migrate to 02, while unrelated custom HTTPS origins remain unchanged. Application pages are fetched through the app WebView session so Cloudflare/browser-session state stays in the browser context.
+- DEV42 search and tag requests may return a newly loaded document after DOMContentLoaded when the existing parser already recognizes results, without waiting for unrelated images or frames. Placeholder rows remain pending until their link and required tag metrics are usable. Complete empty pages follow the existing empty-result behavior. These checks do not establish completion of future asynchronous rows or pagination; tag pages do not encode the selected board, so readiness accepts either supported board. Synthetic browser timing and parser tests cover this contract; an actual source-site session is still a separate runtime check.
 - FC2 search starts immediately when the user taps Search in a process-lifetime coroutine runner instead of waiting for an OS-scheduled job. The active token and coroutine job are tracked directly so replacement, cancellation, and foreground recovery observe the actual execution. Search session, page progress, and results remain persisted in a dedicated Room database, and transient socket aborts keep the existing bounded in-run retry behavior.
 - The anchor instant is persisted in DataStore and changes only when the user explicitly refreshes it.
 - Page `n` covers `anchorDate-(7n+6)` through `anchorDate-7n` in `Asia/Seoul`.
@@ -53,5 +54,7 @@ Downloads are unique WorkManager jobs and write to `MediaStore.Downloads`. Downl
 ## Remote verification
 
 GitHub Actions is the build authority. `scripts/verify.sh` is the canonical functional candidate verification entry point. `Android TEST` verifies the debug/TEST lineage, and `Android STABLE RC` packages and verifies the release/STABLE lineage from an RC commit. Action dependencies are pinned to commit SHAs, and evidence artifact identity includes both `github.run_id` and `github.run_attempt` so reruns cannot collide.
+
+CI seeds only the disposable TEST emulator with `https://fixture.invalid` before its first application launch, then verifies that both source URL preferences remain neutral through upgrades and runtime tests. The seed is round-tripped through the pinned DataStore library; existing retention and signing checks remain enabled. Explicit WebView fixture tests use the repository fixture URL and assert its marker.
 
 The repository intentionally does not contain real media, real session material, or copied source-site content fixtures; parser tests use synthetic HTML shaped like the supported page contract.

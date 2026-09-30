@@ -29,6 +29,7 @@ interface ApplicationPageTransport {
 internal class WebViewApplicationPageTransport(
     context: Context,
     private val userAgent: String,
+    private val hasUsableSearchResults: (String, String) -> Boolean = { _, _ -> false },
 ) : ApplicationPageTransport {
     private val appContext = context.applicationContext
     private val mutex = Mutex()
@@ -38,6 +39,7 @@ internal class WebViewApplicationPageTransport(
         val origin: String,
         val allowedHosts: Set<String>,
         val webView: WebView,
+        var hasNavigated: Boolean = false,
     )
 
     private data class PageResult(
@@ -128,6 +130,7 @@ internal class WebViewApplicationPageTransport(
 
     private suspend fun bootstrap(current: BrowserSession) {
         withContext(Dispatchers.Main.immediate) {
+            current.hasNavigated = true
             current.webView.loadUrl("${current.origin}/")
         }
         withTimeout(BOOTSTRAP_TIMEOUT_MILLIS) {
@@ -151,28 +154,54 @@ internal class WebViewApplicationPageTransport(
         current: BrowserSession,
         url: String,
         referer: String?,
-    ): PageResult {
-        val headers = referer?.takeIf { isAllowedUrl(current, it) }?.let { mapOf("Referer" to it) }.orEmpty()
-        withContext(Dispatchers.Main.immediate) { current.webView.loadUrl(url, headers) }
-        return withTimeout(FETCH_TIMEOUT_MILLIS) {
-            var completed: PageResult? = null
-            while (completed == null) {
-                val snapshot = pageSnapshot(current.webView)
-                if (
-                    snapshot != null &&
-                    snapshot.optString("ready") == "complete" &&
-                    isRequestedDocument(current, url, snapshot.optString("url"))
-                ) {
-                    val body = pageHtml(current.webView)
-                    if (body != null) {
-                        check(body.length <= MAX_BODY_CHARS) { "페이지 응답이 안전 크기 상한을 초과했습니다." }
-                        completed = PageResult(200, snapshot.optString("url"), body)
-                    }
-                }
-                if (completed == null) delay(POLL_MILLIS)
-            }
-            completed
+    ): PageResult = withTimeout(FETCH_TIMEOUT_MILLIS) {
+        val requestedPath = URI(url).path.orEmpty()
+        val isSearchRequest = requestedPath == "/bbs/search.php" || requestedPath == "/bbs/tag.php"
+        val isFirstNavigation = !current.hasNavigated
+        val previousTimeOrigin = if (isFirstNavigation || !isSearchRequest) {
+            0.0
+        } else {
+            pageSnapshot(current.webView)?.optDouble("timeOrigin", 0.0) ?: 0.0
         }
+        val headers = referer?.takeIf { isAllowedUrl(current, it) }?.let { mapOf("Referer" to it) }.orEmpty()
+        withContext(Dispatchers.Main.immediate) {
+            current.hasNavigated = true
+            current.webView.loadUrl(url, headers)
+        }
+        var completed: PageResult? = null
+        while (completed == null) {
+            val snapshot = pageSnapshot(current.webView)
+            if (
+                snapshot != null &&
+                isUsableApplicationDocument(
+                    snapshot.optString("ready"),
+                    snapshot.optDouble("timeOrigin", 0.0),
+                    previousTimeOrigin,
+                    snapshot.optBoolean("domContentLoaded"),
+                    requestedPath,
+                    when (requestedPath) {
+                        "/bbs/search.php" -> snapshot.optBoolean("hasSearchRows")
+                        "/bbs/tag.php" -> snapshot.optBoolean("hasTagRows")
+                        else -> false
+                    },
+                    isFirstNavigation,
+                ) &&
+                isRequestedDocument(current, url, snapshot.optString("url"))
+            ) {
+                val body = pageHtml(current.webView)
+                if (body != null) {
+                    check(body.length <= MAX_BODY_CHARS) { "페이지 응답이 안전 크기 상한을 초과했습니다." }
+                    val contentReady = withContext(Dispatchers.Default) {
+                        hasReadyApplicationSearchContent(
+                            snapshot.optString("ready"), body, url, hasUsableSearchResults,
+                        )
+                    }
+                    if (contentReady) completed = PageResult(200, snapshot.optString("url"), body)
+                }
+            }
+            if (completed == null) delay(POLL_MILLIS)
+        }
+        completed
     }
 
     private fun isRequestedDocument(
@@ -209,6 +238,10 @@ internal class WebViewApplicationPageTransport(
                 title: document.title || "",
                 url: location.href,
                 ready: document.readyState,
+                timeOrigin: performance.timeOrigin || 0,
+                domContentLoaded: (performance.getEntriesByType("navigation")[0] || {}).domContentLoadedEventEnd > 0,
+                hasSearchRows: !!document.querySelector("#at-main .search-media .media"),
+                hasTagRows: !!document.querySelector(".tagbox-media .media, .post-wrap .media"),
                 text: (document.body ? document.body.innerText : "").slice(0, 500)
             })""",
         )

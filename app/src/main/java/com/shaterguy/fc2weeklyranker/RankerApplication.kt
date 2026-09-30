@@ -73,7 +73,13 @@ object AppGraph {
             .build()
         sourceClient = AvseeClient(
             httpClient,
-            applicationPageTransport = WebViewApplicationPageTransport(app, AvseeClient.USER_AGENT),
+            applicationPageTransport = WebViewApplicationPageTransport(
+                app,
+                AvseeClient.USER_AGENT,
+                hasUsableSearchResults = { html, pageUrl ->
+                    sourceClient.hasUsableApplicationSearchResults(html, pageUrl)
+                },
+            ),
         )
         repository = AppRepository(app, database, settings, sourceClient)
         searchScheduler = SearchScheduler(app)

@@ -487,6 +487,14 @@ class AvseeClient(
         return "$baseUrl$TAG_PATH?q=$encoded&eq=&page=$page"
     }
 
+    internal fun hasUsableApplicationSearchResults(html: String, pageUrl: String): Boolean =
+        when (URI(pageUrl).path) {
+            SEARCH_PATH -> parseSearchPage(html, pageUrl).posts.isNotEmpty()
+            TAG_PATH -> parseTagPage(html, pageUrl, "javfc2").posts.isNotEmpty() ||
+                parseTagPage(html, pageUrl, "javc").posts.isNotEmpty()
+            else -> false
+        }
+
     internal fun parseSearchPage(html: String, pageUrl: String): SearchPage {
         val doc = Jsoup.parse(html, pageUrl)
         val posts = LinkedHashMap<String, RemoteSearchPost>()

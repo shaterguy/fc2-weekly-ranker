@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-python3 -m py_compile tools/derive_test_signing_identity.py tools/derive_stable_signing_identity.py
+python3 -m py_compile tools/derive_test_signing_identity.py tools/derive_stable_signing_identity.py scripts/ci_source_fixture.py
+python3 scripts/ci_source_fixture.py check-fixture
 bash -n tools/sign_test.sh
 bash -n tools/sign_stable.sh
 bash -n scripts/verify_dev17_to_dev18_update.sh
@@ -37,6 +38,7 @@ bash -n scripts/verify_dev37_to_dev38_update.sh
 bash -n scripts/verify_dev38_to_dev39_update.sh
 bash -n scripts/verify_dev39_to_dev40_update.sh
 bash -n scripts/verify_dev40_to_dev41_update.sh
+bash -n scripts/verify_dev41_to_dev42_update.sh
 
 MAIN='app/src/main/java/com/shaterguy/fc2weeklyranker/MainActivity.kt'
 LAUNCHER='app/src/main/java/com/shaterguy/fc2weeklyranker/media/ExternalVideoPlayerLauncher.kt'
@@ -74,6 +76,8 @@ gradle --no-daemon --stacktrace \
   :app:lintDebug \
   :app:assembleDebugAndroidTest \
   :external-stream-receiver:assembleDebug
+
+python3 scripts/ci_source_fixture.py verify-local app/build/ci-source-settings-roundtrip.preferences_pb
 
 shopt -s nullglob
 test_xml=(app/build/test-results/testDebugUnitTest/TEST-*.xml)

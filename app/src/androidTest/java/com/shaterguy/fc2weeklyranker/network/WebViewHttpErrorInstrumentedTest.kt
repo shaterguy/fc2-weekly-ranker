@@ -96,8 +96,9 @@ class WebViewHttpErrorInstrumentedTest {
             while (isActive) {
                 var callback = httpCallbacks.poll()
                 while (callback != null) {
+                    val pending = callback
                     val view = currentWebView(transport)
-                    view.webViewClient.onReceivedHttpError(view, callback.first, callback.second)
+                    view?.let { it.webViewClient.onReceivedHttpError(it, pending.first, pending.second) }
                     callback = httpCallbacks.poll()
                 }
                 delay(10)
@@ -114,10 +115,10 @@ class WebViewHttpErrorInstrumentedTest {
     }
 
     // Reflection stays in androidTest; production exposes no additional callback injection API.
-    private fun currentWebView(transport: WebViewApplicationPageTransport): WebView {
+    private fun currentWebView(transport: WebViewApplicationPageTransport): WebView? {
         val sessionField = WebViewApplicationPageTransport::class.java.getDeclaredField("session")
         sessionField.isAccessible = true
-        val session = checkNotNull(sessionField.get(transport))
+        val session = sessionField.get(transport) ?: return null
         val viewField = session.javaClass.getDeclaredField("webView")
         viewField.isAccessible = true
         return viewField.get(session) as WebView

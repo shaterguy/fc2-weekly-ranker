@@ -20,7 +20,7 @@ import com.shaterguy.fc2weeklyranker.AppGraph
 import com.shaterguy.fc2weeklyranker.domain.ContentMode
 import com.shaterguy.fc2weeklyranker.network.AvseeClient
 import com.shaterguy.fc2weeklyranker.network.SearchPage
-import com.shaterguy.fc2weeklyranker.network.isTransientNetworkError
+import com.shaterguy.fc2weeklyranker.network.safeApplicationFailureMessage
 import com.shaterguy.fc2weeklyranker.network.retryTransientGet
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -294,11 +294,7 @@ internal object SearchRunner {
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
-            val message = if (isTransientNetworkError(error)) {
-                "네트워크 연결이 불안정해 검색을 종료했습니다. 다시 시도해 주세요."
-            } else {
-                error.message?.take(160) ?: error::class.java.simpleName
-            }
+            val message = safeApplicationFailureMessage(error)
             dao.fail(request.token, message, System.currentTimeMillis())
             return SearchRunResult.FAILED
         }

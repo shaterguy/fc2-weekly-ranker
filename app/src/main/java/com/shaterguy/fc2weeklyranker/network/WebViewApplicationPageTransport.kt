@@ -69,19 +69,25 @@ internal class WebViewApplicationPageTransport(
 
     override suspend fun fetch(url: String, referer: String?): String = mutex.withLock {
         val target = validatedTarget(url)
-        var lastStatus = 0
         var lastFailure: Throwable? = null
         repeat(MAX_SESSION_ATTEMPTS) { attempt ->
             try {
-                val current = ensureSession(target)
-                val result = fetchInSession(current, target.toString(), referer)
-                lastStatus = result.status
+                val current = withPageFailureStage(PageFailureStage.SESSION) { ensureSession(target) }
+                val result = withPageFailureStage(PageFailureStage.DOCUMENT) {
+                    fetchInSession(current, target.toString(), referer)
+                }
                 if (!isChallenge(result)) {
-                    check(result.status in 200..299) { "HTTP_${result.status}" }
+                    if (result.status !in 200..299) {
+                        throw PageLoadException(PageFailureStage.DOCUMENT, PageFailureReason.HTTP, result.status)
+                    }
                     requireAllowedFinalUrl(current, result.finalUrl)
                     return@withLock result.body
                 }
-                lastFailure = IllegalStateException("HTTP_${result.status}: 사이트 보안 확인 응답")
+                lastFailure = PageLoadException(
+                    PageFailureStage.DOCUMENT,
+                    if (result.status >= 400) PageFailureReason.HTTP else PageFailureReason.ERROR,
+                    result.status,
+                )
             } catch (error: TimeoutCancellationException) {
                 lastFailure = error
             } catch (error: CancellationException) {
@@ -93,11 +99,8 @@ internal class WebViewApplicationPageTransport(
             resetSession()
             if (attempt + 1 < MAX_SESSION_ATTEMPTS) delay(REBOOT_DELAY_MILLIS)
         }
-        val suffix = if (lastStatus > 0) " (HTTP_$lastStatus)" else ""
-        throw IllegalStateException(
-            "사이트 페이지를 브라우저 세션으로 불러오지 못했습니다.$suffix",
-            lastFailure,
-        )
+        throw (lastFailure as? PageLoadException
+            ?: PageLoadException(PageFailureStage.DOCUMENT, PageFailureReason.ERROR, cause = lastFailure))
     }
 
     private fun validatedTarget(url: String): URI {
@@ -280,7 +283,7 @@ internal class WebViewApplicationPageTransport(
 
     private suspend fun navigationFailure(current: BrowserSession): PageResult? =
         withContext(Dispatchers.Main.immediate) {
-            current.navigation.loadError?.let { throw IllegalStateException("WEBVIEW_ERROR_$it") }
+            current.navigation.loadError?.let { throw PageLoadException(PageFailureStage.DOCUMENT, PageFailureReason.WEBVIEW, it) }
             current.navigation.httpStatus.takeIf { it >= 400 }?.let {
                 PageResult(it, current.navigation.requestedUrl.orEmpty(), "")
             }

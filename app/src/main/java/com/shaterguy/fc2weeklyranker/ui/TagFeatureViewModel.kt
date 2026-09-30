@@ -11,6 +11,7 @@ import com.shaterguy.fc2weeklyranker.network.RemoteTag
 import com.shaterguy.fc2weeklyranker.network.RemoteTagPost
 import com.shaterguy.fc2weeklyranker.network.TagSearchStreamer
 import com.shaterguy.fc2weeklyranker.network.isTransientNetworkError
+import com.shaterguy.fc2weeklyranker.network.safeApplicationFailureMessage
 import com.shaterguy.fc2weeklyranker.repo.AppRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -122,7 +123,7 @@ class TagFeatureViewModel(application: Application) : AndroidViewModel(applicati
             } catch (error: Throwable) {
                 if (isCurrentTagRequest(searchVersion, startModeVersion, requestMode)) {
                     val prefix = if (mutableTagResults.value.isEmpty()) "태그 검색 실패" else "태그 검색 일부 완료"
-                    mutableTagMessage.value = "$prefix: ${safeMessage(error)}"
+                    mutableTagMessage.value = "$prefix: ${safeApplicationFailureMessage(error)}"
                 }
             } finally {
                 if (isCurrentTagRequest(searchVersion, startModeVersion, requestMode)) tagLoading.value = false

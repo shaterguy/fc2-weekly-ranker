@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 from pathlib import Path
 import subprocess
+import shlex
 
 PACKAGE = "com.shaterguy.fc2weeklyranker.dev"
 PREFERENCE_PATH = "files/datastore/ranker_settings.preferences_pb"
 FIXTURE_ORIGIN = "https://fixture.invalid"
+FILE_STATE_SCRIPT = 'if [ -e "$1" ] || [ -L "$1" ]; then printf PRESENT; else printf ABSENT; fi'
+WRITE_SCRIPT = 'set -C; cat > "$1"'
 SEED_VALUES = {"base_url": FIXTURE_ORIGIN, "jav_base_url": FIXTURE_ORIGIN, "content_mode": "FC2"}
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_FILE = REPO_ROOT / "app/src/test/resources/ci-source-settings.preferences_pb"
@@ -115,28 +119,45 @@ def emulator_command() -> list[str]:
     return command
 
 
+def app_shell(command: list[str], arguments: list[str], *, data: bytes | None = None) -> bytes:
+    # ADB shell protocol preserves binary stdin/stdout with -T and returns the remote
+    # process exit status. Quote the complete remote argv once for Android's shell.
+    remote = shlex.join(["run-as", PACKAGE, *arguments])
+    result = subprocess.run(command + ["shell", "-T", remote], input=data, capture_output=True)
+    if result.returncode != 0 or result.stderr:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()[:160]
+        raise RuntimeError(f"fixture app command failed: exit={result.returncode}; {detail}")
+    return result.stdout
+
+
 def read_emulator_preferences(command: list[str]) -> bytes:
-    return subprocess.check_output(command + ["exec-out", "run-as", PACKAGE, "cat", PREFERENCE_PATH])
+    return app_shell(command, ["/system/bin/cat", PREFERENCE_PATH])
 
 
 def seed_emulator() -> None:
     command = emulator_command()
-    running = subprocess.run(command + ["shell", "pidof", PACKAGE], capture_output=True, text=True)
-    if running.returncode not in (0, 1):
+    running = subprocess.run(command + ["shell", "-T", shlex.join(["pidof", PACKAGE])], capture_output=True, text=True)
+    if running.returncode not in (0, 1) or running.stderr.strip():
         raise RuntimeError("could not verify application process state")
     if running.returncode == 0 or running.stdout.strip():
         raise RuntimeError("seed only before the first application launch")
-    exists = subprocess.run(command + ["shell", "run-as", PACKAGE, "test", "-e", PREFERENCE_PATH])
-    if exists.returncode == 0:
+    state = app_shell(command, ["/system/bin/sh", "-c", FILE_STATE_SCRIPT, "fixture-state", PREFERENCE_PATH])
+    if state == b"PRESENT":
         raise RuntimeError("refusing to overwrite existing preferences or retention evidence")
-    if exists.returncode != 1:
+    if state != b"ABSENT":
         raise RuntimeError("could not verify fresh preference state")
-    subprocess.run(command + ["shell", "run-as", PACKAGE, "mkdir", "-p", "files/datastore"], check=True)
+    app_shell(command, ["/system/bin/mkdir", "-p", "files/datastore"])
     data = seed_bytes()
-    subprocess.run(command + ["exec-in", "run-as", PACKAGE, "sh", "-c", "cat > " + PREFERENCE_PATH], input=data, check=True)
+    # Noclobber keeps the fresh-file restriction at the actual write, not just at
+    # the preceding presence check. No permission or ownership change is made.
+    app_shell(command, ["/system/bin/sh", "-c", WRITE_SCRIPT, "fixture-write", PREFERENCE_PATH], data=data)
     actual = read_emulator_preferences(command)
     if actual != data:
-        raise RuntimeError("fixture seed read-back mismatch")
+        raise RuntimeError(
+            "fixture seed read-back mismatch: "
+            f"expected_bytes={len(data)} actual_bytes={len(actual)} "
+            f"expected_sha256={hashlib.sha256(data).hexdigest()} actual_sha256={hashlib.sha256(actual).hexdigest()}"
+        )
     verify_fixture_values(actual)
     print("CI source preferences seeded and verified on disposable emulator")
 

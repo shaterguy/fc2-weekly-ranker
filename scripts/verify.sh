@@ -3,6 +3,7 @@ set -euo pipefail
 
 python3 -m py_compile tools/derive_test_signing_identity.py tools/derive_stable_signing_identity.py scripts/ci_source_fixture.py
 python3 scripts/ci_source_fixture.py check-fixture
+python3 -m unittest discover -s scripts -p 'test_ci_source_fixture.py' -v
 bash -n tools/sign_test.sh
 bash -n tools/sign_stable.sh
 bash -n scripts/verify_dev17_to_dev18_update.sh

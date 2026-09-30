@@ -59,6 +59,8 @@ class WebViewHttpErrorInstrumentedTest {
         val failure = runCatching { withTimeout(10_000) { transport.fetch("$ORIGIN/read-failure.html") } }.exceptionOrNull()
         assertTrue("expected an explicit WebView load failure, got $failure; events=$events",
             failure is IllegalStateException && causes(failure).any { "WEBVIEW_ERROR_" in it })
+        assertTrue("user-visible failure must retain a safe document stage and load code",
+            failure?.message.orEmpty().contains("[DOCUMENT/WEBVIEW_ERROR_"))
         assertTrue("main-frame load callback was not exercised", synchronized(events) { events.any { "load_error" in it && "main=true" in it } })
         assertTrue(transport.fetch("$ORIGIN/ok.html").contains("NEUTRAL_EMPTY_DOCUMENT"))
     }
@@ -67,6 +69,8 @@ class WebViewHttpErrorInstrumentedTest {
         val failure = runCatching { withTimeout(10_000) { transport.fetch("$ORIGIN/status-$status.html") } }.exceptionOrNull()
         assertTrue("HTTP $status was accepted as success or lost its status: $failure; events=$events",
             failure is IllegalStateException && causes(failure).any { "HTTP_$status" in it })
+        assertTrue("user-visible failure must retain a safe document stage and HTTP code",
+            failure?.message.orEmpty().contains("[DOCUMENT/HTTP_$status]"))
         assertTrue("main-frame HTTP callback was not exercised", synchronized(events) { events.any { "http_error status=$status main=true" in it } })
         assertTrue("failed navigation poisoned a later successful request",
             transport.fetch("$ORIGIN/ok.html").contains("NEUTRAL_EMPTY_DOCUMENT"))

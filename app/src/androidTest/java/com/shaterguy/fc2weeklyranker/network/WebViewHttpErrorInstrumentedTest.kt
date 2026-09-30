@@ -1,9 +1,14 @@
 package com.shaterguy.fc2weeklyranker.network
 
+import android.webkit.WebView
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.runBlocking
@@ -16,7 +21,11 @@ import java.io.ByteArrayInputStream
 import java.io.IOException
 import java.io.InputStream
 import java.util.Collections
+import java.util.concurrent.ConcurrentLinkedQueue
 
+// Intercepted HTTP responses do not trigger onReceivedHttpError on every WebView provider.
+// HTTP cases explicitly exercise the real client's callback contract on the main thread.
+// The broken-stream case still exercises the provider's actual onReceivedError callback.
 @RunWith(AndroidJUnit4::class)
 class WebViewHttpErrorInstrumentedTest {
     @Test
@@ -68,17 +77,46 @@ class WebViewHttpErrorInstrumentedTest {
 
     private fun withTransport(block: suspend (WebViewApplicationPageTransport, List<String>) -> Unit) = runBlocking<Unit> {
         val events = Collections.synchronizedList(mutableListOf<String>())
+        val httpCallbacks = ConcurrentLinkedQueue<Pair<WebResourceRequest, WebResourceResponse>>()
         val transport = WebViewApplicationPageTransport(
             InstrumentationRegistry.getInstrumentation().targetContext,
             "NeutralWebViewTransportTest",
-            fixtureResponse = ::respond,
+            fixtureResponse = { request ->
+                respond(request).also { response ->
+                    if (response.statusCode >= 400) httpCallbacks.add(request to response)
+                }
+            },
             fixtureDiagnostic = { events.add(it) },
         )
+        val callbackDelivery = launch(Dispatchers.Main.immediate) {
+            while (isActive) {
+                var callback = httpCallbacks.poll()
+                while (callback != null) {
+                    val view = currentWebView(transport)
+                    view.webViewClient.onReceivedHttpError(view, callback.first, callback.second)
+                    callback = httpCallbacks.poll()
+                }
+                delay(10)
+            }
+        }
         try {
             withTimeout(20_000) { block(transport, events) }
         } finally {
-            withContext(NonCancellable) { transport.close() }
+            withContext(NonCancellable) {
+                callbackDelivery.cancelAndJoin()
+                transport.close()
+            }
         }
+    }
+
+    // Reflection stays in androidTest; production exposes no additional callback injection API.
+    private fun currentWebView(transport: WebViewApplicationPageTransport): WebView {
+        val sessionField = WebViewApplicationPageTransport::class.java.getDeclaredField("session")
+        sessionField.isAccessible = true
+        val session = checkNotNull(sessionField.get(transport))
+        val viewField = session.javaClass.getDeclaredField("webView")
+        viewField.isAccessible = true
+        return viewField.get(session) as WebView
     }
 
     private fun respond(request: WebResourceRequest): WebResourceResponse {

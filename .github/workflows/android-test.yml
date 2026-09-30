@@ -310,16 +310,14 @@ jobs:
           adb install -r "$RECEIVER_APK"
           adb install -r -t "$TEST_APK"
           FIXTURE_BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/test-fixtures/external-stream"
-          WEBVIEW_FIXTURE_BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/test-fixtures/webview-navigation"
           INSTRUMENTATION_OUTPUT="$RUNNER_TEMP/runtime-instrumentation.txt"
           python3 scripts/ci_source_fixture.py verify
           adb shell am instrument -w \
             -e fixtureBaseUrl "$FIXTURE_BASE" \
-            -e webViewFixtureBaseUrl "$WEBVIEW_FIXTURE_BASE" \
             -e class com.shaterguy.fc2weeklyranker.media.ExternalVideoStreamProviderInstrumentedTest,com.shaterguy.fc2weeklyranker.media.NativeFullscreenAssistantInstrumentedTest,com.shaterguy.fc2weeklyranker.search.SearchDatabaseInstrumentedTest,com.shaterguy.fc2weeklyranker.data.SettingsStoreInstrumentedTest,com.shaterguy.fc2weeklyranker.network.WebViewApplicationPageTransportInstrumentedTest \
             com.shaterguy.fc2weeklyranker.dev.test/androidx.test.runner.AndroidJUnitRunner \
             | tee "$INSTRUMENTATION_OUTPUT"
-          grep -Fq 'OK (10 tests)' "$INSTRUMENTATION_OUTPUT"
+          grep -Fq 'OK (12 tests)' "$INSTRUMENTATION_OUTPUT"
           python3 scripts/ci_source_fixture.py verify
 
           REUSE_ADB=1 bash scripts/verify_dev41_to_dev42_update.sh "$CURRENT_APK"

@@ -2,9 +2,12 @@ package com.shaterguy.fc2weeklyranker.network
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.graphics.Bitmap
 import android.net.Uri
 import android.webkit.CookieManager
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -30,6 +33,8 @@ internal class WebViewApplicationPageTransport(
     context: Context,
     private val userAgent: String,
     private val hasUsableSearchResults: (String, String) -> Boolean = { _, _ -> false },
+    private val fixtureResponse: ((WebResourceRequest) -> WebResourceResponse?)? = null,
+    private val fixtureDiagnostic: ((String) -> Unit)? = null,
 ) : ApplicationPageTransport {
     private val appContext = context.applicationContext
     private val mutex = Mutex()
@@ -90,6 +95,11 @@ internal class WebViewApplicationPageTransport(
     }
 
     private suspend fun ensureSession(target: URI): BrowserSession {
+        if (fixtureResponse != null || fixtureDiagnostic != null) {
+            require(target.host.equals("fixture.invalid", ignoreCase = true)) {
+                "Synthetic WebView hooks are restricted to the reserved fixture host."
+            }
+        }
         val origin = "https://${target.host.lowercase()}"
         session?.takeIf { it.origin == origin }?.let { return it }
         resetSession()
@@ -118,6 +128,29 @@ internal class WebViewApplicationPageTransport(
             CookieManager.getInstance().setAcceptCookie(true)
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
             webViewClient = object : WebViewClient() {
+                override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? =
+                    fixtureResponse?.invoke(request) ?: super.shouldInterceptRequest(view, request)
+
+                override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
+                    fixtureDiagnostic?.invoke("started url=${diagnosticUrl(url)}")
+                    super.onPageStarted(view, url, favicon)
+                }
+
+                override fun onPageFinished(view: WebView, url: String?) {
+                    fixtureDiagnostic?.invoke("finished url=${diagnosticUrl(url)}")
+                    super.onPageFinished(view, url)
+                }
+
+                override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+                    fixtureDiagnostic?.invoke("load_error code=${error.errorCode} main=${request.isForMainFrame} url=${diagnosticUrl(request.url.toString())}")
+                    super.onReceivedError(view, request, error)
+                }
+
+                override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, response: WebResourceResponse) {
+                    fixtureDiagnostic?.invoke("http_error status=${response.statusCode} main=${request.isForMainFrame} url=${diagnosticUrl(request.url.toString())}")
+                    super.onReceivedHttpError(view, request, response)
+                }
+
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                     if (!request.isForMainFrame) return false
                     val uri = request.url
@@ -171,6 +204,12 @@ internal class WebViewApplicationPageTransport(
         var completed: PageResult? = null
         while (completed == null) {
             val snapshot = pageSnapshot(current.webView)
+            fixtureDiagnostic?.invoke(
+                "snapshot ready=${snapshot?.optString("ready")} url=${diagnosticUrl(snapshot?.optString("url"))} " +
+                    "requested=${snapshot?.let { isRequestedDocument(current, url, it.optString("url")) }} " +
+                    "timeOrigin=${snapshot?.optDouble("timeOrigin", 0.0)} previous=$previousTimeOrigin first=$isFirstNavigation " +
+                    "dcl=${snapshot?.optBoolean("domContentLoaded")} searchRows=${snapshot?.optBoolean("hasSearchRows")} tagRows=${snapshot?.optBoolean("hasTagRows")}",
+            )
             if (
                 snapshot != null &&
                 isUsableApplicationDocument(
@@ -285,6 +324,13 @@ internal class WebViewApplicationPageTransport(
         uri.scheme.equals("https", ignoreCase = true) &&
             uri.host.orEmpty().lowercase() in current.allowedHosts
     }.getOrDefault(false)
+
+    private fun diagnosticUrl(url: String?): String = runCatching {
+        val uri = URI(url.orEmpty())
+        "${uri.scheme}://${uri.host}${uri.path.orEmpty()}"
+    }.getOrDefault("unavailable")
+
+    internal suspend fun close() = mutex.withLock { resetSession() }
 
     private suspend fun resetSession() {
         val old = session

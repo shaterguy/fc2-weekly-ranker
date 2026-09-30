@@ -44,8 +44,22 @@ internal class WebViewApplicationPageTransport(
         val origin: String,
         val allowedHosts: Set<String>,
         val webView: WebView,
+        val navigation: NavigationState,
         var hasNavigated: Boolean = false,
     )
+
+    // Read and written only on the WebView's main thread.
+    private class NavigationState {
+        var requestedUrl: String? = null
+        var httpStatus: Int = 200
+        var loadError: Int? = null
+
+        fun begin(url: String) {
+            requestedUrl = url
+            httpStatus = 200
+            loadError = null
+        }
+    }
 
     private data class PageResult(
         val status: Int,
@@ -104,8 +118,9 @@ internal class WebViewApplicationPageTransport(
         session?.takeIf { it.origin == origin }?.let { return it }
         resetSession()
         val allowedHosts = allowedHostsFor(target.host.lowercase())
-        val webView = createWebView(allowedHosts)
-        val created = BrowserSession(origin, allowedHosts, webView)
+        val navigation = NavigationState()
+        val webView = createWebView(allowedHosts, navigation)
+        val created = BrowserSession(origin, allowedHosts, webView, navigation)
         session = created
         if (target.host.lowercase() in OFFICIAL_HOSTS) {
             bootstrap(created)
@@ -117,7 +132,7 @@ internal class WebViewApplicationPageTransport(
         if (host in OFFICIAL_HOSTS) OFFICIAL_HOSTS else setOf(host)
 
     @SuppressLint("SetJavaScriptEnabled")
-    private suspend fun createWebView(allowedHosts: Set<String>): WebView = withContext(Dispatchers.Main.immediate) {
+    private suspend fun createWebView(allowedHosts: Set<String>, navigation: NavigationState): WebView = withContext(Dispatchers.Main.immediate) {
         WebView(appContext).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
@@ -143,11 +158,17 @@ internal class WebViewApplicationPageTransport(
 
                 override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
                     fixtureDiagnostic?.invoke("load_error code=${error.errorCode} main=${request.isForMainFrame} url=${diagnosticUrl(request.url.toString())}")
+                    if (isCurrentMainFrame(request, allowedHosts, navigation)) {
+                        navigation.loadError = error.errorCode
+                    }
                     super.onReceivedError(view, request, error)
                 }
 
                 override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, response: WebResourceResponse) {
                     fixtureDiagnostic?.invoke("http_error status=${response.statusCode} main=${request.isForMainFrame} url=${diagnosticUrl(request.url.toString())}")
+                    if (isCurrentMainFrame(request, allowedHosts, navigation)) {
+                        navigation.httpStatus = response.statusCode
+                    }
                     super.onReceivedHttpError(view, request, response)
                 }
 
@@ -199,14 +220,16 @@ internal class WebViewApplicationPageTransport(
         val headers = referer?.takeIf { isAllowedUrl(current, it) }?.let { mapOf("Referer" to it) }.orEmpty()
         withContext(Dispatchers.Main.immediate) {
             current.hasNavigated = true
+            current.navigation.begin(url)
             current.webView.loadUrl(url, headers)
         }
         var completed: PageResult? = null
         while (completed == null) {
+            navigationFailure(current)?.let { return@withTimeout it }
             val snapshot = pageSnapshot(current.webView)
             fixtureDiagnostic?.invoke(
                 "snapshot ready=${snapshot?.optString("ready")} url=${diagnosticUrl(snapshot?.optString("url"))} " +
-                    "requested=${snapshot?.let { isRequestedDocument(current, url, it.optString("url")) }} " +
+                    "requested=${snapshot?.let { isRequestedDocument(current.allowedHosts, url, it.optString("url")) }} " +
                     "timeOrigin=${snapshot?.optDouble("timeOrigin", 0.0)} previous=$previousTimeOrigin first=$isFirstNavigation " +
                     "dcl=${snapshot?.optBoolean("domContentLoaded")} searchRows=${snapshot?.optBoolean("hasSearchRows")} tagRows=${snapshot?.optBoolean("hasTagRows")}",
             )
@@ -225,7 +248,7 @@ internal class WebViewApplicationPageTransport(
                     },
                     isFirstNavigation,
                 ) &&
-                isRequestedDocument(current, url, snapshot.optString("url"))
+                isRequestedDocument(current.allowedHosts, url, snapshot.optString("url"))
             ) {
                 val body = pageHtml(current.webView)
                 if (body != null) {
@@ -235,7 +258,10 @@ internal class WebViewApplicationPageTransport(
                             snapshot.optString("ready"), body, url, hasUsableSearchResults,
                         )
                     }
-                    if (contentReady) completed = PageResult(200, snapshot.optString("url"), body)
+                    if (contentReady) {
+                        completed = navigationFailure(current)
+                            ?: PageResult(200, snapshot.optString("url"), body)
+                    }
                 }
             }
             if (completed == null) delay(POLL_MILLIS)
@@ -243,8 +269,25 @@ internal class WebViewApplicationPageTransport(
         completed
     }
 
+    private fun isCurrentMainFrame(
+        request: WebResourceRequest,
+        allowedHosts: Set<String>,
+        navigation: NavigationState,
+    ): Boolean = request.isForMainFrame &&
+        navigation.requestedUrl?.let {
+            isRequestedDocument(allowedHosts, it, request.url.toString())
+        } == true
+
+    private suspend fun navigationFailure(current: BrowserSession): PageResult? =
+        withContext(Dispatchers.Main.immediate) {
+            current.navigation.loadError?.let { throw IllegalStateException("WEBVIEW_ERROR_$it") }
+            current.navigation.httpStatus.takeIf { it >= 400 }?.let {
+                PageResult(it, current.navigation.requestedUrl.orEmpty(), "")
+            }
+        }
+
     private fun isRequestedDocument(
-        current: BrowserSession,
+        allowedHosts: Set<String>,
         requestedUrl: String,
         observedUrl: String,
     ): Boolean = runCatching {
@@ -252,7 +295,7 @@ internal class WebViewApplicationPageTransport(
         val observed = Uri.parse(observedUrl)
         if (
             !observed.scheme.equals("https", ignoreCase = true) ||
-            observed.host.orEmpty().lowercase() !in current.allowedHosts ||
+            observed.host.orEmpty().lowercase() !in allowedHosts ||
             requested.path.orEmpty() != observed.path.orEmpty()
         ) {
             return@runCatching false

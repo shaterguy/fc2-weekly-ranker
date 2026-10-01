@@ -435,7 +435,7 @@ class AvseeClient(
     suspend fun searchTagPosts(
         baseUrl: String,
         query: String,
-        boardTable: String? = null,
+        boardTable: String = "javc",
     ): List<RemoteTagPost> = withContext(ioDispatcher) {
         val term = query.trim()
         require(term.isNotEmpty()) { "태그를 입력해 주세요." }
@@ -483,7 +483,7 @@ class AvseeClient(
         baseUrl: String,
         query: String,
         page: Int,
-        boardTable: String = "javc",
+        boardTable: String? = null,
     ): String {
         require(page >= 1)
         val term = query.trim()

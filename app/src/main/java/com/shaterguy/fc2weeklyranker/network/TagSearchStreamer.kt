@@ -44,7 +44,7 @@ class TagSearchStreamer(
         val term = query.trim()
         require(term.isNotEmpty()) { "태그를 입력해 주세요." }
 
-        val firstUrl = parser.buildTagSearchUrl(baseUrl, term, 1)
+        val firstUrl = parser.buildTagSearchUrl(baseUrl, term, 1, boardTable)
         val first = withContextIo {
             parser.parseTagPage(parser.fetchApplicationPage(firstUrl), firstUrl, boardTable)
         }
@@ -74,7 +74,7 @@ class TagSearchStreamer(
                 while (inFlight.size < MAX_CONCURRENT_HTTP_REQUESTS && nextPage <= discoveredLastPage) {
                     val currentPage = nextPage++
                     inFlight[currentPage] = async(ioDispatcher) {
-                        val pageUrl = parser.buildTagSearchUrl(baseUrl, term, currentPage)
+                        val pageUrl = parser.buildTagSearchUrl(baseUrl, term, currentPage, boardTable)
                         parser.parseTagPage(parser.fetchApplicationPage(pageUrl, firstUrl), pageUrl, boardTable)
                     }
                 }

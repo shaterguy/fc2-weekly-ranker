@@ -46,4 +46,15 @@ class ApplicationSearchContentReadinessTest {
         assertTrue(accepts(searchPlaceholder, searchUrl, "complete"))
         assertTrue(accepts(tagPlaceholder, tagUrl, "complete"))
     }
+
+    @Test fun currentSearchResultRowBecomesUsable() {
+        val html = "<ul class='search-results'><li class='search-result'><div class='search-result-title'><a href='/bbs/board.php?bo_table=javfc2&amp;wr_id=42'>Current result</a></div></li></ul>"
+        assertTrue(accepts(html, searchUrl))
+    }
+
+    @Test fun currentTagResultRowWithLabeledMetricsBecomesUsable() {
+        val html = "<ul class='tag-results'><li class='tag-result'><div class='tag-result-title'><a href='/bbs/board.php?bo_table=javc&amp;wr_id=42'>Current tag</a></div><div class='tag-result-meta'>댓글 2 조회 10 추천 1</div></li></ul>"
+        assertTrue(accepts(html, tagUrl))
+    }
+
 }

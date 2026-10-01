@@ -435,12 +435,12 @@ class AvseeClient(
     suspend fun searchTagPosts(
         baseUrl: String,
         query: String,
-        boardTable: String = "javc",
+        boardTable: String? = null,
     ): List<RemoteTagPost> = withContext(ioDispatcher) {
         val term = query.trim()
         require(term.isNotEmpty()) { "태그를 입력해 주세요." }
 
-        val firstUrl = buildTagSearchUrl(baseUrl, term, 1)
+        val firstUrl = buildTagSearchUrl(baseUrl, term, 1, boardTable)
         val first = parseTagPage(fetch(firstUrl), firstUrl, boardTable)
         val out = LinkedHashMap<String, RemoteTagPost>()
         first.posts.forEach { post -> out.putIfAbsent(post.id, post) }
@@ -453,7 +453,7 @@ class AvseeClient(
             val parsedPages = coroutineScope {
                 (page..batchEnd).map { currentPage ->
                     async {
-                        val pageUrl = buildTagSearchUrl(baseUrl, term, currentPage)
+                        val pageUrl = buildTagSearchUrl(baseUrl, term, currentPage, boardTable)
                         parseTagPage(fetch(pageUrl, firstUrl), pageUrl, boardTable)
                     }
                 }.awaitAll()
@@ -476,22 +476,30 @@ class AvseeClient(
         require(page >= 1)
         val encoded = URLEncoder.encode(query.trim(), "UTF-8").replace("+", "%20")
         val onetable = boardTable
-        return "$baseUrl$SEARCH_PATH?sfl=wr_subject%7C%7Cwr_content&stx=$encoded&sop=and&result_type=all&result_sort=newest&gr_id=&srows=100&onetable=$onetable&page=$page"
+        return "$baseUrl$SEARCH_PATH?sfl=wr_subject%7C%7Cwr_content&stx=$encoded&sop=and&result_type=all&result_sort=newest&gr_id=&srows=1000&onetable=$onetable&page=$page"
     }
 
-    internal fun buildTagSearchUrl(baseUrl: String, query: String, page: Int): String {
+    internal fun buildTagSearchUrl(
+        baseUrl: String,
+        query: String,
+        page: Int,
+        boardTable: String = "javc",
+    ): String {
         require(page >= 1)
         val term = query.trim()
         require(term.isNotEmpty())
         val encoded = URLEncoder.encode(term, "UTF-8")
-        return "$baseUrl$TAG_PATH?q=$encoded&eq=&onetable=&result_sort=newest&page=$page"
+        return "$baseUrl$TAG_PATH?q=$encoded&eq=&onetable=${boardTable.orEmpty()}&result_sort=newest&page=$page"
     }
 
     internal fun hasUsableApplicationSearchResults(html: String, pageUrl: String): Boolean =
         when (URI(pageUrl).path) {
             SEARCH_PATH -> parseSearchPage(html, pageUrl).posts.isNotEmpty()
-            TAG_PATH -> parseTagPage(html, pageUrl, "javfc2").posts.isNotEmpty() ||
-                parseTagPage(html, pageUrl, "javc").posts.isNotEmpty()
+            TAG_PATH -> parseTagPage(
+                html,
+                pageUrl,
+                decodedQueryParam(pageUrl, "onetable")?.takeIf(String::isNotBlank) ?: "javc",
+            ).posts.isNotEmpty()
             else -> false
         }
 
@@ -499,8 +507,8 @@ class AvseeClient(
         val doc = Jsoup.parse(html, pageUrl)
         val posts = LinkedHashMap<String, RemoteSearchPost>()
         val boardTable = decodedQueryParam(pageUrl, "onetable")?.takeIf(String::isNotBlank) ?: "javfc2"
-        doc.select("#at-main .search-media .media").forEach { row ->
-            val link = row.select(".media-heading a[href]")
+        doc.select(".search-results .search-result, #at-main .search-media .media").forEach { row ->
+            val link = row.select(".search-result-title a[href], .media-heading a[href]")
                 .firstOrNull { postIdFromUrl(it.absUrl("href"), boardTable) != null }
                 ?: return@forEach
             val url = link.absUrl("href").takeIf(String::isNotBlank) ?: return@forEach
@@ -531,14 +539,16 @@ class AvseeClient(
     internal fun parseTagPage(html: String, pageUrl: String, boardTable: String = "javc"): TagPage {
         val doc = Jsoup.parse(html, pageUrl)
         val posts = LinkedHashMap<String, RemoteTagPost>()
-        doc.select(".tagbox-media .media, .post-wrap .media").forEach { row ->
-            val link = row.select(".media-heading a[href], a[href]")
+        doc.select(".tag-results .tag-result, .tagbox-media .media, .post-wrap .media").forEach { row ->
+            val preferredLinks = row.select(".tag-result-title a[href], .media-heading a[href]")
+            val candidateLinks = if (preferredLinks.isNotEmpty()) preferredLinks else row.select("a[href]")
+            val link = candidateLinks
                 .firstOrNull { postIdFromUrl(it.absUrl("href"), boardTable) != null }
                 ?: return@forEach
             val url = link.absUrl("href").takeIf(String::isNotBlank) ?: return@forEach
             val id = postIdFromUrl(url, boardTable) ?: return@forEach
             val title = link.text().trim().takeIf(String::isNotBlank) ?: "게시물 $id"
-            val (commentCount, viewCount) = parseTagMetrics(row.selectFirst(".media-info")) ?: return@forEach
+            val (commentCount, viewCount) = parseTagMetrics(row.selectFirst(".tag-result-meta, .media-info")) ?: return@forEach
             posts.putIfAbsent(
                 id,
                 RemoteTagPost(
@@ -552,13 +562,12 @@ class AvseeClient(
         }
 
         val currentPage = decodedQueryParam(pageUrl, "page")?.toIntOrNull()?.coerceAtLeast(1) ?: 1
-        val signature = tagSignature(pageUrl)
         val totalPages = doc.select("a[href]")
             .mapNotNull { link ->
                 val url = link.absUrl("href").takeIf(String::isNotBlank) ?: return@mapNotNull null
                 val uri = runCatching { URI(url) }.getOrNull() ?: return@mapNotNull null
                 if (!uri.path.orEmpty().endsWith(TAG_PATH)) return@mapNotNull null
-                if (tagSignature(url) != signature) return@mapNotNull null
+                if (!tagPaginationMatches(pageUrl, url)) return@mapNotNull null
                 decodedQueryParam(url, "page")?.toIntOrNull()
             }
             .maxOrNull()
@@ -657,8 +666,15 @@ class AvseeClient(
     }
 
     private fun parseTagMetrics(info: Element?): Pair<Int, Int>? {
-        if (info == null || info.selectFirst(".fa-comment") == null || info.selectFirst(".fa-eye") == null) return null
-        val metrics = COUNT_TOKEN.findAll(info.text())
+        if (info == null) return null
+        val text = info.text()
+        val labeledComment = Regex("댓글\\s*[:：]?\\s*(\\d{1,3}(?:,\\d{3})*|\\d+)")
+            .find(text)?.groupValues?.getOrNull(1)?.replace(",", "")?.toIntOrNull()
+        val labeledView = Regex("조회\\s*[:：]?\\s*(\\d{1,3}(?:,\\d{3})*|\\d+)")
+            .find(text)?.groupValues?.getOrNull(1)?.replace(",", "")?.toIntOrNull()
+        if (labeledComment != null && labeledView != null) return labeledComment to labeledView
+        if (info.selectFirst(".fa-comment") == null || info.selectFirst(".fa-eye") == null) return null
+        val metrics = COUNT_TOKEN.findAll(text)
             .mapNotNull { match -> match.value.replace(",", "").toIntOrNull() }
             .toList()
         if (metrics.size < 2) return null
@@ -977,10 +993,19 @@ class AvseeClient(
     }
 
     private fun searchSignature(url: String): List<String> =
-        listOf("sfl", "stx", "sop", "gr_id", "srows", "onetable").map { key -> decodedQueryParam(url, key).orEmpty() }
+        listOf("sfl", "stx", "sop", "result_type", "result_sort", "gr_id", "srows", "onetable")
+            .map { key -> decodedQueryParam(url, key).orEmpty() }
 
-    private fun tagSignature(url: String): List<String> =
-        listOf("q", "eq").map { key -> decodedQueryParam(url, key).orEmpty() }
+    private fun tagPaginationMatches(currentUrl: String, candidateUrl: String): Boolean {
+        if (listOf("q", "eq").any { key ->
+                decodedQueryParam(currentUrl, key).orEmpty() != decodedQueryParam(candidateUrl, key).orEmpty()
+            }
+        ) return false
+        return listOf("onetable", "result_sort").all { key ->
+            val candidate = decodedQueryParam(candidateUrl, key)
+            candidate == null || candidate == decodedQueryParam(currentUrl, key)
+        }
+    }
 
     private fun boardTableFromUrl(url: String): String? {
         decodedQueryParam(url, "bo_table")?.takeIf { it == "javfc2" || it == "javc" }?.let { return it }

@@ -325,8 +325,8 @@ internal class WebViewApplicationPageTransport(
                 ready: document.readyState,
                 timeOrigin: performance.timeOrigin || 0,
                 domContentLoaded: (performance.getEntriesByType("navigation")[0] || {}).domContentLoadedEventEnd > 0,
-                hasSearchRows: !!document.querySelector("#at-main .search-media .media"),
-                hasTagRows: !!document.querySelector(".tagbox-media .media, .post-wrap .media"),
+                hasSearchRows: !!document.querySelector(".search-results .search-result, #at-main .search-media .media"),
+                hasTagRows: !!document.querySelector(".tag-results .tag-result, .tagbox-media .media, .post-wrap .media"),
                 text: (document.body ? document.body.innerText : "").slice(0, 500)
             })""",
         )

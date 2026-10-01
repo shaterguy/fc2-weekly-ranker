@@ -14,14 +14,15 @@ class SearchParserTest {
         val url = client.buildSearchUrl("https://example.test", "한글 test", 3)
         assertTrue(url.startsWith("https://example.test/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx="))
         assertTrue(url.contains("%ED%95%9C%EA%B8%80%20test"))
-        assertTrue(url.contains("&sop=and&result_type=all&result_sort=newest&gr_id=&srows=100&onetable=javfc2&page=3"))
+        assertTrue(url.contains("&sop=and&result_type=all&result_sort=newest&gr_id=&srows=1000&onetable=javfc2&page=3"))
+        assertFalse(url.contains("srows=10&"))
         assertFalse(url.contains("+"))
     }
 
     @Test
     fun `builds JAV search url with javc onetable`() {
         val url = client.buildSearchUrl("https://example.test", "needle", 2, "javc")
-        assertTrue(url.contains("&sop=and&result_type=all&result_sort=newest&gr_id=&srows=100&onetable=javc&page=2"))
+        assertTrue(url.contains("&sop=and&result_type=all&result_sort=newest&gr_id=&srows=1000&onetable=javc&page=2"))
     }
 
     @Test
@@ -62,11 +63,11 @@ class SearchParserTest {
                 <a href='./board.php?bo_table=javfc2&wr_id=999'>sidebar recommendation</a>
               </div>
             </div>
-            <a href='/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=needle&sop=and&gr_id=&srows=100&onetable=javfc2&page=2'>2</a>
-            <a href='/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=needle&sop=and&gr_id=&srows=100&onetable=javfc2&page=9'>last</a>
-            <a href='/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=other&sop=and&gr_id=&srows=100&onetable=javfc2&page=999'>unrelated search</a>
+            <a href='/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=needle&sop=and&gr_id=&srows=1000&onetable=javfc2&page=2'>2</a>
+            <a href='/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=needle&sop=and&gr_id=&srows=1000&onetable=javfc2&page=9'>last</a>
+            <a href='/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=other&sop=and&gr_id=&srows=1000&onetable=javfc2&page=999'>unrelated search</a>
         """.trimIndent()
-        val pageUrl = "https://example.test/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=needle&sop=and&gr_id=&srows=100&onetable=javfc2&page=1"
+        val pageUrl = "https://example.test/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=needle&sop=and&gr_id=&srows=1000&onetable=javfc2&page=1"
 
         val parsed = client.parseSearchPage(html, pageUrl)
 
@@ -94,7 +95,7 @@ class SearchParserTest {
               </div>
             </div>
         """.trimIndent()
-        val pageUrl = "https://example.test/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=needle&sop=and&gr_id=&srows=100&onetable=javc&page=1"
+        val pageUrl = "https://example.test/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=needle&sop=and&gr_id=&srows=1000&onetable=javc&page=1"
 
         val parsed = client.parseSearchPage(html, pageUrl)
 
@@ -107,7 +108,7 @@ class SearchParserTest {
 
     @Test
     fun `empty FC2 search is a normal completed first page`() {
-        val pageUrl = "https://example.test/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=no-result&sop=and&gr_id=&srows=100&onetable=javfc2&page=1"
+        val pageUrl = "https://example.test/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=no-result&sop=and&gr_id=&srows=1000&onetable=javfc2&page=1"
 
         val parsed = client.parseSearchPage("<div id='at-main'></div>", pageUrl)
 
@@ -117,8 +118,8 @@ class SearchParserTest {
 
     @Test
     fun `uses current page when pagination has no later matching link`() {
-        val pageUrl = "https://example.test/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=needle&sop=and&gr_id=&srows=100&onetable=javfc2&page=4"
-        val html = "<div id='at-main'></div><a href='/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=other&sop=and&gr_id=&srows=100&onetable=javfc2&page=100'>other</a>"
+        val pageUrl = "https://example.test/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=needle&sop=and&gr_id=&srows=1000&onetable=javfc2&page=4"
+        val html = "<div id='at-main'></div><a href='/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=other&sop=and&gr_id=&srows=1000&onetable=javfc2&page=100'>other</a>"
         assertEquals(4, client.parseSearchPage(html, pageUrl).totalPages)
     }
 
@@ -131,4 +132,31 @@ class SearchParserTest {
         assertEquals(listOf("123"), parsed.posts.map { it.id })
         assertEquals("https://example.test/javfc2/123", parsed.posts.single().url)
     }
+
+    @Test
+    fun `current search-result DOM parses duplicate hits and matching pagination only`() {
+        val html = """
+            <ul class='search-results'>
+              <li class='search-result'>
+                <div class='search-result-title'><a href='/bbs/board.php?bo_table=javfc2&wr_id=501#c_1'>Current result</a></div>
+                <div class='search-excerpt'>matched excerpt</div>
+              </li>
+              <li class='search-result'>
+                <div class='search-result-title'><a href='/bbs/board.php?bo_table=javfc2&wr_id=501#c_2'>Current result duplicate</a></div>
+              </li>
+              <li class='search-result'>
+                <div class='search-result-title'><a href='/bbs/board.php?bo_table=javc&wr_id=777'>Other board</a></div>
+              </li>
+            </ul>
+            <a href='/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=needle&sop=and&result_type=all&result_sort=newest&gr_id=&srows=1000&onetable=javfc2&page=6'>6</a>
+            <a href='/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=needle&sop=and&result_type=all&result_sort=oldest&gr_id=&srows=1000&onetable=javfc2&page=99'>wrong sort</a>
+        """.trimIndent()
+        val pageUrl = "https://example.test/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=needle&sop=and&result_type=all&result_sort=newest&gr_id=&srows=1000&onetable=javfc2&page=2"
+        val parsed = client.parseSearchPage(html, pageUrl)
+        assertEquals(6, parsed.totalPages)
+        assertEquals(1, parsed.posts.size)
+        assertEquals("501", parsed.posts.single().id)
+        assertEquals(2, parsed.posts.single().occurrenceCount)
+    }
+
 }

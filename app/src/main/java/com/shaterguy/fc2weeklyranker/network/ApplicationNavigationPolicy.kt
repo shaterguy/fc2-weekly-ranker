@@ -59,10 +59,18 @@ internal fun isMatchingApplicationDocument(
             same(req, obs, "sfl") &&
                 same(req, obs, "stx") &&
                 same(req, obs, "sop") &&
+                same(req, obs, "result_type") &&
+                same(req, obs, "result_sort") &&
+                same(req, obs, "gr_id") &&
+                same(req, obs, "srows") &&
                 same(req, obs, "onetable") &&
                 page(req) == page(obs)
         "/bbs/tag.php" ->
-            same(req, obs, "q") && page(req) == page(obs)
+            same(req, obs, "q") &&
+                same(req, obs, "eq") &&
+                same(req, obs, "onetable") &&
+                same(req, obs, "result_sort") &&
+                page(req) == page(obs)
         else -> req == obs
     }
 }.getOrDefault(false)

@@ -35,21 +35,25 @@ class ApplicationNavigationPolicyTest {
         assertFalse(isAuthenticationRedirect("https://example.invalid/bbs/login.php"))
     }
 
-    @Test fun generalSearchCanonicalizationPreservesSearchBoardAndPageIdentity() {
-        val requested = "https://02.avsee.is/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=needle&sop=and&result_type=all&result_sort=newest&gr_id=&srows=100&onetable=javfc2&page=2"
-        val observed = "https://02.avsee.is/bbs/search.php?onetable=javfc2&page=2&stx=needle&sop=and&sfl=wr_subject%7C%7Cwr_content&server_default=1"
+    @Test fun generalSearchCanonicalizationPreservesSearchBoardSortSizeAndPageIdentity() {
+        val requested = "https://02.avsee.is/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=needle&sop=and&result_type=all&result_sort=newest&gr_id=&srows=1000&onetable=javfc2&page=2"
+        val observed = "https://02.avsee.is/bbs/search.php?onetable=javfc2&page=2&stx=needle&sop=and&sfl=wr_subject%7C%7Cwr_content&result_type=all&result_sort=newest&gr_id=&srows=1000&server_default=1"
         assertTrue(isMatchingApplicationDocument(hosts, requested, observed))
         assertFalse(isMatchingApplicationDocument(hosts, requested, observed.replace("stx=needle", "stx=other")))
         assertFalse(isMatchingApplicationDocument(hosts, requested, observed.replace("onetable=javfc2", "onetable=javc")))
+        assertFalse(isMatchingApplicationDocument(hosts, requested, observed.replace("result_sort=newest", "result_sort=oldest")))
+        assertFalse(isMatchingApplicationDocument(hosts, requested, observed.replace("srows=1000", "srows=10")))
         assertFalse(isMatchingApplicationDocument(hosts, requested, observed.replace("page=2", "page=3")))
         assertFalse(isMatchingApplicationDocument(hosts, requested, observed.replace("02.avsee.is", "example.invalid")))
     }
 
-    @Test fun tagCanonicalizationNeedsOnlyTagAndPageIdentity() {
-        val requested = "https://02.avsee.is/bbs/tag.php?q=%23tag&eq=&onetable=&result_sort=newest&page=2"
-        val observed = "https://02.avsee.is/bbs/tag.php?page=2&q=%23tag"
+    @Test fun tagCanonicalizationPreservesTagBoardSortAndPageIdentity() {
+        val requested = "https://02.avsee.is/bbs/tag.php?q=%23tag&eq=&onetable=javc&result_sort=newest&page=2"
+        val observed = "https://02.avsee.is/bbs/tag.php?page=2&q=%23tag&eq=&onetable=javc&result_sort=newest&server_default=1"
         assertTrue(isMatchingApplicationDocument(hosts, requested, observed))
         assertFalse(isMatchingApplicationDocument(hosts, requested, observed.replace("q=%23tag", "q=other")))
+        assertFalse(isMatchingApplicationDocument(hosts, requested, observed.replace("onetable=javc", "onetable=javfc2")))
+        assertFalse(isMatchingApplicationDocument(hosts, requested, observed.replace("result_sort=newest", "result_sort=oldest")))
         assertFalse(isMatchingApplicationDocument(hosts, requested, observed.replace("page=2", "page=3")))
     }
 }

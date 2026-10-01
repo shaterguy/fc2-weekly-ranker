@@ -75,7 +75,6 @@ object AppGraph {
             httpClient,
             applicationPageTransport = WebViewApplicationPageTransport(
                 app,
-                AvseeClient.USER_AGENT,
                 hasUsableSearchResults = { html, pageUrl ->
                     sourceClient.hasUsableApplicationSearchResults(html, pageUrl)
                 },

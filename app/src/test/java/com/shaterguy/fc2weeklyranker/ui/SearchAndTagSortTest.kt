@@ -64,4 +64,11 @@ class SearchAndTagSortTest {
         assertTrue(isVisitedPost(ContentMode.JAV.localPostId("456"), visited))
         assertFalse(isVisitedPost(ContentMode.FC2.localPostId("456"), visited))
     }
+    @Test
+    fun `authentication diagnostic exposes login action only for typed general failure`() {
+        assertTrue(searchNeedsAuthentication("검색 실패: 사이트 로그인이 필요합니다. [DOCUMENT/AUTHENTICATION_REQUIRED]"))
+        assertFalse(searchNeedsAuthentication("검색 실패: 페이지 요청에 실패했습니다. [DOCUMENT/HTTP_403]"))
+        assertFalse(searchNeedsAuthentication(null))
+    }
+
 }

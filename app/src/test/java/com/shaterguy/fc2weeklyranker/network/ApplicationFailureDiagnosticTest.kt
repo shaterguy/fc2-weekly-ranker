@@ -31,6 +31,14 @@ class ApplicationFailureDiagnosticTest {
         assertFalse(failure.message.orEmpty().contains("private"))
     }
 
+    @Test fun authenticationFailureHasSafeTypedMessage() {
+        val failure = PageLoadException(PageFailureStage.DOCUMENT, PageFailureReason.AUTHENTICATION)
+        assertEquals(
+            "사이트 로그인이 필요합니다. [DOCUMENT/AUTHENTICATION_REQUIRED]",
+            safeApplicationFailureMessage(failure),
+        )
+    }
+
     @Test fun invalidCodesAreNotDisplayed() {
         assertEquals("페이지 요청에 실패했습니다. [DOCUMENT/HTTP_UNKNOWN]",
             safeApplicationFailureMessage(PageLoadException(PageFailureStage.DOCUMENT, PageFailureReason.HTTP, 999999)))

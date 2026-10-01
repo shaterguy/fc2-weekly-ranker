@@ -13,7 +13,7 @@ class JavTagParserTest {
         val url = client.buildTagSearchUrl("https://example.test", "#거유 배우", 2)
 
         assertEquals(
-            "https://example.test/bbs/tag.php?q=%23%EA%B1%B0%EC%9C%A0+%EB%B0%B0%EC%9A%B0&eq=&page=2",
+            "https://example.test/bbs/tag.php?q=%23%EA%B1%B0%EC%9C%A0+%EB%B0%B0%EC%9A%B0&eq=&onetable=&result_sort=newest&page=2",
             url,
         )
     }

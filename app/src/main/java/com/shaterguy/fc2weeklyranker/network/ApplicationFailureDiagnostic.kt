@@ -6,7 +6,7 @@ import java.util.Collections
 import java.util.IdentityHashMap
 
 internal enum class PageFailureStage { SESSION, DOCUMENT }
-internal enum class PageFailureReason { HTTP, WEBVIEW, TIMEOUT, ERROR }
+internal enum class PageFailureReason { AUTHENTICATION, HTTP, WEBVIEW, TIMEOUT, ERROR }
 
 // Only enums and bounded numeric codes form the user-visible diagnostic.
 // Never interpolate exception messages, addresses, page content, or request data.
@@ -30,12 +30,14 @@ private fun pageFailureMessage(stage: PageFailureStage, reason: PageFailureReaso
         else -> null
     }
     val detail = when (reason) {
+        PageFailureReason.AUTHENTICATION -> "AUTHENTICATION_REQUIRED"
         PageFailureReason.HTTP -> "HTTP_${safeCode ?: "UNKNOWN"}"
         PageFailureReason.WEBVIEW -> "WEBVIEW_ERROR_${safeCode ?: "UNKNOWN"}"
         PageFailureReason.TIMEOUT -> "TIMEOUT"
         PageFailureReason.ERROR -> "ERROR"
     }
     val description = when (reason) {
+        PageFailureReason.AUTHENTICATION -> "사이트 로그인이 필요합니다."
         PageFailureReason.HTTP -> "페이지 요청에 실패했습니다."
         PageFailureReason.WEBVIEW -> "페이지를 불러오지 못했습니다."
         PageFailureReason.TIMEOUT -> "페이지 응답 시간이 초과되었습니다."

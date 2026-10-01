@@ -1,11 +1,18 @@
 package com.shaterguy.fc2weeklyranker.ui
 
+import android.annotation.SuppressLint
+import android.webkit.CookieManager
+import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -31,7 +38,11 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
 import com.shaterguy.fc2weeklyranker.network.RemoteSearchPost
+import com.shaterguy.fc2weeklyranker.network.isOfficialApplicationUrl
+import com.shaterguy.fc2weeklyranker.network.officialApplicationStartUrl
 
 internal enum class SearchSortMode { FIRST_SEEN, OCCURRENCE }
 
@@ -50,6 +61,9 @@ internal fun sortSearchResults(
 
 internal fun isVisitedPost(postId: String, visitedPostIds: Set<String>): Boolean = postId in visitedPostIds
 
+internal fun searchNeedsAuthentication(message: String?): Boolean =
+    message?.contains("[DOCUMENT/AUTHENTICATION_REQUIRED]") == true
+
 @Composable
 fun SearchScreen(
     vm: MainViewModel,
@@ -63,9 +77,12 @@ fun SearchScreen(
     val message by vm.searchMessage.collectAsState()
     val openingPostId by vm.searchOpeningPostId.collectAsState()
     val visitedPostIds by vm.visitedPostIds.collectAsState()
+    val baseUrl by vm.baseUrl.collectAsState()
     var query by rememberSaveable(mode.sourceKey) { mutableStateOf("") }
     var hasSearched by rememberSaveable(mode.sourceKey) { mutableStateOf(false) }
+    var showLogin by rememberSaveable(mode.sourceKey) { mutableStateOf(false) }
     var sortName by rememberSaveable(mode.sourceKey) { mutableStateOf(SearchSortMode.FIRST_SEEN.name) }
+    val loginStartUrl = remember(baseUrl) { officialApplicationStartUrl(baseUrl) }
     val sortMode = remember(sortName) {
         runCatching { SearchSortMode.valueOf(sortName) }.getOrDefault(SearchSortMode.FIRST_SEEN)
     }
@@ -77,6 +94,25 @@ fun SearchScreen(
             if (query.isBlank() || loading) query = restored
             hasSearched = true
         }
+    }
+
+    if (showLogin && loginStartUrl != null) {
+        ApplicationLoginDialog(
+            startUrl = loginStartUrl,
+            onDismiss = {
+                CookieManager.getInstance().flush()
+                showLogin = false
+            },
+            onDone = {
+                CookieManager.getInstance().flush()
+                showLogin = false
+                vm.clearSearchMessage()
+                if (query.isNotBlank()) {
+                    hasSearched = true
+                    vm.searchPosts(query)
+                }
+            },
+        )
     }
 
     Column(
@@ -162,7 +198,14 @@ fun SearchScreen(
             }
         }
         if (message != null) {
-            TextButton(onClick = vm::clearSearchMessage) { Text(message!!) }
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                TextButton(onClick = vm::clearSearchMessage) { Text(message!!) }
+                if (searchNeedsAuthentication(message) && loginStartUrl != null) {
+                    Button(onClick = { showLogin = true }) {
+                        Text("사이트 로그인")
+                    }
+                }
+            }
         }
         if (!loading && hasSearched && message == null && displayedResults.isEmpty()) {
             Text("검색 결과가 없습니다.")
@@ -197,6 +240,70 @@ fun SearchScreen(
                             if (openingPostId == post.id) "게시물을 여는 중…" else "앱에서 게시물 보기",
                             style = MaterialTheme.typography.bodySmall,
                         )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@SuppressLint("SetJavaScriptEnabled")
+@Composable
+private fun ApplicationLoginDialog(
+    startUrl: String,
+    onDismiss: () -> Unit,
+    onDone: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Card(Modifier.fillMaxWidth()) {
+            Column(
+                Modifier.fillMaxWidth().padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text("사이트 로그인", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text(
+                    "사이트가 제공하는 로그인 화면입니다. 앱은 비밀번호를 읽거나 저장하지 않습니다.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                AndroidView(
+                    factory = { context ->
+                        WebView(context).apply {
+                            settings.javaScriptEnabled = true
+                            settings.domStorageEnabled = true
+                            settings.javaScriptCanOpenWindowsAutomatically = false
+                            settings.allowFileAccess = false
+                            settings.allowContentAccess = false
+                            settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+                            CookieManager.getInstance().setAcceptCookie(true)
+                            CookieManager.getInstance().setAcceptThirdPartyCookies(this, false)
+                            webViewClient = object : WebViewClient() {
+                                override fun shouldOverrideUrlLoading(
+                                    view: WebView,
+                                    request: WebResourceRequest,
+                                ): Boolean {
+                                    if (!request.isForMainFrame) return false
+                                    return !isOfficialApplicationUrl(request.url.toString())
+                                }
+                            }
+                            loadUrl(startUrl)
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().height(500.dp),
+                    onRelease = { webView ->
+                        webView.stopLoading()
+                        webView.loadUrl("about:blank")
+                        webView.destroy()
+                    },
+                )
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    OutlinedButton(onClick = onDismiss, modifier = Modifier.weight(1f)) {
+                        Text("닫기")
+                    }
+                    Button(onClick = onDone, modifier = Modifier.weight(1f)) {
+                        Text("로그인 완료")
                     }
                 }
             }

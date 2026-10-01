@@ -31,7 +31,7 @@ interface ApplicationPageTransport {
 
 internal class WebViewApplicationPageTransport(
     context: Context,
-    private val userAgent: String,
+    private val userAgent: String? = null,
     private val hasUsableSearchResults: (String, String) -> Boolean = { _, _ -> false },
     private val fixtureResponse: ((WebResourceRequest) -> WebResourceResponse?)? = null,
     private val fixtureDiagnostic: ((String) -> Unit)? = null,
@@ -78,6 +78,9 @@ internal class WebViewApplicationPageTransport(
                 }
                 if (!isChallenge(result)) {
                     if (result.status !in 200..299) {
+                        if (isAuthenticationRequiredSearchResponse(result.status, target.toString())) {
+                            throw PageLoadException(PageFailureStage.DOCUMENT, PageFailureReason.AUTHENTICATION)
+                        }
                         throw PageLoadException(PageFailureStage.DOCUMENT, PageFailureReason.HTTP, result.status)
                     }
                     requireAllowedFinalUrl(current, result.finalUrl)
@@ -93,6 +96,12 @@ internal class WebViewApplicationPageTransport(
             } catch (error: CancellationException) {
                 resetSession()
                 throw error
+            } catch (error: PageLoadException) {
+                if (error.reason == PageFailureReason.AUTHENTICATION) {
+                    resetSession()
+                    throw error
+                }
+                lastFailure = error
             } catch (error: Throwable) {
                 lastFailure = error
             }
@@ -125,14 +134,14 @@ internal class WebViewApplicationPageTransport(
         val webView = createWebView(allowedHosts, navigation)
         val created = BrowserSession(origin, allowedHosts, webView, navigation)
         session = created
-        if (target.host.lowercase() in OFFICIAL_HOSTS) {
+        if (target.host.lowercase() in OFFICIAL_APPLICATION_HOSTS) {
             bootstrap(created)
         }
         return created
     }
 
     private fun allowedHostsFor(host: String): Set<String> =
-        if (host in OFFICIAL_HOSTS) OFFICIAL_HOSTS else setOf(host)
+        if (host in OFFICIAL_APPLICATION_HOSTS) OFFICIAL_APPLICATION_HOSTS else setOf(host)
 
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun createWebView(allowedHosts: Set<String>, navigation: NavigationState): WebView = withContext(Dispatchers.Main.immediate) {
@@ -142,7 +151,7 @@ internal class WebViewApplicationPageTransport(
             settings.allowFileAccess = false
             settings.allowContentAccess = false
             settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-            settings.userAgentString = userAgent
+            userAgent?.takeIf(String::isNotBlank)?.let { settings.userAgentString = it }
             CookieManager.getInstance().setAcceptCookie(true)
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
             webViewClient = object : WebViewClient() {
@@ -230,6 +239,13 @@ internal class WebViewApplicationPageTransport(
         while (completed == null) {
             navigationFailure(current)?.let { return@withTimeout it }
             val snapshot = pageSnapshot(current.webView)
+            if (
+                snapshot != null &&
+                requestedPath == "/bbs/search.php" &&
+                isAuthenticationRedirect(snapshot.optString("url"))
+            ) {
+                throw PageLoadException(PageFailureStage.DOCUMENT, PageFailureReason.AUTHENTICATION)
+            }
             fixtureDiagnostic?.invoke(
                 "snapshot ready=${snapshot?.optString("ready")} url=${diagnosticUrl(snapshot?.optString("url"))} " +
                     "requested=${snapshot?.let { isRequestedDocument(current.allowedHosts, url, it.optString("url")) }} " +
@@ -293,23 +309,7 @@ internal class WebViewApplicationPageTransport(
         allowedHosts: Set<String>,
         requestedUrl: String,
         observedUrl: String,
-    ): Boolean = runCatching {
-        val requested = Uri.parse(requestedUrl)
-        val observed = Uri.parse(observedUrl)
-        if (
-            !observed.scheme.equals("https", ignoreCase = true) ||
-            observed.host.orEmpty().lowercase() !in allowedHosts ||
-            requested.path.orEmpty() != observed.path.orEmpty()
-        ) {
-            return@runCatching false
-        }
-        val requestedNames = requested.queryParameterNames
-        val observedNames = observed.queryParameterNames
-        requestedNames == observedNames &&
-            requestedNames.all { name ->
-                requested.getQueryParameters(name) == observed.getQueryParameters(name)
-            }
-    }.getOrDefault(false)
+    ): Boolean = isMatchingApplicationDocument(allowedHosts, requestedUrl, observedUrl)
 
     private suspend fun pageHtml(webView: WebView): String? {
         val raw = evaluate(webView, "document.documentElement ? document.documentElement.outerHTML : null")
@@ -352,7 +352,7 @@ internal class WebViewApplicationPageTransport(
     }
 
     private fun isChallenge(result: PageResult): Boolean =
-        result.status == 403 || looksLikeChallenge("", result.body)
+        looksLikeChallenge("", result.body)
 
     private fun looksLikeChallenge(title: String, body: String): Boolean {
         val sample = (title + "\n" + body.take(CHALLENGE_SCAN_CHARS)).lowercase()
@@ -391,7 +391,6 @@ internal class WebViewApplicationPageTransport(
     }
 
     companion object {
-        private val OFFICIAL_HOSTS = setOf("01.avsee.is", "02.avsee.is")
         private val READY_STATES = setOf("interactive", "complete")
         private const val CHALLENGE_TITLE = "Just a moment..."
         private const val MAX_SESSION_ATTEMPTS = 2

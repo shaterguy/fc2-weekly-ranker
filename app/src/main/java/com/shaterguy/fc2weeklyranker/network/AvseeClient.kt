@@ -476,7 +476,7 @@ class AvseeClient(
         require(page >= 1)
         val encoded = URLEncoder.encode(query.trim(), "UTF-8").replace("+", "%20")
         val onetable = boardTable
-        return "$baseUrl$SEARCH_PATH?sfl=wr_subject%7C%7Cwr_content&stx=$encoded&sop=and&gr_id=&srows=1000&onetable=$onetable&page=$page"
+        return "$baseUrl$SEARCH_PATH?sfl=wr_subject%7C%7Cwr_content&stx=$encoded&sop=and&result_type=all&result_sort=newest&gr_id=&srows=100&onetable=$onetable&page=$page"
     }
 
     internal fun buildTagSearchUrl(baseUrl: String, query: String, page: Int): String {
@@ -484,7 +484,7 @@ class AvseeClient(
         val term = query.trim()
         require(term.isNotEmpty())
         val encoded = URLEncoder.encode(term, "UTF-8")
-        return "$baseUrl$TAG_PATH?q=$encoded&eq=&page=$page"
+        return "$baseUrl$TAG_PATH?q=$encoded&eq=&onetable=&result_sort=newest&page=$page"
     }
 
     internal fun hasUsableApplicationSearchResults(html: String, pageUrl: String): Boolean =

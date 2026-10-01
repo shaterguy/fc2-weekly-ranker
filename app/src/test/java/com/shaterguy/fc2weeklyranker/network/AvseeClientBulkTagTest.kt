@@ -175,7 +175,7 @@ class AvseeClientBulkTagTest {
         }
         append("</div><ul class='pagination'><li><a href='/bbs/tag.php?q=")
         append(query)
-        append("&eq=&page=")
+        append("&eq=&onetable=javc&result_sort=newest&page=")
         append(totalPages)
         append("'>")
         append(totalPages)

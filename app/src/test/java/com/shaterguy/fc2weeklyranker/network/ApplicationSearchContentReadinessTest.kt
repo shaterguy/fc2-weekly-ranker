@@ -8,7 +8,8 @@ import org.junit.Test
 class ApplicationSearchContentReadinessTest {
     private val parser = AvseeClient(OkHttpClient())
     private val searchUrl = "https://fixture.invalid/bbs/search.php?onetable=javfc2&page=1"
-    private val tagUrl = "https://fixture.invalid/bbs/tag.php?q=fixture&page=1"
+    private val tagJavfc2Url = "https://fixture.invalid/bbs/tag.php?q=fixture&eq=&onetable=javfc2&result_sort=newest&page=1"
+    private val tagJavcUrl = "https://fixture.invalid/bbs/tag.php?q=fixture&eq=&onetable=javc&result_sort=newest&page=1"
     private val searchPlaceholder = "<div id='at-main'><div class='search-media'><div class='media' id='row'></div></div></div>"
     private val tagPlaceholder = "<div class='tagbox-media'><div class='media' id='row'></div></div>"
     private val link = "<h4 class='media-heading'><a href='/bbs/board.php?bo_table=javfc2&amp;wr_id=42'>Synthetic result</a></h4>"
@@ -27,16 +28,16 @@ class ApplicationSearchContentReadinessTest {
         assertFalse(accepts(searchPlaceholder.replace("id='row'>", "id='row'>" + link.replace("javfc2", "javc")), searchUrl))
     }
     @Test fun tagPlaceholderWaitsForItsLink() {
-        assertFalse(accepts(tagPlaceholder, tagUrl))
+        assertFalse(accepts(tagPlaceholder, tagJavcUrl))
     }
     @Test fun tagRowWithoutMetricsStillWaits() {
-        assertFalse(accepts(tagPlaceholder.replace("id='row'>", "id='row'>" + link), tagUrl))
+        assertFalse(accepts(tagPlaceholder.replace("id='row'>", "id='row'>" + link), tagJavfc2Url))
     }
     @Test fun tagRowWithLateLinkAndMetricsBecomesUsable() {
-        assertTrue(accepts(tagPlaceholder.replace("id='row'>", "id='row'>" + link + metrics), tagUrl))
+        assertTrue(accepts(tagPlaceholder.replace("id='row'>", "id='row'>" + link + metrics), tagJavfc2Url))
     }
     @Test fun eitherSupportedTagBoardCanProvideAUsableRow() {
-        assertTrue(accepts(tagPlaceholder.replace("id='row'>", "id='row'>" + link.replace("javfc2", "javc") + metrics), tagUrl))
+        assertTrue(accepts(tagPlaceholder.replace("id='row'>", "id='row'>" + link.replace("javfc2", "javc") + metrics), tagJavcUrl))
     }
     @Test(expected = IllegalStateException::class) fun parserSafetyFailuresAreNotHiddenByReadiness() {
         val excessivePage = "<a href='/bbs/search.php?onetable=javfc2&amp;page=1000001'>Later</a>"
@@ -44,7 +45,7 @@ class ApplicationSearchContentReadinessTest {
     }
     @Test fun completeEmptyPageKeepsTheExistingParserOutcome() {
         assertTrue(accepts(searchPlaceholder, searchUrl, "complete"))
-        assertTrue(accepts(tagPlaceholder, tagUrl, "complete"))
+        assertTrue(accepts(tagPlaceholder, tagJavcUrl, "complete"))
     }
 
     @Test fun currentSearchResultRowBecomesUsable() {
@@ -54,7 +55,7 @@ class ApplicationSearchContentReadinessTest {
 
     @Test fun currentTagResultRowWithLabeledMetricsBecomesUsable() {
         val html = "<ul class='tag-results'><li class='tag-result'><div class='tag-result-title'><a href='/bbs/board.php?bo_table=javc&amp;wr_id=42'>Current tag</a></div><div class='tag-result-meta'>댓글 2 조회 10 추천 1</div></li></ul>"
-        assertTrue(accepts(html, tagUrl))
+        assertTrue(accepts(html, tagJavcUrl))
     }
 
 }

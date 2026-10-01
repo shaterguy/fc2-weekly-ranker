@@ -49,7 +49,7 @@ class TagSearchStreamerTest {
 
     private fun tagPage(page: Int, totalPages: Int): String {
         val pagination = (1..totalPages).joinToString("") { number ->
-            "<a href='/bbs/tag.php?q=sample&eq=&page=$number'>$number</a>"
+            "<a href='/bbs/tag.php?q=sample&eq=&onetable=javc&result_sort=newest&page=$number'>$number</a>"
         }
         return """
             <div class='tagbox-media'>

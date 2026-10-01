@@ -483,7 +483,7 @@ class AvseeClient(
         baseUrl: String,
         query: String,
         page: Int,
-        boardTable: String? = null,
+        boardTable: String = "javc",
     ): String {
         require(page >= 1)
         val term = query.trim()

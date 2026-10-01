@@ -79,7 +79,7 @@ class WebViewApplicationPageTransportInstrumentedTest {
 
     private class SyntheticPage(private val isTag: Boolean, private val holdImage: Boolean, private val currentDom: Boolean) {
         val path = if (isTag) "/bbs/tag.php" else "/bbs/search.php"
-        val url = "https://fixture.invalid$path?${if (isTag) "q=synthetic" else "stx=synthetic&onetable=javfc2"}&page=1"
+        val url = "https://fixture.invalid$path?${if (isTag) "q=synthetic&eq=&onetable=javc&result_sort=newest" else "stx=synthetic&onetable=javfc2"}&page=1"
         val marker = if (isTag) "SELF_RUN_TAG_SEARCH_WEBVIEW_FIXTURE" else "SELF_RUN_GENERAL_SEARCH_WEBVIEW_FIXTURE"
         val imageReadStarted = CountDownLatch(1)
         val releaseImage = CountDownLatch(if (holdImage) 1 else 0)

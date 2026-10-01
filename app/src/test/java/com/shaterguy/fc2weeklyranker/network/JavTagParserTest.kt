@@ -13,7 +13,7 @@ class JavTagParserTest {
         val url = client.buildTagSearchUrl("https://example.test", "#거유 배우", 2)
 
         assertEquals(
-            "https://example.test/bbs/tag.php?q=%23%EA%B1%B0%EC%9C%A0+%EB%B0%B0%EC%9A%B0&eq=&onetable=&result_sort=newest&page=2",
+            "https://example.test/bbs/tag.php?q=%23%EA%B1%B0%EC%9C%A0+%EB%B0%B0%EC%9A%B0&eq=&onetable=javc&result_sort=newest&page=2",
             url,
         )
     }
@@ -94,12 +94,12 @@ class JavTagParserTest {
               </div>
             </div>
             <ul class='pagination'>
-              <li><a href='/bbs/tag.php?q=%EB%AA%A8%EB%AA%A8%ED%83%80+%EB%AF%B8%EC%B8%A0%ED%82%A4&eq=&page=1'>1</a></li>
-              <li><a href='/bbs/tag.php?q=%EB%AA%A8%EB%AA%A8%ED%83%80+%EB%AF%B8%EC%B8%A0%ED%82%A4&eq=&page=6'>6</a></li>
-              <li><a href='/bbs/tag.php?q=other&eq=&page=99'>other</a></li>
+              <li><a href='/bbs/tag.php?q=%EB%AA%A8%EB%AA%A8%ED%83%80+%EB%AF%B8%EC%B8%A0%ED%82%A4&eq=&onetable=javc&result_sort=newest&page=1'>1</a></li>
+              <li><a href='/bbs/tag.php?q=%EB%AA%A8%EB%AA%A8%ED%83%80+%EB%AF%B8%EC%B8%A0%ED%82%A4&eq=&onetable=javc&result_sort=newest&page=6'>6</a></li>
+              <li><a href='/bbs/tag.php?q=other&eq=&onetable=javc&result_sort=newest&page=99'>other</a></li>
             </ul>
         """.trimIndent()
-        val pageUrl = "https://example.test/bbs/tag.php?q=%EB%AA%A8%EB%AA%A8%ED%83%80+%EB%AF%B8%EC%B8%A0%ED%82%A4&eq=&page=2"
+        val pageUrl = "https://example.test/bbs/tag.php?q=%EB%AA%A8%EB%AA%A8%ED%83%80+%EB%AF%B8%EC%B8%A0%ED%82%A4&eq=&onetable=javc&result_sort=newest&page=2"
 
         val parsed = client.parseTagPage(html, pageUrl)
 

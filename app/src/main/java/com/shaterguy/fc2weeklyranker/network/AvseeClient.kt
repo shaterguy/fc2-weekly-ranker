@@ -435,7 +435,7 @@ class AvseeClient(
     suspend fun searchTagPosts(
         baseUrl: String,
         query: String,
-        boardTable: String? = null,
+        boardTable: String = "javc",
     ): List<RemoteTagPost> = withContext(ioDispatcher) {
         val term = query.trim()
         require(term.isNotEmpty()) { "태그를 입력해 주세요." }
@@ -996,16 +996,10 @@ class AvseeClient(
         listOf("sfl", "stx", "sop", "result_type", "result_sort", "gr_id", "srows", "onetable")
             .map { key -> decodedQueryParam(url, key).orEmpty() }
 
-    private fun tagPaginationMatches(currentUrl: String, candidateUrl: String): Boolean {
-        if (listOf("q", "eq").any { key ->
-                decodedQueryParam(currentUrl, key).orEmpty() != decodedQueryParam(candidateUrl, key).orEmpty()
-            }
-        ) return false
-        return listOf("onetable", "result_sort").all { key ->
-            val candidate = decodedQueryParam(candidateUrl, key)
-            candidate == null || candidate == decodedQueryParam(currentUrl, key)
+    private fun tagPaginationMatches(currentUrl: String, candidateUrl: String): Boolean =
+        listOf("q", "eq", "onetable", "result_sort").all { key ->
+            decodedQueryParam(currentUrl, key).orEmpty() == decodedQueryParam(candidateUrl, key).orEmpty()
         }
-    }
 
     private fun boardTableFromUrl(url: String): String? {
         decodedQueryParam(url, "bo_table")?.takeIf { it == "javfc2" || it == "javc" }?.let { return it }

@@ -36,6 +36,8 @@ class CurrentTagParserContractTest {
             <a href='/bbs/tag.php?q=%23sample&eq=&onetable=javc&result_sort=newest&page=420'>420</a>
             <a href='/bbs/tag.php?q=%23sample&eq=&onetable=javfc2&result_sort=newest&page=999'>wrong board</a>
             <a href='/bbs/tag.php?q=%23sample&eq=&onetable=javc&result_sort=oldest&page=998'>wrong sort</a>
+            <a href='/bbs/tag.php?q=%23sample&eq=&result_sort=newest&page=997'>missing board</a>
+            <a href='/bbs/tag.php?q=%23sample&eq=&onetable=javc&page=996'>missing sort</a>
         """.trimIndent()
         val pageUrl = "https://example.test/bbs/tag.php?q=%23sample&eq=&onetable=javc&result_sort=newest&page=2"
 

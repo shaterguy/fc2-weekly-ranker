@@ -9,9 +9,29 @@ import org.junit.Test
 class ApplicationNavigationPolicyTest {
     private val hosts = OFFICIAL_APPLICATION_HOSTS
 
+    @Test fun explicitConfiguredHttpsOriginsHaveLoginWithoutFixedDomainList() {
+        assertEquals("https://03.avsee.is/bbs/login.php", officialApplicationStartUrl("https://03.avsee.is"))
+        assertEquals("https://new-search.example.test/bbs/login.php", officialApplicationStartUrl("https://new-search.example.test"))
+    }
+
+    @Test fun configuredGeneralSearchChallengeAndAuthenticationAreOriginAgnostic() {
+        for (origin in listOf("https://03.avsee.is", "https://new-search.example.test")) {
+            val search = "$origin/bbs/search.php?stx=neutral&onetable=javfc2&page=1"
+            assertTrue(isAuthenticationRequiredSearchResponse(403, search))
+            assertTrue(shouldDeferSearchChallengeHttpFailure(403, search, false, true))
+            assertTrue(shouldResetDeferredSearchChallengeHttpFailure(403, search, search))
+        }
+    }
+
+    @Test fun protectedSearchReloadDoesNotTrustAnotherOrigin() {
+        val requested = "https://02.avsee.is/bbs/search.php?stx=neutral"
+        assertFalse(shouldResetDeferredSearchChallengeHttpFailure(403, requested, requested.replace("02.avsee.is", "01.avsee.is")))
+        assertFalse(shouldResetDeferredSearchChallengeHttpFailure(403, requested, requested.replace("02.avsee.is", "03.avsee.is")))
+    }
+
     @Test fun officialLoginOriginIsHttpsAndAllowlisted() {
         assertEquals("https://02.avsee.is/bbs/login.php", officialApplicationStartUrl("https://02.avsee.is"))
-        assertEquals("https://01.avsee.is/bbs/login.php", officialApplicationStartUrl("https://01.avsee.is/path"))
+        assertNull(officialApplicationStartUrl("https://01.avsee.is/path"))
         assertNull(officialApplicationStartUrl("http://02.avsee.is"))
         assertNull(officialApplicationStartUrl("https://example.invalid"))
         assertTrue(isOfficialApplicationUrl("https://02.avsee.is/bbs/login.php"))
@@ -45,7 +65,7 @@ class ApplicationNavigationPolicyTest {
         val general = "https://02.avsee.is/bbs/search.php?stx=needle&onetable=javfc2&page=1"
 
         assertTrue(shouldResetDeferredSearchChallengeHttpFailure(403, general, "https://02.avsee.is/bbs/search.php"))
-        assertTrue(shouldResetDeferredSearchChallengeHttpFailure(403, general, "https://01.avsee.is/bbs/search.php?stx=needle"))
+        assertFalse(shouldResetDeferredSearchChallengeHttpFailure(403, general, "https://01.avsee.is/bbs/search.php?stx=needle"))
         assertFalse(shouldResetDeferredSearchChallengeHttpFailure(401, general, "https://02.avsee.is/bbs/search.php"))
         assertFalse(shouldResetDeferredSearchChallengeHttpFailure(403, general, "https://02.avsee.is/bbs/login.php"))
         assertFalse(shouldResetDeferredSearchChallengeHttpFailure(403, general, "https://example.invalid/bbs/search.php"))

@@ -1,8 +1,11 @@
 package com.shaterguy.fc2weeklyranker.ui
 
 import android.app.Application
+import android.net.Uri
 import android.view.View
 import android.view.ViewGroup
+import android.webkit.CookieManager
+import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasAnySibling
@@ -14,6 +17,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.room.Room
+import androidx.lifecycle.ViewModelProvider
 import androidx.test.core.app.ApplicationProvider
 import com.shaterguy.fc2weeklyranker.AppGraph
 import com.shaterguy.fc2weeklyranker.MainActivity
@@ -33,6 +37,7 @@ import okhttp3.OkHttpClient
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -88,7 +93,7 @@ class SearchLoginNavigationTest {
         replaceGraphField("sourceClient", source)
         replaceGraphField("repository", AppRepository(app, AppGraph.database, AppGraph.settings, source))
         AppGraph.settings.setSelectedContentMode(ContentMode.FC2)
-        AppGraph.settings.setBaseUrl("https://02.avsee.is", ContentMode.FC2)
+        AppGraph.settings.setBaseUrl(CONFIGURED_ORIGIN, ContentMode.FC2)
     }
 
     @After fun closeActivityAndRunner() {
@@ -112,7 +117,7 @@ class SearchLoginNavigationTest {
 
     @Test fun storedProtectedDiagnosticOpensDialogThroughActualNavigation() = runBlocking {
         val dao = AppGraph.searchDatabase.searchDao()
-        val request = SearchRequest("ui-stored-403", "neutral-query", "https://02.avsee.is")
+        val request = SearchRequest("ui-stored-403", "neutral-query", CONFIGURED_ORIGIN)
         dao.prepareSession(request)
         dao.fail(request.token, safeApplicationFailureMessage(
             PageLoadException(PageFailureStage.DOCUMENT, PageFailureReason.HTTP, 403)), 1L)
@@ -130,8 +135,29 @@ class SearchLoginNavigationTest {
         assertLoginWebView()
     }
 
-    private fun launchSearchRoute() {
+    @Test fun explicitlyConfiguredDifferentDomainUsesItsOwnLoginOrigin() = runBlocking {
+        val configured = "https://new-search.example.test"
+        AppGraph.settings.setBaseUrl(configured, ContentMode.FC2)
+        launchSearchRoute(configured)
+        compose.onNodeWithText("사이트 로그인").assertIsDisplayed().performClick()
+        waitForLoginDialog()
+        assertLoginWebView(configured)
+        assertEquals(0, searchCalls.get())
+    }
+
+    @Test fun configured02LoginDoesNotAutomaticallyTrustAnotherPreviousHost() = runBlocking {
+        val configured = "https://02.avsee.is"
+        AppGraph.settings.setBaseUrl(configured, ContentMode.FC2)
+        launchSearchRoute(configured)
+        compose.onNodeWithText("사이트 로그인").performClick()
+        waitForLoginDialog()
+        assertLoginWebView(configured)
+    }
+
+    private fun launchSearchRoute(expectedOrigin: String = CONFIGURED_ORIGIN) {
         activity = Robolectric.buildActivity(MainActivity::class.java).setup()
+        val vm = ViewModelProvider(activity!!.get()).get(MainViewModel::class.java)
+        compose.waitUntil(10_000) { vm.baseUrl.value == expectedOrigin }
         compose.onNodeWithText("검색").performClick()
         compose.onNodeWithText("FC2 검색").assertIsDisplayed()
     }
@@ -141,13 +167,25 @@ class SearchLoginNavigationTest {
         compose.onNodeWithText("로그인 완료").assertIsDisplayed()
     }
 
-    private fun assertLoginWebView() {
+    private fun assertLoginWebView(expectedOrigin: String = CONFIGURED_ORIGIN) {
         val dialog = ShadowDialog.getLatestDialog()
         assertNotNull(dialog)
         assertTrue(dialog.isShowing)
         val webView = findWebView(dialog.window!!.decorView)
         assertNotNull(webView)
-        assertEquals("https://02.avsee.is/bbs/login.php", Shadows.shadowOf(webView!!).lastLoadedUrl)
+        assertEquals("$expectedOrigin/bbs/login.php", Shadows.shadowOf(webView!!).lastLoadedUrl)
+        assertFalse(CookieManager.getInstance().acceptThirdPartyCookies(webView))
+        val client = webView.webViewClient
+        assertFalse(client.shouldOverrideUrlLoading(webView, request("$expectedOrigin/bbs/search.php")))
+        for (url in listOf(
+            "https://01.avsee.is/bbs/login.php",
+            "https://foreign.example.test/bbs/login.php",
+            expectedOrigin.replace("https://", "http://") + "/bbs/login.php",
+            expectedOrigin.replace("https://", "https://user@") + "/bbs/login.php",
+            "$expectedOrigin.evil.test/bbs/login.php",
+        )) {
+            assertTrue("unconfigured origin must not be trusted: $url", client.shouldOverrideUrlLoading(webView, request(url)))
+        }
     }
 
     private fun findWebView(view: View): WebView? = when (view) {
@@ -158,5 +196,18 @@ class SearchLoginNavigationTest {
 
     private fun replaceGraphField(name: String, value: Any) {
         AppGraph::class.java.getDeclaredField(name).apply { isAccessible = true }.set(null, value)
+    }
+
+    private fun request(url: String): WebResourceRequest = object : WebResourceRequest {
+        override fun getUrl(): Uri = Uri.parse(url)
+        override fun isForMainFrame() = true
+        override fun isRedirect() = true
+        override fun hasGesture() = false
+        override fun getMethod() = "GET"
+        override fun getRequestHeaders(): Map<String, String> = emptyMap()
+    }
+
+    companion object {
+        private const val CONFIGURED_ORIGIN = "https://03.avsee.is"
     }
 }

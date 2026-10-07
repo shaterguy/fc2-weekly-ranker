@@ -7,15 +7,20 @@ import android.webkit.WebResourceResponse
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import okhttp3.OkHttpClient
+import org.json.JSONObject
+import org.json.JSONTokener
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -26,7 +31,11 @@ import java.io.IOException
 import java.io.InputStream
 import java.util.Collections
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.coroutines.resume
 import com.shaterguy.fc2weeklyranker.ui.searchNeedsAuthentication
 
 // Intercepted HTTP responses do not trigger onReceivedHttpError on every WebView provider.
@@ -104,6 +113,60 @@ class WebViewHttpErrorInstrumentedTest {
                 "main-frame challenge HTTP callback was not exercised",
                 synchronized(events) { events.any { "http_error status=403 main=true" in it } },
             )
+        }
+    }
+
+    @Test
+    fun search403CallbackBeforeFirstDocumentWaitsForChallengeReload() {
+        val attempts = AtomicInteger()
+        val intercepted = CountDownLatch(1)
+        val releaseResponse = CountDownLatch(1)
+        val pendingRequest = AtomicReference<WebResourceRequest>()
+        val parser = AvseeClient(OkHttpClient())
+        withTransport(
+            responder = { request ->
+                if (request.isForMainFrame && request.url.path == "/bbs/search.php" && attempts.get() == 0) {
+                    pendingRequest.set(request)
+                    intercepted.countDown()
+                    if (!releaseResponse.await(10, TimeUnit.SECONDS)) {
+                        throw IOException("synthetic first search response was not released")
+                    }
+                }
+                challengeThenSearchResult(request, attempts)
+            },
+            hasUsableSearchResults = parser::hasUsableApplicationSearchResults,
+        ) { transport, events ->
+            supervisorScope {
+                val url = parser.buildSearchUrl(ORIGIN, "fixture", 1, "javfc2")
+                val fetching = async(Dispatchers.Default) { transport.fetch(url) }
+                try {
+                    assertTrue("first search request was not intercepted", withContext(Dispatchers.IO) {
+                        intercepted.await(5, TimeUnit.SECONDS)
+                    })
+                    val view = currentWebView(transport)!!
+                    val stale = fixtureDocumentSnapshot(view)
+                    assertFalse("the response was committed before the callback fixture", isMatchingApplicationDocument(
+                        setOf("fixture.invalid"), url, stale.getString("url"),
+                    ))
+                    assertTrue("fixture must expose a ready, positively timed initial document", isUsableApplicationDocument(
+                        stale.getString("ready"), stale.getDouble("timeOrigin"), 0.0,
+                        isFirstNavigation = true,
+                    ))
+                    // Exercise the real callback while the response is held off the main thread.
+                    // The old document is ready, but it is not this search's HTTPS/query identity.
+                    withContext(Dispatchers.Main.immediate) {
+                        view.webViewClient.onReceivedHttpError(view, pendingRequest.get(), response(403, "Neutral pending response"))
+                    }
+                    delay(750)
+                    assertTrue("a callback on the previous document prematurely ended search; events=$events", fetching.isActive)
+                    releaseResponse.countDown()
+                    val html = withTimeout(10_000) { fetching.await() }
+                    assertTrue(html.contains("CHALLENGE_RECOVERED_RESULT"))
+                    assertTrue("challenge did not reload the requested search", attempts.get() >= 2)
+                } finally {
+                    releaseResponse.countDown()
+                }
+            }
         }
     }
 
@@ -255,6 +318,15 @@ class WebViewHttpErrorInstrumentedTest {
         val viewField = session.javaClass.getDeclaredField("webView")
         viewField.isAccessible = true
         return viewField.get(session) as WebView
+    }
+
+    private suspend fun fixtureDocumentSnapshot(view: WebView): JSONObject = withContext(Dispatchers.Main.immediate) {
+        val raw = suspendCancellableCoroutine<String> { continuation ->
+            view.evaluateJavascript("JSON.stringify({url:location.href,ready:document.readyState,timeOrigin:performance.timeOrigin || 0})") {
+                if (continuation.isActive) continuation.resume(it)
+            }
+        }
+        JSONObject(JSONTokener(raw).nextValue() as String)
     }
 
     private fun challengeThenSearchResult(

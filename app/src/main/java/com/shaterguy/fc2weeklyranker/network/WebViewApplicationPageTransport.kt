@@ -270,7 +270,10 @@ internal class WebViewApplicationPageTransport(
             ) {
                 throw PageLoadException(PageFailureStage.DOCUMENT, PageFailureReason.AUTHENTICATION)
             }
+            // HTTP callbacks can arrive while about:blank or the previous document is
+            // still ready. Readiness alone must not end this request's 403 deferral.
             val currentDocumentObserved = snapshot != null &&
+                isRequestedDocument(current.allowedHosts, url, snapshot.optString("url")) &&
                 isUsableApplicationDocument(
                     snapshot.optString("ready"),
                     snapshot.optDouble("timeOrigin", 0.0),

@@ -339,7 +339,7 @@ jobs:
             -e class com.shaterguy.fc2weeklyranker.media.ExternalVideoStreamProviderInstrumentedTest,com.shaterguy.fc2weeklyranker.media.NativeFullscreenAssistantInstrumentedTest,com.shaterguy.fc2weeklyranker.search.SearchDatabaseInstrumentedTest,com.shaterguy.fc2weeklyranker.data.SettingsStoreInstrumentedTest,com.shaterguy.fc2weeklyranker.network.WebViewApplicationPageTransportInstrumentedTest,com.shaterguy.fc2weeklyranker.network.WebViewHttpErrorInstrumentedTest \
             com.shaterguy.fc2weeklyranker.dev.test/androidx.test.runner.AndroidJUnitRunner \
             | tee "$INSTRUMENTATION_OUTPUT"
-          grep -Fq 'OK (24 tests)' "$INSTRUMENTATION_OUTPUT"
+          grep -Fq 'OK (25 tests)' "$INSTRUMENTATION_OUTPUT"
           python3 scripts/ci_source_fixture.py verify
 
           REUSE_ADB=1 bash scripts/verify_dev49_to_dev50_update.sh "$CURRENT_APK"

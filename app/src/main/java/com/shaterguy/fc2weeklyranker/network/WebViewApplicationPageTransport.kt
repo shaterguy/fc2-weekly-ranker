@@ -76,19 +76,21 @@ internal class WebViewApplicationPageTransport(
                 val result = withPageFailureStage(PageFailureStage.DOCUMENT) {
                     fetchInSession(current, target.toString(), referer)
                 }
-                if (!isChallenge(result)) {
-                    if (result.status !in 200..299) {
-                        if (isAuthenticationRequiredSearchResponse(result.status, target.toString())) {
-                            throw PageLoadException(PageFailureStage.DOCUMENT, PageFailureReason.AUTHENTICATION)
-                        }
-                        throw PageLoadException(PageFailureStage.DOCUMENT, PageFailureReason.HTTP, result.status)
-                    }
+                val failureReason = classifyApplicationDocumentFailure(
+                    result.status,
+                    target.toString(),
+                    isChallenge(result),
+                )
+                if (failureReason == null) {
                     requireAllowedFinalUrl(current, result.finalUrl)
                     return@withLock result.body
                 }
+                if (failureReason == PageFailureReason.AUTHENTICATION) {
+                    throw PageLoadException(PageFailureStage.DOCUMENT, PageFailureReason.AUTHENTICATION)
+                }
                 lastFailure = PageLoadException(
                     PageFailureStage.DOCUMENT,
-                    if (result.status >= 400) PageFailureReason.HTTP else PageFailureReason.ERROR,
+                    failureReason,
                     result.status,
                 )
             } catch (error: TimeoutCancellationException) {

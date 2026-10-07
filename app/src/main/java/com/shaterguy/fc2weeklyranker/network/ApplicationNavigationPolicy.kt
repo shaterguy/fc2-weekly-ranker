@@ -29,6 +29,17 @@ internal fun isAuthenticationRequiredSearchResponse(status: Int, targetUrl: Stri
             uri.path.orEmpty() == "/bbs/search.php"
     }.getOrDefault(false)
 
+internal fun classifyApplicationDocumentFailure(
+    status: Int,
+    targetUrl: String,
+    challenge: Boolean,
+): PageFailureReason? = when {
+    isAuthenticationRequiredSearchResponse(status, targetUrl) -> PageFailureReason.AUTHENTICATION
+    challenge -> if (status >= 400) PageFailureReason.HTTP else PageFailureReason.ERROR
+    status !in 200..299 -> PageFailureReason.HTTP
+    else -> null
+}
+
 internal fun isAuthenticationRedirect(url: String): Boolean = runCatching {
     val uri = URI(url)
     val path = uri.path.orEmpty().lowercase()

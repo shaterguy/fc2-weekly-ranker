@@ -28,6 +28,21 @@ class ApplicationNavigationPolicyTest {
         assertFalse(isAuthenticationRequiredSearchResponse(503, general))
     }
 
+    @Test fun protectedGeneralSearchAuthenticationWinsOverChallengeClassification() {
+        val general = "https://02.avsee.is/bbs/search.php?stx=needle&onetable=javfc2&page=1"
+        val tag = "https://02.avsee.is/bbs/tag.php?q=needle&page=1"
+        val foreign = "https://example.invalid/bbs/search.php?stx=needle"
+
+        assertEquals(PageFailureReason.AUTHENTICATION, classifyApplicationDocumentFailure(401, general, challenge = true))
+        assertEquals(PageFailureReason.AUTHENTICATION, classifyApplicationDocumentFailure(403, general, challenge = true))
+        assertEquals(PageFailureReason.HTTP, classifyApplicationDocumentFailure(403, tag, challenge = true))
+        assertEquals(PageFailureReason.HTTP, classifyApplicationDocumentFailure(403, foreign, challenge = true))
+        assertEquals(PageFailureReason.HTTP, classifyApplicationDocumentFailure(503, general, challenge = true))
+        assertEquals(PageFailureReason.ERROR, classifyApplicationDocumentFailure(200, general, challenge = true))
+        assertEquals(PageFailureReason.HTTP, classifyApplicationDocumentFailure(503, general, challenge = false))
+        assertNull(classifyApplicationDocumentFailure(200, general, challenge = false))
+    }
+
     @Test fun officialLoginRedirectIsRecognizedWithoutAcceptingForeignOrCleartext() {
         assertTrue(isAuthenticationRedirect("https://02.avsee.is/bbs/login.php?url=%2Fbbs%2Fsearch.php"))
         assertTrue(isAuthenticationRedirect("https://01.avsee.is/login/form"))

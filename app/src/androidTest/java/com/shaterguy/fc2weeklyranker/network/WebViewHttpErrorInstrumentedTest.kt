@@ -14,6 +14,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import okhttp3.OkHttpClient
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -22,6 +23,7 @@ import java.io.IOException
 import java.io.InputStream
 import java.util.Collections
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicInteger
 
 // Intercepted HTTP responses do not trigger onReceivedHttpError on every WebView provider.
 // HTTP cases explicitly exercise the real client's callback contract on the main thread.
@@ -40,6 +42,25 @@ class WebViewHttpErrorInstrumentedTest {
     @Test
     fun successfulEmptyDocumentRemainsUsable() = withTransport { transport, _ ->
         assertTrue(transport.fetch("$ORIGIN/ok.html").contains("NEUTRAL_EMPTY_DOCUMENT"))
+    }
+
+    @Test
+    fun mainFrame403ChallengeCanReloadIntoRequestedSearchDocument() {
+        val attempts = AtomicInteger()
+        val parser = AvseeClient(OkHttpClient())
+        withTransport(
+            responder = { request -> challengeThenSearchResult(request, attempts) },
+            hasUsableSearchResults = parser::hasUsableApplicationSearchResults,
+        ) { transport, events ->
+            val url = parser.buildSearchUrl(ORIGIN, "fixture", 1, "javfc2")
+            val html = withTimeout(10_000) { transport.fetch(url) }
+            assertTrue(html.contains("CHALLENGE_RECOVERED_RESULT"))
+            assertTrue("challenge did not cause a same-document reload", attempts.get() >= 2)
+            assertTrue(
+                "main-frame challenge HTTP callback was not exercised",
+                synchronized(events) { events.any { "http_error status=403 main=true" in it } },
+            )
+        }
     }
 
     @Test
@@ -79,14 +100,19 @@ class WebViewHttpErrorInstrumentedTest {
     private fun causes(error: Throwable): List<String> =
         generateSequence(error) { it.cause }.map { it.message.orEmpty() }.toList()
 
-    private fun withTransport(block: suspend (WebViewApplicationPageTransport, List<String>) -> Unit) = runBlocking<Unit> {
+    private fun withTransport(
+        responder: (WebResourceRequest) -> WebResourceResponse = { request -> respond(request) },
+        hasUsableSearchResults: (String, String) -> Boolean = { _, _ -> false },
+        block: suspend (WebViewApplicationPageTransport, List<String>) -> Unit,
+    ) = runBlocking<Unit> {
         val events = Collections.synchronizedList(mutableListOf<String>())
         val httpCallbacks = ConcurrentLinkedQueue<Pair<WebResourceRequest, WebResourceResponse>>()
         val transport = WebViewApplicationPageTransport(
             InstrumentationRegistry.getInstrumentation().targetContext,
             "NeutralWebViewTransportTest",
+            hasUsableSearchResults = hasUsableSearchResults,
             fixtureResponse = { request ->
-                respond(request).also { response ->
+                responder(request).also { response ->
                     if (response.statusCode >= 400) httpCallbacks.add(request to response)
                 }
             },
@@ -122,6 +148,33 @@ class WebViewHttpErrorInstrumentedTest {
         val viewField = session.javaClass.getDeclaredField("webView")
         viewField.isAccessible = true
         return viewField.get(session) as WebView
+    }
+
+    private fun challengeThenSearchResult(
+        request: WebResourceRequest,
+        attempts: AtomicInteger,
+    ): WebResourceResponse {
+        if (request.url.scheme != "https" || request.url.host != "fixture.invalid") {
+            return response(403, "unexpected fixture host")
+        }
+        if (!request.isForMainFrame || request.url.path != "/bbs/search.php") {
+            return response(404, "Neutral missing resource")
+        }
+        return if (attempts.getAndIncrement() == 0) {
+            response(
+                403,
+                "<!doctype html><html><head><title>Just a moment...</title></head>" +
+                    "<body>Performing security verification" +
+                    "<script>setTimeout(function(){location.reload()},50)</script></body></html>",
+            )
+        } else {
+            response(
+                200,
+                "<!doctype html><html><body><ul class='search-results'><li class='search-result'>" +
+                    "<div class='search-result-title'><a href='/bbs/board.php?bo_table=javfc2&wr_id=42'>Recovered</a></div>" +
+                    "</li></ul><p>CHALLENGE_RECOVERED_RESULT</p></body></html>",
+            )
+        }
     }
 
     private fun respond(request: WebResourceRequest): WebResourceResponse {

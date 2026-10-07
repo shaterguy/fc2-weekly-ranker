@@ -81,6 +81,23 @@ jobs:
           grep -Fq 'MIGRATION_2_3' app/src/main/java/com/shaterguy/fc2weeklyranker/search/SearchStore.kt
       - name: Canonical verification
         run: bash scripts/verify.sh
+      - name: Record UI diagnostic source
+        if: always() && contains(github.ref_name, 'ui-diagnostic')
+        shell: bash
+        run: |
+          mkdir -p build
+          printf '%s\n' "$GITHUB_SHA" > build/ui-diagnostic-source.txt
+      - name: Upload UI diagnostic failure evidence
+        if: always() && contains(github.ref_name, 'ui-diagnostic')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: fc2-ui-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/ui-diagnostic-source.txt
+            app/build/test-results/testDebugUnitTest/TEST-com.shaterguy.fc2weeklyranker.ui.SearchLoginNavigationTest.xml
+            app/build/test-results/testDebugUnitTest/TEST-com.shaterguy.fc2weeklyranker.network.AvseeClientBulkTagTest.xml
+          if-no-files-found: error
+          retention-days: 14
       - name: Build unsigned TEST APK
         shell: bash
         run: |

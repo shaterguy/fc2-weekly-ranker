@@ -13,9 +13,11 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
+import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.shaterguy.fc2weeklyranker.AppGraph
 import com.shaterguy.fc2weeklyranker.MainActivity
+import com.shaterguy.fc2weeklyranker.data.AppDatabase
 import com.shaterguy.fc2weeklyranker.domain.ContentMode
 import com.shaterguy.fc2weeklyranker.network.ApplicationPageTransport
 import com.shaterguy.fc2weeklyranker.network.AvseeClient
@@ -25,6 +27,7 @@ import com.shaterguy.fc2weeklyranker.network.PageLoadException
 import com.shaterguy.fc2weeklyranker.network.safeApplicationFailureMessage
 import com.shaterguy.fc2weeklyranker.repo.AppRepository
 import com.shaterguy.fc2weeklyranker.search.SearchRequest
+import com.shaterguy.fc2weeklyranker.search.SearchDatabase
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
 import org.junit.After
@@ -57,11 +60,17 @@ import java.util.concurrent.atomic.AtomicInteger
 class SearchLoginNavigationTest {
     @get:Rule val compose = createEmptyComposeRule()
     private var activity: ActivityController<MainActivity>? = null
+    private var database: AppDatabase? = null
+    private var searchDatabase: SearchDatabase? = null
     private val searchCalls = AtomicInteger()
 
     @Before fun setUpNeutralDependencies() = runBlocking {
         val app = ApplicationProvider.getApplicationContext<Application>()
         AppGraph.initialize(app)
+        database = Room.inMemoryDatabaseBuilder(app, AppDatabase::class.java).build()
+        searchDatabase = Room.inMemoryDatabaseBuilder(app, SearchDatabase::class.java).build()
+        replaceGraphField("database", database!!)
+        replaceGraphField("searchDatabase", searchDatabase!!)
         val http = OkHttpClient.Builder().addInterceptor {
             throw AssertionError("UI fixture must never perform a real HTTP request")
         }.build()
@@ -85,6 +94,8 @@ class SearchLoginNavigationTest {
     @After fun closeActivityAndRunner() {
         AppGraph.searchScheduler.cancelActive()
         activity?.pause()?.stop()?.destroy()
+        searchDatabase?.close()
+        database?.close()
     }
 
     @Test fun searchNavigationPropagatesProtectedFailureToActualDialog() {
@@ -92,7 +103,7 @@ class SearchLoginNavigationTest {
         compose.onNode(hasSetTextAction()).performTextInput("neutral-query")
         compose.onNode(hasText("검색") and hasAnySibling(hasSetTextAction())).performClick()
         waitForLoginDialog()
-        assertEquals(1, searchCalls.get())
+        assertEquals("fresh search must call the fixture transport exactly once", 1, searchCalls.get())
         assertLoginWebView()
         compose.onNodeWithText("닫기").performClick()
         compose.waitUntil(10_000) { compose.onAllNodesWithText("사이트 로그인").fetchSemanticsNodes().size == 1 }

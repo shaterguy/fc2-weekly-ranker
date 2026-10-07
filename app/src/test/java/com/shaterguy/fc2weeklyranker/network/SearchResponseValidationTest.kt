@@ -34,6 +34,23 @@ class SearchResponseValidationTest {
     }
 
     @Test
+    fun `general search keeps the browser row-window contract instead of the protected 1000-row request`() = runTest {
+        val source = AvseeClient(
+            http,
+            applicationPageTransport = object : ApplicationPageTransport {
+                override suspend fun fetch(url: String, referer: String?): String {
+                    if (!url.contains("&srows=100&")) throw IllegalStateException("HTTP_403")
+                    return "<div id='at-main'></div>"
+                }
+            },
+        )
+
+        val result = BackgroundSearchClient(http, source).searchPage(baseUrl, "fixture", 1, ContentMode.FC2)
+
+        assertTrue(result.posts.isEmpty())
+    }
+
+    @Test
     fun `tag stream emits no successful snapshot when transport fails`() = runTest {
         val source = AvseeClient(http, applicationPageTransport = failureTransport())
         val snapshots = mutableListOf<TagSearchSnapshot>()

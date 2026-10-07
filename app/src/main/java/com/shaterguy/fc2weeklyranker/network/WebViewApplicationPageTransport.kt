@@ -60,9 +60,8 @@ internal class WebViewApplicationPageTransport(
             loadError = null
         }
 
-        fun resetTransientFailure() {
+        fun resetHttpStatus() {
             httpStatus = 200
-            loadError = null
         }
     }
 
@@ -166,13 +165,18 @@ internal class WebViewApplicationPageTransport(
                     fixtureResponse?.invoke(request) ?: super.shouldInterceptRequest(view, request)
 
                 override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
-                    fixtureDiagnostic?.invoke("started url=${diagnosticUrl(url)}")
                     navigation.requestedUrl?.let { requested ->
                         if (
                             url != null &&
-                            isMatchingApplicationDocument(allowedHosts, requested, url)
-                        ) navigation.resetTransientFailure()
+                            shouldResetDeferredSearchChallengeHttpFailure(
+                                navigation.httpStatus,
+                                requested,
+                                url,
+                                allowSyntheticFixture = fixtureResponse != null,
+                            )
+                        ) navigation.resetHttpStatus()
                     }
+                    fixtureDiagnostic?.invoke("started url=${diagnosticUrl(url)}")
                     super.onPageStarted(view, url, favicon)
                 }
 
@@ -258,25 +262,7 @@ internal class WebViewApplicationPageTransport(
             ) {
                 throw PageLoadException(PageFailureStage.DOCUMENT, PageFailureReason.AUTHENTICATION)
             }
-            val requestedDocumentReady = snapshot != null &&
-                snapshot.optString("ready") in READY_STATES &&
-                isRequestedDocument(current.allowedHosts, url, snapshot.optString("url"))
-            val challenge = snapshot != null && looksLikeChallenge(
-                snapshot.optString("title"),
-                snapshot.optString("text"),
-            )
-            navigationFailure(current, requestedDocumentReady, challenge)?.let {
-                return@withTimeout it
-            }
-            fixtureDiagnostic?.invoke(
-                "snapshot ready=${snapshot?.optString("ready")} url=${diagnosticUrl(snapshot?.optString("url"))} " +
-                    "requested=${snapshot?.let { isRequestedDocument(current.allowedHosts, url, it.optString("url")) }} " +
-                    "timeOrigin=${snapshot?.optDouble("timeOrigin", 0.0)} previous=$previousTimeOrigin first=$isFirstNavigation " +
-                    "dcl=${snapshot?.optBoolean("domContentLoaded")} searchRows=${snapshot?.optBoolean("hasSearchRows")} tagRows=${snapshot?.optBoolean("hasTagRows")}",
-            )
-            if (
-                snapshot != null &&
-                !challenge &&
+            val currentDocumentObserved = snapshot != null &&
                 isUsableApplicationDocument(
                     snapshot.optString("ready"),
                     snapshot.optDouble("timeOrigin", 0.0),
@@ -289,8 +275,36 @@ internal class WebViewApplicationPageTransport(
                         else -> false
                     },
                     isFirstNavigation,
-                ) &&
-                requestedDocumentReady
+                )
+            val challenge = snapshot != null && looksLikeChallenge(
+                snapshot.optString("title"),
+                snapshot.optString("text"),
+            )
+            val httpStatus = withContext(Dispatchers.Main.immediate) { current.navigation.httpStatus }
+            if (
+                shouldDeferSearchChallengeHttpFailure(
+                    httpStatus,
+                    url,
+                    currentDocumentObserved,
+                    challenge,
+                    allowSyntheticFixture = fixtureResponse != null,
+                )
+            ) {
+                delay(POLL_MILLIS)
+                continue
+            }
+            navigationFailure(current)?.let { return@withTimeout it }
+            fixtureDiagnostic?.invoke(
+                "snapshot ready=${snapshot?.optString("ready")} url=${diagnosticUrl(snapshot?.optString("url"))} " +
+                    "requested=${snapshot?.let { isRequestedDocument(current.allowedHosts, url, it.optString("url")) }} " +
+                    "timeOrigin=${snapshot?.optDouble("timeOrigin", 0.0)} previous=$previousTimeOrigin first=$isFirstNavigation " +
+                    "dcl=${snapshot?.optBoolean("domContentLoaded")} searchRows=${snapshot?.optBoolean("hasSearchRows")} tagRows=${snapshot?.optBoolean("hasTagRows")}",
+            )
+            if (
+                snapshot != null &&
+                !challenge &&
+                currentDocumentObserved &&
+                isRequestedDocument(current.allowedHosts, url, snapshot.optString("url"))
             ) {
                 val body = pageHtml(current.webView)
                 if (body != null) {
@@ -301,11 +315,7 @@ internal class WebViewApplicationPageTransport(
                         )
                     }
                     if (contentReady) {
-                        completed = navigationFailure(
-                            current,
-                            requestedDocumentReady = true,
-                            challenge = false,
-                        )
+                        completed = navigationFailure(current)
                             ?: PageResult(200, snapshot.optString("url"), body)
                     }
                 }
@@ -324,20 +334,15 @@ internal class WebViewApplicationPageTransport(
             isRequestedDocument(allowedHosts, it, request.url.toString())
         } == true
 
-    private suspend fun navigationFailure(
-        current: BrowserSession,
-        requestedDocumentReady: Boolean,
-        challenge: Boolean,
-    ): PageResult? = withContext(Dispatchers.Main.immediate) {
-        current.navigation.loadError?.let {
-            throw PageLoadException(PageFailureStage.DOCUMENT, PageFailureReason.WEBVIEW, it)
+    private suspend fun navigationFailure(current: BrowserSession): PageResult? =
+        withContext(Dispatchers.Main.immediate) {
+            current.navigation.loadError?.let {
+                throw PageLoadException(PageFailureStage.DOCUMENT, PageFailureReason.WEBVIEW, it)
+            }
+            current.navigation.httpStatus.takeIf { it >= 400 }?.let {
+                PageResult(it, current.navigation.requestedUrl.orEmpty(), "")
+            }
         }
-        current.navigation.httpStatus.takeIf {
-            it >= 400 && requestedDocumentReady && !challenge
-        }?.let {
-            PageResult(it, current.navigation.requestedUrl.orEmpty(), "")
-        }
-    }
 
     private fun isRequestedDocument(
         allowedHosts: Set<String>,

@@ -20,22 +20,64 @@ internal fun isOfficialApplicationUrl(url: String): Boolean = runCatching {
         uri.userInfo == null &&
         uri.host.orEmpty().lowercase() in OFFICIAL_APPLICATION_HOSTS
 }.getOrDefault(false)
+private fun isOfficialGeneralSearchUrl(targetUrl: String): Boolean = runCatching {
+    val uri = URI(targetUrl)
+    uri.scheme.equals("https", ignoreCase = true) &&
+        uri.userInfo == null &&
+        uri.host.orEmpty().lowercase() in OFFICIAL_APPLICATION_HOSTS &&
+        uri.path.orEmpty() == "/bbs/search.php"
+}.getOrDefault(false)
+
+private fun isSyntheticGeneralSearchUrl(targetUrl: String): Boolean = runCatching {
+    val uri = URI(targetUrl)
+    uri.scheme.equals("https", ignoreCase = true) &&
+        uri.userInfo == null &&
+        uri.host.orEmpty().equals("fixture.invalid", ignoreCase = true) &&
+        uri.path.orEmpty() == "/bbs/search.php"
+}.getOrDefault(false)
+
 internal fun isAuthenticationRequiredSearchResponse(status: Int, targetUrl: String): Boolean =
-    runCatching {
-        val uri = URI(targetUrl)
-        status in setOf(401, 403) &&
-            uri.scheme.equals("https", ignoreCase = true) &&
-            uri.host.orEmpty().lowercase() in OFFICIAL_APPLICATION_HOSTS &&
-            uri.path.orEmpty() == "/bbs/search.php"
-    }.getOrDefault(false)
+    status in setOf(401, 403) && isOfficialGeneralSearchUrl(targetUrl)
+
+internal fun shouldDeferSearchChallengeHttpFailure(
+    status: Int,
+    targetUrl: String,
+    currentDocumentObserved: Boolean,
+    challenge: Boolean,
+    allowSyntheticFixture: Boolean = false,
+): Boolean {
+    val eligibleTarget = isOfficialGeneralSearchUrl(targetUrl) ||
+        (allowSyntheticFixture && isSyntheticGeneralSearchUrl(targetUrl))
+    return status == 403 && eligibleTarget && (!currentDocumentObserved || challenge)
+}
+
+internal fun shouldResetDeferredSearchChallengeHttpFailure(
+    status: Int,
+    requestedUrl: String,
+    observedUrl: String,
+    allowSyntheticFixture: Boolean = false,
+): Boolean = runCatching {
+    if (status != 403) return@runCatching false
+    val eligibleRequest = isOfficialGeneralSearchUrl(requestedUrl) ||
+        (allowSyntheticFixture && isSyntheticGeneralSearchUrl(requestedUrl))
+    if (!eligibleRequest) return@runCatching false
+    val observed = URI(observedUrl)
+    observed.scheme.equals("https", ignoreCase = true) &&
+        observed.userInfo == null &&
+        observed.path.orEmpty() == "/bbs/search.php" &&
+        (
+            observed.host.orEmpty().lowercase() in OFFICIAL_APPLICATION_HOSTS ||
+                (allowSyntheticFixture && observed.host.orEmpty().equals("fixture.invalid", ignoreCase = true))
+        )
+}.getOrDefault(false)
 
 internal fun classifyApplicationDocumentFailure(
     status: Int,
     targetUrl: String,
     challenge: Boolean,
 ): PageFailureReason? = when {
-    challenge -> if (status >= 400) PageFailureReason.HTTP else PageFailureReason.ERROR
     isAuthenticationRequiredSearchResponse(status, targetUrl) -> PageFailureReason.AUTHENTICATION
+    challenge -> if (status >= 400) PageFailureReason.HTTP else PageFailureReason.ERROR
     status !in 200..299 -> PageFailureReason.HTTP
     else -> null
 }

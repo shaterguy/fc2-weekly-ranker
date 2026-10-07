@@ -31,6 +31,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -61,8 +62,10 @@ internal fun sortSearchResults(
 
 internal fun isVisitedPost(postId: String, visitedPostIds: Set<String>): Boolean = postId in visitedPostIds
 
-internal fun searchNeedsAuthentication(message: String?): Boolean =
-    message?.contains("[DOCUMENT/AUTHENTICATION_REQUIRED]") == true
+// Bounded diagnostics offer first-party recovery; HTTP 403 alone is not proof of its cause.
+internal fun searchNeedsAuthentication(message: String?): Boolean = message != null &&
+    listOf("[DOCUMENT/AUTHENTICATION_REQUIRED]", "[DOCUMENT/HTTP_401]", "[DOCUMENT/HTTP_403]")
+        .any(message::contains)
 
 @Composable
 fun SearchScreen(
@@ -80,7 +83,13 @@ fun SearchScreen(
     val baseUrl by vm.baseUrl.collectAsState()
     var query by rememberSaveable(mode.sourceKey) { mutableStateOf("") }
     var hasSearched by rememberSaveable(mode.sourceKey) { mutableStateOf(false) }
-    var showLogin by rememberSaveable(mode.sourceKey) { mutableStateOf(false) }
+    var loginPrompt by rememberSaveable(
+        mode.sourceKey,
+        stateSaver = Saver<SearchLoginPromptState, List<String>>(
+            save = { it.savedValue() }, restore = { SearchLoginPromptState.restore(it) },
+        ),
+    ) { mutableStateOf(SearchLoginPromptState()) }
+    val searchRequestKey = vm.searchRequestKey()
     var sortName by rememberSaveable(mode.sourceKey) { mutableStateOf(SearchSortMode.FIRST_SEEN.name) }
     val loginStartUrl = remember(baseUrl) { officialApplicationStartUrl(baseUrl) }
     val sortMode = remember(sortName) {
@@ -96,20 +105,27 @@ fun SearchScreen(
         }
     }
 
-    if (showLogin && loginStartUrl != null) {
+    LaunchedEffect(searchRequestKey, message, loading, cancelling, loginStartUrl) {
+        loginPrompt = loginPrompt.observe(searchRequestKey, message, loading || cancelling, loginStartUrl != null)
+    }
+
+    if (loginPrompt.visible && loginStartUrl != null) {
         ApplicationLoginDialog(
             startUrl = loginStartUrl,
             onDismiss = {
+                loginPrompt = loginPrompt.dismiss()
                 CookieManager.getInstance().flush()
-                showLogin = false
             },
             onDone = {
-                CookieManager.getInstance().flush()
-                showLogin = false
-                vm.clearSearchMessage()
-                if (query.isNotBlank()) {
-                    hasSearched = true
-                    vm.searchPosts(query)
+                val (next, retrySearch) = loginPrompt.complete()
+                loginPrompt = next
+                if (retrySearch) {
+                    CookieManager.getInstance().flush()
+                    vm.clearSearchMessage()
+                    if (query.isNotBlank()) {
+                        hasSearched = true
+                        vm.searchPosts(query)
+                    }
                 }
             },
         )
@@ -143,6 +159,13 @@ fun SearchScreen(
                 },
                 enabled = query.isNotBlank() && !loading && !cancelling,
             ) { Text("검색") }
+        }
+
+        if (loginStartUrl != null) {
+            OutlinedButton(
+                onClick = { loginPrompt = loginPrompt.open() },
+                enabled = !loading && !cancelling,
+            ) { Text("사이트 로그인") }
         }
 
         Row(
@@ -200,11 +223,6 @@ fun SearchScreen(
         if (message != null) {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 TextButton(onClick = vm::clearSearchMessage) { Text(message!!) }
-                if (searchNeedsAuthentication(message) && loginStartUrl != null) {
-                    Button(onClick = { showLogin = true }) {
-                        Text("사이트 로그인")
-                    }
-                }
             }
         }
         if (!loading && hasSearched && message == null && displayedResults.isEmpty()) {

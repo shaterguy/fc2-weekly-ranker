@@ -15,6 +15,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -69,21 +71,25 @@ internal class WebViewApplicationPageTransport(
         val status: Int,
         val finalUrl: String,
         val body: String,
+        val challenge: Boolean = false,
+        val httpFailureAfterTimeout: Boolean = false,
     )
 
     override suspend fun fetch(url: String, referer: String?): String = mutex.withLock {
         val target = validatedTarget(url)
         var lastFailure: Throwable? = null
         repeat(MAX_SESSION_ATTEMPTS) { attempt ->
+            var retryFailure = true
             try {
                 val current = withPageFailureStage(PageFailureStage.SESSION) { ensureSession(target) }
                 val result = withPageFailureStage(PageFailureStage.DOCUMENT) {
                     fetchInSession(current, target.toString(), referer)
                 }
+                retryFailure = !result.httpFailureAfterTimeout
                 val failureReason = classifyApplicationDocumentFailure(
                     result.status,
                     target.toString(),
-                    isChallenge(result),
+                    result.challenge || isChallenge(result),
                 )
                 if (failureReason == null) {
                     requireAllowedFinalUrl(current, result.finalUrl)
@@ -92,18 +98,20 @@ internal class WebViewApplicationPageTransport(
                 if (failureReason == PageFailureReason.AUTHENTICATION) {
                     throw PageLoadException(PageFailureStage.DOCUMENT, PageFailureReason.AUTHENTICATION)
                 }
-                lastFailure = PageLoadException(
+                val failure = PageLoadException(
                     PageFailureStage.DOCUMENT,
                     failureReason,
                     result.status,
                 )
+                if (!retryFailure) throw failure
+                lastFailure = failure
             } catch (error: TimeoutCancellationException) {
                 lastFailure = error
             } catch (error: CancellationException) {
                 resetSession()
                 throw error
             } catch (error: PageLoadException) {
-                if (error.reason == PageFailureReason.AUTHENTICATION) {
+                if (error.reason == PageFailureReason.AUTHENTICATION || !retryFailure) {
                     resetSession()
                     throw error
                 }
@@ -165,17 +173,8 @@ internal class WebViewApplicationPageTransport(
                     fixtureResponse?.invoke(request) ?: super.shouldInterceptRequest(view, request)
 
                 override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
-                    navigation.requestedUrl?.let { requested ->
-                        if (
-                            url != null &&
-                            shouldResetDeferredSearchChallengeHttpFailure(
-                                navigation.httpStatus,
-                                requested,
-                                url,
-                                allowSyntheticFixture = fixtureResponse != null,
-                            )
-                        ) navigation.resetHttpStatus()
-                    }
+                    // A main-frame HTTP callback can precede onPageStarted. Do not erase
+                    // its status merely because the same URL starts loading again.
                     fixtureDiagnostic?.invoke("started url=${diagnosticUrl(url)}")
                     super.onPageStarted(view, url, favicon)
                 }
@@ -237,7 +236,10 @@ internal class WebViewApplicationPageTransport(
         current: BrowserSession,
         url: String,
         referer: String?,
-    ): PageResult = withTimeout(FETCH_TIMEOUT_MILLIS) {
+    ): PageResult {
+        var lastObservedChallenge = false
+        return try {
+            withTimeout(FETCH_TIMEOUT_MILLIS) {
         val requestedPath = URI(url).path.orEmpty()
         val isSearchRequest = requestedPath == "/bbs/search.php" || requestedPath == "/bbs/tag.php"
         val isFirstNavigation = !current.hasNavigated
@@ -280,6 +282,7 @@ internal class WebViewApplicationPageTransport(
                 snapshot.optString("title"),
                 snapshot.optString("text"),
             )
+            lastObservedChallenge = challenge
             val httpStatus = withContext(Dispatchers.Main.immediate) { current.navigation.httpStatus }
             if (
                 shouldDeferSearchChallengeHttpFailure(
@@ -293,7 +296,13 @@ internal class WebViewApplicationPageTransport(
                 delay(POLL_MILLIS)
                 continue
             }
-            navigationFailure(current)?.let { return@withTimeout it }
+            val canInspectSearchRecovery = snapshot != null && !challenge && currentDocumentObserved &&
+                isRequestedDocument(current.allowedHosts, url, snapshot.optString("url")) &&
+                shouldResetDeferredSearchChallengeHttpFailure(
+                    httpStatus, url, snapshot.optString("url"),
+                    allowSyntheticFixture = fixtureResponse != null,
+                )
+            if (!canInspectSearchRecovery) navigationFailure(current)?.let { return@withTimeout it }
             fixtureDiagnostic?.invoke(
                 "snapshot ready=${snapshot?.optString("ready")} url=${diagnosticUrl(snapshot?.optString("url"))} " +
                     "requested=${snapshot?.let { isRequestedDocument(current.allowedHosts, url, it.optString("url")) }} " +
@@ -314,6 +323,19 @@ internal class WebViewApplicationPageTransport(
                             snapshot.optString("ready"), body, url, hasUsableSearchResults,
                         )
                     }
+                    // Current-document HTTP success also proves a valid zero-result reload.
+                    // Older providers report 0: keep the parsed-results fallback, never infer
+                    // success from a generic complete-but-empty error document.
+                    val observedStatus = snapshot.optInt("responseStatus", 0)
+                    val recoveredSearch = canInspectSearchRecovery && (
+                        observedStatus in 200..299 ||
+                            (observedStatus == 0 && withContext(Dispatchers.Default) {
+                                hasUsableSearchResults(body, url)
+                            })
+                        )
+                    if (recoveredSearch) withContext(Dispatchers.Main.immediate) {
+                        current.navigation.resetHttpStatus()
+                    }
                     if (contentReady) {
                         completed = navigationFailure(current)
                             ?: PageResult(200, snapshot.optString("url"), body)
@@ -323,6 +345,15 @@ internal class WebViewApplicationPageTransport(
             if (completed == null) delay(POLL_MILLIS)
         }
         completed
+            }
+        } catch (error: TimeoutCancellationException) {
+            // Do not turn a caller cancellation into a page result.
+            currentCoroutineContext().ensureActive()
+            navigationFailure(current)?.copy(
+                challenge = lastObservedChallenge,
+                httpFailureAfterTimeout = true,
+            ) ?: throw error
+        }
     }
 
     private fun isCurrentMainFrame(
@@ -363,6 +394,7 @@ internal class WebViewApplicationPageTransport(
                 url: location.href,
                 ready: document.readyState,
                 timeOrigin: performance.timeOrigin || 0,
+                responseStatus: (performance.getEntriesByType("navigation")[0] || {}).responseStatus || 0,
                 domContentLoaded: (performance.getEntriesByType("navigation")[0] || {}).domContentLoadedEventEnd > 0,
                 hasSearchRows: !!document.querySelector(".search-results .search-result, #at-main .search-media .media"),
                 hasTagRows: !!document.querySelector(".tag-results .tag-result, .tagbox-media .media, .post-wrap .media"),

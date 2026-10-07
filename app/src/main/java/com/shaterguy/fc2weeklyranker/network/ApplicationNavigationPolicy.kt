@@ -76,8 +76,8 @@ internal fun classifyApplicationDocumentFailure(
     targetUrl: String,
     challenge: Boolean,
 ): PageFailureReason? = when {
-    isAuthenticationRequiredSearchResponse(status, targetUrl) -> PageFailureReason.AUTHENTICATION
     challenge -> if (status >= 400) PageFailureReason.HTTP else PageFailureReason.ERROR
+    isAuthenticationRequiredSearchResponse(status, targetUrl) -> PageFailureReason.AUTHENTICATION
     status !in 200..299 -> PageFailureReason.HTTP
     else -> null
 }

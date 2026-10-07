@@ -65,6 +65,36 @@ class WebViewHttpErrorInstrumentedTest {
     }
 
     @Test
+    fun challengeReloadWithSuccessfulNavigationStatusAllowsZeroResults() {
+        val attempts = AtomicInteger()
+        val parser = AvseeClient(OkHttpClient())
+        withTransport(
+            responder = { request ->
+                if (!request.isForMainFrame || request.url.path != "/bbs/search.php") {
+                    response(404, "Neutral missing resource")
+                } else if (attempts.getAndIncrement() == 0) {
+                    response(403, "<!doctype html><html><head><title>Just a moment...</title></head>" +
+                        "<body>Performing security verification<script>setTimeout(function(){location.reload()},50)</script></body></html>")
+                } else {
+                    // Controlled same-document status input for providers too old to expose responseStatus.
+                    response(200, "<!doctype html><html><head><script>" +
+                        "var originalEntries=performance.getEntriesByType.bind(performance);" +
+                        "performance.getEntriesByType=function(type){var e=originalEntries(type);" +
+                        "return type==='navigation'?e.map(function(v){return {domContentLoadedEventEnd:v.domContentLoadedEventEnd,responseStatus:200}}):e};" +
+                        "</script></head><body><ul class='search-results'></ul><p>EMPTY_SEARCH_RESPONSE</p></body></html>")
+                }
+            },
+            hasUsableSearchResults = parser::hasUsableApplicationSearchResults,
+        ) { transport, _ ->
+            val url = parser.buildSearchUrl(ORIGIN, "fixture", 1, "javfc2")
+            val html = withTimeout(10_000) { transport.fetch(url) }
+            assertTrue(html.contains("EMPTY_SEARCH_RESPONSE"))
+            assertTrue(parser.parseSearchPage(html, url).posts.isEmpty())
+            assertTrue(attempts.get() >= 2)
+        }
+    }
+
+    @Test
     fun protectedSearch403RetainsLoginRecoveryForStoredHttpDiagnostic() {
         assertTrue(
             "A protected search HTTP 403 must offer the existing first-party login recovery",

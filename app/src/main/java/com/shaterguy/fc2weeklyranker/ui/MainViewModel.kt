@@ -355,6 +355,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    internal fun searchRequestKey(): String? = currentSearchToken
+
     fun searchPosts(query: String) {
         val term = query.trim()
         if (term.isEmpty()) {

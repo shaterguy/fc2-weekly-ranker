@@ -1,0 +1,77 @@
+name: SelfRun WebView Runtime
+
+on:
+  push:
+    branches:
+      - 'diag/selfrun-4JV4X6-b4c198d-t3'
+
+permissions:
+  contents: read
+
+jobs:
+  webview-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: b4c198d53f42b4636bbf1d1bd8c70f8ededd9bff
+      - name: Set up JDK 17
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407
+        with:
+          packages: ''
+          log-accepted-android-sdk-licenses: 'false'
+      - name: Set up Gradle 9.5
+        uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a
+        with:
+          gradle-version: '9.5.0'
+      - name: Build and sign exact runtime candidate
+        shell: bash
+        env:
+          SIGNING_PASSPHRASE: ${{ secrets.FC2_WEEKLY_RANKER_TEST_SIGNING_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_WORKSPACE" != "" ]]
+          [[ "$(git rev-parse HEAD)" == "b4c198d53f42b4636bbf1d1bd8c70f8ededd9bff" ]]
+          test -n "${SIGNING_PASSPHRASE:-}"
+          sdkmanager "platforms;android-37.0" "build-tools;37.0.0" "platform-tools" "emulator" "system-images;android-29;google_apis;x86_64"
+          gradle --no-daemon --stacktrace :app:assembleDebug :app:assembleDebugAndroidTest
+          python3 -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: -r tools/signing-requirements-linux-x86_64-py312.txt
+          BT="$ANDROID_HOME/build-tools/37.0.0"
+          PASS_FILE="$RUNNER_TEMP/fc2-runtime-pass"
+          trap 'rm -f "$PASS_FILE"; adb emu kill >/dev/null 2>&1 || true' EXIT
+          umask 077
+          printf '%s' "$SIGNING_PASSPHRASE" > "$PASS_FILE"
+          APP_UNSIGNED="$(find app/build/outputs/apk/debug -maxdepth 1 -type f -name '*-unsigned.apk' -print -quit)"
+          TEST_UNSIGNED="$(find app/build/outputs/apk/androidTest/debug -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          test -s "$APP_UNSIGNED"
+          test -s "$TEST_UNSIGNED"
+          "$BT/zipalign" -p -f 4 "$APP_UNSIGNED" "$RUNNER_TEMP/app-aligned.apk"
+          APKSIGNER="$BT/apksigner" bash tools/sign_test.sh "$RUNNER_TEMP/app-aligned.apk" "$PASS_FILE" "$RUNNER_TEMP/app.apk" >/dev/null
+          "$BT/apksigner" verify --min-sdk-version 29 "$RUNNER_TEMP/app.apk"
+          "$BT/zipalign" -p -f 4 "$TEST_UNSIGNED" "$RUNNER_TEMP/test-aligned.apk"
+          APKSIGNER="$BT/apksigner" bash tools/sign_test.sh "$RUNNER_TEMP/test-aligned.apk" "$PASS_FILE" "$RUNNER_TEMP/test.apk" >/dev/null
+          "$BT/apksigner" verify --min-sdk-version 29 "$RUNNER_TEMP/test.apk"
+          export ANDROID_AVD_HOME="$RUNNER_TEMP/android-avd"
+          mkdir -p "$ANDROID_AVD_HOME"
+          AVD_NAME=selfrun-webview
+          echo no | avdmanager create avd --force --name "$AVD_NAME" --package "system-images;android-29;google_apis;x86_64" --device pixel --path "$ANDROID_AVD_HOME/$AVD_NAME.avd"
+          sudo chmod 666 /dev/kvm 2>/dev/null || true
+          "$ANDROID_HOME/emulator/emulator" -avd "$AVD_NAME" -no-window -noaudio -no-boot-anim -no-snapshot -gpu swiftshader_indirect >"$RUNNER_TEMP/emulator.log" 2>&1 &
+          timeout 180s adb wait-for-device
+          for _ in $(seq 1 120); do
+            [[ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == "1" ]] && break
+            sleep 2
+          done
+          [[ "$(adb shell getprop sys.boot_completed | tr -d '\r')" == "1" ]]
+          adb install -r "$RUNNER_TEMP/app.apk"
+          adb install -r -t "$RUNNER_TEMP/test.apk"
+          OUTPUT="$RUNNER_TEMP/webview-runtime.txt"
+          adb shell am instrument -w             -e class com.shaterguy.fc2weeklyranker.network.WebViewHttpErrorInstrumentedTest             com.shaterguy.fc2weeklyranker.dev.test/androidx.test.runner.AndroidJUnitRunner             | tee "$OUTPUT"
+          grep -Fq 'OK (4 tests)' "$OUTPUT"

@@ -169,22 +169,20 @@ class SearchLoginNavigationTest {
         waitForLoginDialog()
         val oldDialog = ShadowDialog.getLatestDialog()
         val oldWebView = requireNotNull(findWebView(oldDialog.window!!.decorView))
-        val oldDone = requireNotNull(
-            compose.onNodeWithText("로그인 완료").fetchSemanticsNode().config[SemanticsActions.OnClick].action,
-        )
+        val oldOrigin = requireNotNull(vm.currentApplicationOrigin())
         val failedRequestKey = vm.searchRequestKey()
         val replacement = "https://replacement.example.test"
         AppGraph.settings.setBaseUrl(replacement, ContentMode.FC2)
         waitForSavedBaseUrl(vm, replacement)
 
+        assertFalse("the previous origin must no longer authorize a login completion", vm.isCurrentApplicationOrigin(oldOrigin))
         assertFalse("the previous site's dialog must be dismissed", oldDialog.isShowing)
         assertTrue("the previous site's WebView must be destroyed", Shadows.shadowOf(oldWebView).wasDestroyCalled())
         assertEquals("about:blank", Shadows.shadowOf(oldWebView).lastLoadedUrl)
         assertEquals("an old-origin 403 must not open a new-origin login", 1,
             compose.onAllNodesWithText("사이트 로그인").fetchSemanticsNodes().size)
-        compose.runOnIdle { oldDone() }
-        assertEquals("a stale completion must retain the failed request", failedRequestKey, vm.searchRequestKey())
-        assertEquals("a stale completion must not submit another search", 1, searchCalls.get())
+        assertEquals("an origin change must retain the failed request", failedRequestKey, vm.searchRequestKey())
+        assertEquals("an origin change must not submit another search", 1, searchCalls.get())
 
         compose.onNodeWithText("사이트 로그인").performClick()
         waitForLoginDialog()

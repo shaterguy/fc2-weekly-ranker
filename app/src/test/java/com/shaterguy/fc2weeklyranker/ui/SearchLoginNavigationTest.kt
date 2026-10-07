@@ -2,6 +2,7 @@ package com.shaterguy.fc2weeklyranker.ui
 
 import android.app.Application
 import android.net.Uri
+import android.os.Looper
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
@@ -174,8 +175,7 @@ class SearchLoginNavigationTest {
         val failedRequestKey = vm.searchRequestKey()
         val replacement = "https://replacement.example.test"
         AppGraph.settings.setBaseUrl(replacement, ContentMode.FC2)
-        compose.waitUntil(10_000) { vm.baseUrl.value == replacement }
-        compose.waitForIdle()
+        waitForSavedBaseUrl(vm, replacement)
 
         assertFalse("the previous site's dialog must be dismissed", oldDialog.isShowing)
         assertTrue("the previous site's WebView must be destroyed", Shadows.shadowOf(oldWebView).wasDestroyCalled())
@@ -223,8 +223,7 @@ class SearchLoginNavigationTest {
             oldDone()
             assertNull("an old-mode completion must not schedule a search", vm.searchRequestKey())
         }
-        compose.waitUntil(10_000) { vm.baseUrl.value == JAV_ORIGIN }
-        compose.waitForIdle()
+        waitForSavedBaseUrl(vm, JAV_ORIGIN)
         assertFalse(oldDialog.isShowing)
         assertTrue(Shadows.shadowOf(oldWebView).wasDestroyCalled())
         assertEquals(0, searchCalls.get())
@@ -250,7 +249,7 @@ class SearchLoginNavigationTest {
                     submitted = true
                 }
             }
-            compose.waitUntil(10_000) { vm.baseUrl.value == origin }
+            waitForSavedBaseUrl(vm, origin)
             compose.onNodeWithText("${mode.sourceKey} 검색").assertIsDisplayed()
             if (!submitted) compose.runOnIdle { vm.searchPosts("${mode.sourceKey}-matching-origin") }
             compose.waitUntil(10_000) {
@@ -273,10 +272,22 @@ class SearchLoginNavigationTest {
     private fun launchSearchRoute(expectedOrigin: String = CONFIGURED_ORIGIN): MainViewModel {
         activity = Robolectric.buildActivity(MainActivity::class.java).setup()
         val vm = ViewModelProvider(activity!!.get()).get(MainViewModel::class.java)
-        compose.waitUntil(10_000) { vm.baseUrl.value == expectedOrigin }
+        waitForSavedBaseUrl(vm, expectedOrigin)
         compose.onNodeWithText("검색").performClick()
         compose.onNodeWithText("FC2 검색").assertIsDisplayed()
         return vm
+    }
+
+    private fun waitForSavedBaseUrl(vm: MainViewModel, expectedOrigin: String) {
+        compose.waitUntil(10_000) {
+            // PAUSED leaves DataStore -> Main ViewModel continuations on Android's queue.
+            // Advancing Compose's clock alone does not execute those posted tasks.
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            vm.baseUrl.value == expectedOrigin
+        }
+        compose.waitForIdle()
+        assertEquals("the saved snapshot must also match the displayed address", expectedOrigin,
+            vm.currentApplicationOrigin()?.baseUrl)
     }
 
     private fun waitForLoginDialog() {

@@ -24,6 +24,7 @@ import java.io.InputStream
 import java.util.Collections
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
+import com.shaterguy.fc2weeklyranker.ui.searchNeedsAuthentication
 
 // Intercepted HTTP responses do not trigger onReceivedHttpError on every WebView provider.
 // HTTP cases explicitly exercise the real client's callback contract on the main thread.
@@ -58,6 +59,37 @@ class WebViewHttpErrorInstrumentedTest {
             assertTrue("challenge did not cause a same-document reload", attempts.get() >= 2)
             assertTrue(
                 "main-frame challenge HTTP callback was not exercised",
+                synchronized(events) { events.any { "http_error status=403 main=true" in it } },
+            )
+        }
+    }
+
+    @Test
+    fun protectedSearch403RetainsLoginRecoveryForStoredHttpDiagnostic() {
+        assertTrue(
+            "A protected search HTTP 403 must offer the existing first-party login recovery",
+            searchNeedsAuthentication("검색 실패: 페이지 요청에 실패했습니다. [DOCUMENT/HTTP_403]"),
+        )
+    }
+
+    @Test
+    fun persistent403ChallengeRetainsHttpStatusAtDocumentTimeout() {
+        withTransport(
+            responder = { request ->
+                if (request.isForMainFrame && request.url.path == "/bbs/search.php") {
+                    response(403, "<!doctype html><html><head><title>Just a moment...</title></head>" +
+                        "<body>Performing security verification</body></html>")
+                } else response(404, "Neutral missing resource")
+            },
+            timeoutMillis = 45_000,
+        ) { transport, events ->
+            val failure = runCatching { transport.fetch("$ORIGIN/bbs/search.php?stx=fixture") }.exceptionOrNull()
+            assertTrue(
+                "Persistent main-frame HTTP 403 was lost to a generic timeout: $failure; events=$events",
+                failure?.message.orEmpty().contains("[DOCUMENT/HTTP_403]"),
+            )
+            assertTrue(
+                "Persistent challenge HTTP callback was not exercised",
                 synchronized(events) { events.any { "http_error status=403 main=true" in it } },
             )
         }
@@ -103,6 +135,7 @@ class WebViewHttpErrorInstrumentedTest {
     private fun withTransport(
         responder: (WebResourceRequest) -> WebResourceResponse = { request -> respond(request) },
         hasUsableSearchResults: (String, String) -> Boolean = { _, _ -> false },
+        timeoutMillis: Long = 20_000,
         block: suspend (WebViewApplicationPageTransport, List<String>) -> Unit,
     ) = runBlocking<Unit> {
         val events = Collections.synchronizedList(mutableListOf<String>())
@@ -131,7 +164,7 @@ class WebViewHttpErrorInstrumentedTest {
             }
         }
         try {
-            withTimeout(20_000) { block(transport, events) }
+            withTimeout(timeoutMillis) { block(transport, events) }
         } finally {
             withContext(NonCancellable) {
                 callbackDelivery.cancelAndJoin()

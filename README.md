@@ -12,8 +12,8 @@ Android app for browsing the configured `javfc2` board in fixed seven-day window
 
 ## TEST channel
 
-- Historical TEST lineage starts at `v0.1.0-dev1`; the current development target is `v0.2.0-dev47`.
-- Source version: `0.2.0-dev47`, `versionCode=71`.
+- Historical TEST lineage starts at `v0.1.0-dev1`; the current development target is `v0.2.0-dev48`.
+- Source version: `0.2.0-dev48`, `versionCode=72`.
 - TEST application ID: `com.shaterguy.fc2weeklyranker.dev`.
 - The configured official origin is `https://02.avsee.is`. Existing exact `https://01.avsee.is` settings migrate to 02, while unrelated custom HTTPS origins remain unchanged. Application pages are fetched through the app WebView session so Cloudflare/browser-session state stays in the browser context.
 - DEV47 restores the existing first-party login flow when official general search receives HTTP 401/403: authentication-required classification now takes precedence over challenge/generic HTTP classification, so the existing "사이트 로그인" control is shown even when a protected response also looks like a security challenge. Tag search and other challenge handling remain unchanged.

@@ -1,6 +1,7 @@
 package com.shaterguy.fc2weeklyranker.network
 
 import android.webkit.WebView
+import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -16,6 +17,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import okhttp3.OkHttpClient
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.ByteArrayInputStream
@@ -32,6 +35,42 @@ import com.shaterguy.fc2weeklyranker.ui.searchNeedsAuthentication
 @RunWith(AndroidJUnit4::class)
 class WebViewHttpErrorInstrumentedTest {
     @Test
+    fun foreignMainFrameFormPostIsBlockedBeforeFixtureHandling() {
+        val foreignFixtureCalls = AtomicInteger()
+        val html = """<!doctype html><html><head><title>Neutral POST fixture</title></head><body>
+            <form id="neutral-post" method="POST" action="https://foreign.example.test/bbs/login.php">
+            <input name="neutral-field" value="synthetic-only"></form>POST_FIXTURE_READY</body></html>"""
+        withTransport(responder = { request ->
+            if (request.url.host != "fixture.invalid") foreignFixtureCalls.incrementAndGet()
+            WebResourceResponse("text/html", "UTF-8", 200, "OK", emptyMap(), ByteArrayInputStream(html.toByteArray()))
+        }) { transport, events ->
+            assertTrue(transport.fetch("$ORIGIN/post-fixture.html").contains("POST_FIXTURE_READY"))
+            withContext(Dispatchers.Main.immediate) {
+                currentWebView(transport)!!.evaluateJavascript("document.getElementById('neutral-post').submit()", null)
+            }
+            withTimeout(5_000) {
+                while (synchronized(events) { events.none { it == "origin_blocked method=POST" } }) delay(50)
+            }
+            assertEquals(0, foreignFixtureCalls.get())
+        }
+    }
+    @Test
+    fun unconfiguredOriginIsRejectedBeforeCreatingBrowserOrNetwork() = runBlocking<Unit> {
+        val transport = WebViewApplicationPageTransport(
+            InstrumentationRegistry.getInstrumentation().targetContext,
+            configuredOrigins = { setOf(ORIGIN) },
+        )
+        try {
+            val error = runCatching { transport.fetch("https://foreign.example.test/bbs/search.php") }.exceptionOrNull()
+            assertTrue(error is PageLoadException)
+            assertEquals(PageFailureStage.SESSION, (error as PageLoadException).stage)
+            assertEquals(PageFailureReason.ERROR, error.reason)
+            assertEquals(null, currentWebView(transport))
+        } finally {
+            transport.close()
+        }
+    }
+    @Test
     fun mainFrame404IsNotReturnedAsAnEmptySuccess() = verifyHttpFailure(404)
 
     @Test
@@ -43,6 +82,10 @@ class WebViewHttpErrorInstrumentedTest {
     @Test
     fun successfulEmptyDocumentRemainsUsable() = withTransport { transport, _ ->
         assertTrue(transport.fetch("$ORIGIN/ok.html").contains("NEUTRAL_EMPTY_DOCUMENT"))
+        val acceptsThirdParty = withContext(Dispatchers.Main.immediate) {
+            CookieManager.getInstance().acceptThirdPartyCookies(currentWebView(transport)!!)
+        }
+        assertFalse(acceptsThirdParty)
     }
 
     @Test
@@ -173,6 +216,7 @@ class WebViewHttpErrorInstrumentedTest {
         val transport = WebViewApplicationPageTransport(
             InstrumentationRegistry.getInstrumentation().targetContext,
             "NeutralWebViewTransportTest",
+            configuredOrigins = { setOf(ORIGIN) },
             hasUsableSearchResults = hasUsableSearchResults,
             fixtureResponse = { request ->
                 responder(request).also { response ->

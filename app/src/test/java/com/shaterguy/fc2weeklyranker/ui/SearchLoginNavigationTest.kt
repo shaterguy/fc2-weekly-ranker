@@ -7,6 +7,7 @@ import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasAnySibling
 import androidx.compose.ui.test.hasSetTextAction
@@ -38,6 +39,8 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotSame
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -53,6 +56,7 @@ import org.robolectric.annotation.LooperMode
 import org.robolectric.shadows.ShadowDialog
 import java.net.URI
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.ConcurrentLinkedQueue
 
 /** Production Activity -> navigation -> real Room/ViewModel -> Compose Dialog.
  * Robolectric shadows the login WebView; no site request or account login occurs.
@@ -68,6 +72,7 @@ class SearchLoginNavigationTest {
     private var database: AppDatabase? = null
     private var searchDatabase: SearchDatabase? = null
     private val searchCalls = AtomicInteger()
+    private val searchUrls = ConcurrentLinkedQueue<String>()
 
     @Before fun setUpNeutralDependencies() = runBlocking {
         val app = ApplicationProvider.getApplicationContext<Application>()
@@ -83,6 +88,7 @@ class SearchLoginNavigationTest {
             override suspend fun fetch(url: String, referer: String?): String {
                 if (URI(url).path == "/bbs/search.php") {
                     searchCalls.incrementAndGet()
+                    searchUrls.add(url)
                     throw PageLoadException(PageFailureStage.DOCUMENT, PageFailureReason.HTTP, 403)
                 }
                 return "<!doctype html><html><head><title>Neutral fixture</title></head><body></body></html>"
@@ -94,6 +100,7 @@ class SearchLoginNavigationTest {
         replaceGraphField("repository", AppRepository(app, AppGraph.database, AppGraph.settings, source))
         AppGraph.settings.setSelectedContentMode(ContentMode.FC2)
         AppGraph.settings.setBaseUrl(CONFIGURED_ORIGIN, ContentMode.FC2)
+        AppGraph.settings.setBaseUrl(JAV_ORIGIN, ContentMode.JAV)
     }
 
     @After fun closeActivityAndRunner() {
@@ -154,12 +161,122 @@ class SearchLoginNavigationTest {
         assertLoginWebView(configured)
     }
 
-    private fun launchSearchRoute(expectedOrigin: String = CONFIGURED_ORIGIN) {
+    @Test fun changingOriginDisposesVisibleLoginBeforeOpeningReplacement() = runBlocking {
+        val vm = launchSearchRoute()
+        compose.onNode(hasSetTextAction()).performTextInput("neutral-origin-change")
+        compose.onNode(hasText("검색") and hasAnySibling(hasSetTextAction())).performClick()
+        waitForLoginDialog()
+        val oldDialog = ShadowDialog.getLatestDialog()
+        val oldWebView = requireNotNull(findWebView(oldDialog.window!!.decorView))
+        val oldDone = requireNotNull(
+            compose.onNodeWithText("로그인 완료").fetchSemanticsNode().config[SemanticsActions.OnClick].action,
+        )
+        val failedRequestKey = vm.searchRequestKey()
+        val replacement = "https://replacement.example.test"
+        AppGraph.settings.setBaseUrl(replacement, ContentMode.FC2)
+        compose.waitUntil(10_000) { vm.baseUrl.value == replacement }
+        compose.waitForIdle()
+
+        assertFalse("the previous site's dialog must be dismissed", oldDialog.isShowing)
+        assertTrue("the previous site's WebView must be destroyed", Shadows.shadowOf(oldWebView).wasDestroyCalled())
+        assertEquals("about:blank", Shadows.shadowOf(oldWebView).lastLoadedUrl)
+        assertEquals("an old-origin 403 must not open a new-origin login", 1,
+            compose.onAllNodesWithText("사이트 로그인").fetchSemanticsNodes().size)
+        compose.runOnIdle { oldDone() }
+        assertEquals("a stale completion must retain the failed request", failedRequestKey, vm.searchRequestKey())
+        assertEquals("a stale completion must not submit another search", 1, searchCalls.get())
+
+        compose.onNodeWithText("사이트 로그인").performClick()
+        waitForLoginDialog()
+        val replacementDialog = ShadowDialog.getLatestDialog()
+        assertNotSame(oldDialog, replacementDialog)
+        assertNotSame(oldWebView, findWebView(replacementDialog.window!!.decorView))
+        assertLoginWebView(replacement)
+    }
+
+    @Test fun storedProtectedFailureFromAnotherOriginDoesNotPromptCurrentSite() = runBlocking {
+        val dao = AppGraph.searchDatabase.searchDao()
+        val request = SearchRequest("ui-stale-origin-403", "neutral-query", "https://previous.example.test")
+        dao.prepareSession(request)
+        dao.fail(request.token, safeApplicationFailureMessage(
+            PageLoadException(PageFailureStage.DOCUMENT, PageFailureReason.HTTP, 403)), 1L)
+        val vm = launchSearchRoute()
+        compose.waitUntil(10_000) { vm.searchMessage.value?.contains("[DOCUMENT/HTTP_403]") == true }
+        compose.waitForIdle()
+        assertEquals("only the manual login control should be shown", 1,
+            compose.onAllNodesWithText("사이트 로그인").fetchSemanticsNodes().size)
+        assertEquals(0, searchCalls.get())
+    }
+
+    @Test fun changingModeDisposesLoginAndRejectsStaleCompletion() {
+        val vm = launchSearchRoute()
+        compose.onNode(hasSetTextAction()).performTextInput("neutral-mode-change")
+        compose.onNodeWithText("사이트 로그인").performClick()
+        waitForLoginDialog()
+        val oldDialog = ShadowDialog.getLatestDialog()
+        val oldWebView = requireNotNull(findWebView(oldDialog.window!!.decorView))
+        val oldDone = requireNotNull(
+            compose.onNodeWithText("로그인 완료").fetchSemanticsNode().config[SemanticsActions.OnClick].action,
+        )
+        compose.runOnIdle {
+            vm.selectContentMode(ContentMode.JAV)
+            oldDone()
+            assertNull("an old-mode completion must not schedule a search", vm.searchRequestKey())
+        }
+        compose.waitUntil(10_000) { vm.baseUrl.value == JAV_ORIGIN }
+        compose.waitForIdle()
+        assertFalse(oldDialog.isShowing)
+        assertTrue(Shadows.shadowOf(oldWebView).wasDestroyCalled())
+        assertEquals(0, searchCalls.get())
+        compose.onNodeWithText("사이트 로그인").performClick()
+        waitForLoginDialog()
+        assertLoginWebView(JAV_ORIGIN)
+    }
+
+    @Test fun immediateModeSwitchNeverSubmitsThePreviousSavedOrigin() {
+        val vm = launchSearchRoute()
+        for ((mode, origin) in listOf(ContentMode.JAV to JAV_ORIGIN, ContentMode.FC2 to CONFIGURED_ORIGIN)) {
+            var submitted = false
+            compose.runOnIdle {
+                vm.selectContentMode(mode)
+                val saved = vm.currentApplicationOrigin()
+                if (saved == null) {
+                    vm.searchPosts("${mode.sourceKey}-pending-origin")
+                    assertNull("mode switch must not schedule before its origin arrives", vm.searchRequestKey())
+                } else {
+                    assertEquals(mode, saved.mode)
+                    assertEquals(origin, saved.baseUrl)
+                    vm.searchPosts("${mode.sourceKey}-matching-origin")
+                    submitted = true
+                }
+            }
+            compose.waitUntil(10_000) { vm.baseUrl.value == origin }
+            compose.onNodeWithText("${mode.sourceKey} 검색").assertIsDisplayed()
+            if (!submitted) compose.runOnIdle { vm.searchPosts("${mode.sourceKey}-matching-origin") }
+            compose.waitUntil(10_000) {
+                searchUrls.any { Uri.parse(it).getQueryParameter("stx") == "${mode.sourceKey}-matching-origin" }
+            }
+            waitForLoginDialog()
+            assertLoginWebView(origin)
+            compose.onNodeWithText("닫기").performClick()
+        }
+        assertEquals(2, searchCalls.get())
+        for (url in searchUrls) {
+            val mode = if (Uri.parse(url).getQueryParameter("onetable") == ContentMode.JAV.boardTable) {
+                ContentMode.JAV
+            } else ContentMode.FC2
+            val expected = if (mode == ContentMode.JAV) JAV_ORIGIN else CONFIGURED_ORIGIN
+            assertEquals("source request must use its mode's saved origin", URI(expected).host, URI(url).host)
+        }
+    }
+
+    private fun launchSearchRoute(expectedOrigin: String = CONFIGURED_ORIGIN): MainViewModel {
         activity = Robolectric.buildActivity(MainActivity::class.java).setup()
         val vm = ViewModelProvider(activity!!.get()).get(MainViewModel::class.java)
         compose.waitUntil(10_000) { vm.baseUrl.value == expectedOrigin }
         compose.onNodeWithText("검색").performClick()
         compose.onNodeWithText("FC2 검색").assertIsDisplayed()
+        return vm
     }
 
     private fun waitForLoginDialog() {
@@ -177,6 +294,10 @@ class SearchLoginNavigationTest {
         assertFalse(CookieManager.getInstance().acceptThirdPartyCookies(webView))
         val client = webView.webViewClient
         assertFalse(client.shouldOverrideUrlLoading(webView, request("$expectedOrigin/bbs/search.php")))
+        assertNull("a same-origin POST must reach the site's login handler",
+            client.shouldInterceptRequest(webView, request("$expectedOrigin/bbs/login_check.php", "POST")))
+        assertEquals("a foreign main-frame POST must be rejected", 403,
+            client.shouldInterceptRequest(webView, request("https://foreign.example.test/bbs/login_check.php", "POST"))?.statusCode)
         for (url in listOf(
             "https://01.avsee.is/bbs/login.php",
             "https://foreign.example.test/bbs/login.php",
@@ -198,16 +319,17 @@ class SearchLoginNavigationTest {
         AppGraph::class.java.getDeclaredField(name).apply { isAccessible = true }.set(null, value)
     }
 
-    private fun request(url: String): WebResourceRequest = object : WebResourceRequest {
+    private fun request(url: String, method: String = "GET"): WebResourceRequest = object : WebResourceRequest {
         override fun getUrl(): Uri = Uri.parse(url)
         override fun isForMainFrame() = true
         override fun isRedirect() = true
         override fun hasGesture() = false
-        override fun getMethod() = "GET"
+        override fun getMethod() = method
         override fun getRequestHeaders(): Map<String, String> = emptyMap()
     }
 
     companion object {
         private const val CONFIGURED_ORIGIN = "https://03.avsee.is"
+        private const val JAV_ORIGIN = "https://jav-search.example.test"
     }
 }

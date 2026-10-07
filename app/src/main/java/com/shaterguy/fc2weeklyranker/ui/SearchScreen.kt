@@ -3,6 +3,7 @@ package com.shaterguy.fc2weeklyranker.ui
 import android.annotation.SuppressLint
 import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -28,6 +29,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -42,8 +44,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import com.shaterguy.fc2weeklyranker.network.RemoteSearchPost
-import com.shaterguy.fc2weeklyranker.network.isOfficialApplicationUrl
-import com.shaterguy.fc2weeklyranker.network.officialApplicationStartUrl
+import com.shaterguy.fc2weeklyranker.network.applicationLoginStartUrl
+import com.shaterguy.fc2weeklyranker.network.applicationPageOrigin
+import com.shaterguy.fc2weeklyranker.network.configuredApplicationOrigin
+import com.shaterguy.fc2weeklyranker.network.isApplicationNavigationAllowed
+import com.shaterguy.fc2weeklyranker.network.rejectUnconfiguredMainFrame
 
 internal enum class SearchSortMode { FIRST_SEEN, OCCURRENCE }
 
@@ -80,18 +85,34 @@ fun SearchScreen(
     val message by vm.searchMessage.collectAsState()
     val openingPostId by vm.searchOpeningPostId.collectAsState()
     val visitedPostIds by vm.visitedPostIds.collectAsState()
-    val baseUrl by vm.baseUrl.collectAsState()
+    val savedOrigin by vm.savedApplicationOrigin.collectAsState()
+    val failedSearchOrigin by vm.failedSearchOrigin.collectAsState()
+    val loginSite = savedOrigin?.takeIf { it.mode == mode }
+    val loginStartUrl = remember(loginSite) { loginSite?.let { applicationLoginStartUrl(it.baseUrl) } }
     var query by rememberSaveable(mode.sourceKey) { mutableStateOf("") }
     var hasSearched by rememberSaveable(mode.sourceKey) { mutableStateOf(false) }
-    var loginPrompt by rememberSaveable(
-        mode.sourceKey,
-        stateSaver = Saver<SearchLoginPromptState, List<String>>(
-            save = { it.savedValue() }, restore = { SearchLoginPromptState.restore(it) },
-        ),
-    ) { mutableStateOf(SearchLoginPromptState()) }
-    val searchRequestKey = vm.searchRequestKey()
+    // Wait for the saved origin before restoring a prompt's persisted scope.
+    var loginPrompt by if (loginSite != null) {
+        rememberSaveable(
+            mode.sourceKey,
+            loginSite,
+            stateSaver = Saver<SearchLoginPromptState, List<String>>(
+                save = { listOf(mode.sourceKey, loginStartUrl.orEmpty()) + it.savedValue() },
+                restore = {
+                    if (it.getOrNull(0) == mode.sourceKey && it.getOrNull(1) == loginStartUrl.orEmpty()) {
+                        SearchLoginPromptState.restore(it.drop(2))
+                    } else SearchLoginPromptState()
+                },
+            ),
+        ) { mutableStateOf(SearchLoginPromptState()) }
+    } else {
+        remember(mode.sourceKey) { mutableStateOf(SearchLoginPromptState()) }
+    }
+    val loginFailure = failedSearchOrigin?.takeIf { failure ->
+        loginSite != null && failure.mode == mode &&
+            configuredApplicationOrigin(failure.baseUrl) == loginSite.baseUrl && failure.message == message
+    }
     var sortName by rememberSaveable(mode.sourceKey) { mutableStateOf(SearchSortMode.FIRST_SEEN.name) }
-    val loginStartUrl = remember(baseUrl) { officialApplicationStartUrl(baseUrl) }
     val sortMode = remember(sortName) {
         runCatching { SearchSortMode.valueOf(sortName) }.getOrDefault(SearchSortMode.FIRST_SEEN)
     }
@@ -105,30 +126,41 @@ fun SearchScreen(
         }
     }
 
-    LaunchedEffect(searchRequestKey, message, loading, cancelling, loginStartUrl) {
-        loginPrompt = loginPrompt.observe(searchRequestKey, message, loading || cancelling, loginStartUrl != null)
+    LaunchedEffect(loginFailure, loading, cancelling, loginSite) {
+        loginPrompt = loginPrompt.observe(
+            loginFailure?.requestKey,
+            loginFailure?.message,
+            loading || cancelling,
+            loginStartUrl != null,
+        )
     }
 
-    if (loginPrompt.visible && loginStartUrl != null) {
-        ApplicationLoginDialog(
-            startUrl = loginStartUrl,
-            onDismiss = {
-                loginPrompt = loginPrompt.dismiss()
-                CookieManager.getInstance().flush()
-            },
-            onDone = {
-                val (next, retrySearch) = loginPrompt.complete()
-                loginPrompt = next
-                if (retrySearch) {
-                    CookieManager.getInstance().flush()
-                    vm.clearSearchMessage()
-                    if (query.isNotBlank()) {
-                        hasSearched = true
-                        vm.searchPosts(query)
+    if (loginPrompt.visible && loginStartUrl != null && loginSite != null) {
+        key(loginStartUrl, loginSite.generation) {
+            ApplicationLoginDialog(
+                startUrl = loginStartUrl,
+                onDismiss = {
+                    if (vm.isCurrentApplicationOrigin(loginSite)) {
+                        loginPrompt = loginPrompt.dismiss()
+                        CookieManager.getInstance().flush()
                     }
-                }
-            },
-        )
+                },
+                onDone = {
+                    if (vm.isCurrentApplicationOrigin(loginSite)) {
+                        val (next, retrySearch) = loginPrompt.complete()
+                        loginPrompt = next
+                        if (retrySearch) {
+                            CookieManager.getInstance().flush()
+                            vm.clearSearchMessage()
+                            if (query.isNotBlank()) {
+                                hasSearched = true
+                                vm.searchPosts(query)
+                            }
+                        }
+                    }
+                },
+            )
+        }
     }
 
     Column(
@@ -157,13 +189,17 @@ fun SearchScreen(
                     hasSearched = true
                     vm.searchPosts(query)
                 },
-                enabled = query.isNotBlank() && !loading && !cancelling,
+                enabled = loginSite != null && query.isNotBlank() && !loading && !cancelling,
             ) { Text("검색") }
         }
 
         if (loginStartUrl != null) {
             OutlinedButton(
-                onClick = { loginPrompt = loginPrompt.open() },
+                onClick = {
+                    if (loginSite != null && vm.isCurrentApplicationOrigin(loginSite)) {
+                        loginPrompt = loginPrompt.open()
+                    }
+                },
                 enabled = !loading && !cancelling,
             ) { Text("사이트 로그인") }
         }
@@ -272,6 +308,7 @@ private fun ApplicationLoginDialog(
     onDismiss: () -> Unit,
     onDone: () -> Unit,
 ) {
+    val loginOrigin = remember(startUrl) { requireNotNull(applicationPageOrigin(startUrl)) }
     Dialog(onDismissRequest = onDismiss) {
         Card(Modifier.fillMaxWidth()) {
             Column(
@@ -295,12 +332,18 @@ private fun ApplicationLoginDialog(
                             CookieManager.getInstance().setAcceptCookie(true)
                             CookieManager.getInstance().setAcceptThirdPartyCookies(this, false)
                             webViewClient = object : WebViewClient() {
+                                override fun shouldInterceptRequest(
+                                    view: WebView,
+                                    request: WebResourceRequest,
+                                ): WebResourceResponse? = rejectUnconfiguredMainFrame(loginOrigin, request)
+                                    ?: super.shouldInterceptRequest(view, request)
+
                                 override fun shouldOverrideUrlLoading(
                                     view: WebView,
                                     request: WebResourceRequest,
                                 ): Boolean {
                                     if (!request.isForMainFrame) return false
-                                    return !isOfficialApplicationUrl(request.url.toString())
+                                    return !isApplicationNavigationAllowed(loginOrigin, request.url.toString())
                                 }
                             }
                             loadUrl(startUrl)

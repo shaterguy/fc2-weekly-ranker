@@ -3,7 +3,6 @@ package com.shaterguy.fc2weeklyranker.network
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
-import android.net.Uri
 import android.webkit.CookieManager
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -34,6 +33,7 @@ interface ApplicationPageTransport {
 internal class WebViewApplicationPageTransport(
     context: Context,
     private val userAgent: String? = null,
+    private val configuredOrigins: suspend () -> Set<String>,
     private val hasUsableSearchResults: (String, String) -> Boolean = { _, _ -> false },
     private val fixtureResponse: ((WebResourceRequest) -> WebResourceResponse?)? = null,
     private val fixtureDiagnostic: ((String) -> Unit)? = null,
@@ -90,6 +90,7 @@ internal class WebViewApplicationPageTransport(
                     result.status,
                     target.toString(),
                     result.challenge || isChallenge(result),
+                    configuredOrigin = current.origin,
                 )
                 if (failureReason == null) {
                     requireAllowedFinalUrl(current, result.finalUrl)
@@ -131,6 +132,7 @@ internal class WebViewApplicationPageTransport(
         require(uri.scheme.equals("https", ignoreCase = true)) { "HTTPS 페이지가 필요합니다." }
         require(!uri.host.isNullOrBlank()) { "페이지 호스트가 없습니다." }
         require(uri.userInfo == null) { "사용자 정보가 포함된 주소는 사용할 수 없습니다." }
+        require(applicationPageOrigin(url) != null) { "허용되는 HTTPS 사이트 주소가 필요합니다." }
         return uri
     }
 
@@ -140,22 +142,21 @@ internal class WebViewApplicationPageTransport(
                 "Synthetic WebView hooks are restricted to the reserved fixture host."
             }
         }
-        val origin = "https://${target.host.lowercase()}"
+        val origin = requireNotNull(applicationPageOrigin(target.toString()))
+        val configured = configuredOrigins().mapNotNull(::configuredApplicationOrigin).toSet()
+        require(origin in configured) { "설정되지 않은 사이트로 이동할 수 없습니다." }
         session?.takeIf { it.origin == origin }?.let { return it }
         resetSession()
-        val allowedHosts = allowedHostsFor(target.host.lowercase())
+        val allowedHosts = setOf(target.host.lowercase())
         val navigation = NavigationState()
         val webView = createWebView(allowedHosts, navigation)
         val created = BrowserSession(origin, allowedHosts, webView, navigation)
         session = created
-        if (target.host.lowercase() in OFFICIAL_APPLICATION_HOSTS) {
+        if (fixtureResponse == null && fixtureDiagnostic == null) {
             bootstrap(created)
         }
         return created
     }
-
-    private fun allowedHostsFor(host: String): Set<String> =
-        if (host in OFFICIAL_APPLICATION_HOSTS) OFFICIAL_APPLICATION_HOSTS else setOf(host)
 
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun createWebView(allowedHosts: Set<String>, navigation: NavigationState): WebView = withContext(Dispatchers.Main.immediate) {
@@ -167,10 +168,16 @@ internal class WebViewApplicationPageTransport(
             settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
             userAgent?.takeIf(String::isNotBlank)?.let { settings.userAgentString = it }
             CookieManager.getInstance().setAcceptCookie(true)
-            CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+            CookieManager.getInstance().setAcceptThirdPartyCookies(this, false)
             webViewClient = object : WebViewClient() {
-                override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? =
-                    fixtureResponse?.invoke(request) ?: super.shouldInterceptRequest(view, request)
+                override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
+                    val origin = "https://${allowedHosts.single()}"
+                    rejectUnconfiguredMainFrame(origin, request)?.let { blocked ->
+                        fixtureDiagnostic?.invoke(if (request.method == "POST") "origin_blocked method=POST" else "origin_blocked method=OTHER")
+                        return blocked
+                    }
+                    return fixtureResponse?.invoke(request) ?: super.shouldInterceptRequest(view, request)
+                }
 
                 override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
                     // A main-frame HTTP callback can precede onPageStarted. Do not erase
@@ -202,9 +209,8 @@ internal class WebViewApplicationPageTransport(
 
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                     if (!request.isForMainFrame) return false
-                    val uri = request.url
-                    return !uri.scheme.equals("https", ignoreCase = true) ||
-                        uri.host.orEmpty().lowercase() !in allowedHosts
+                    val origin = "https://${allowedHosts.single()}"
+                    return !isApplicationNavigationAllowed(origin, request.url.toString())
                 }
             }
         }
@@ -260,7 +266,7 @@ internal class WebViewApplicationPageTransport(
             if (
                 snapshot != null &&
                 requestedPath == "/bbs/search.php" &&
-                isAuthenticationRedirect(snapshot.optString("url"))
+                isAuthenticationRedirect(snapshot.optString("url"), current.origin)
             ) {
                 throw PageLoadException(PageFailureStage.DOCUMENT, PageFailureReason.AUTHENTICATION)
             }
@@ -290,7 +296,7 @@ internal class WebViewApplicationPageTransport(
                     url,
                     currentDocumentObserved,
                     challenge,
-                    allowSyntheticFixture = fixtureResponse != null,
+                    configuredOrigin = current.origin,
                 )
             ) {
                 delay(POLL_MILLIS)
@@ -300,7 +306,7 @@ internal class WebViewApplicationPageTransport(
                 isRequestedDocument(current.allowedHosts, url, snapshot.optString("url")) &&
                 shouldResetDeferredSearchChallengeHttpFailure(
                     httpStatus, url, snapshot.optString("url"),
-                    allowSyntheticFixture = fixtureResponse != null,
+                    configuredOrigin = current.origin,
                 )
             if (!canInspectSearchRecovery) navigationFailure(current)?.let { return@withTimeout it }
             fixtureDiagnostic?.invoke(
@@ -436,11 +442,8 @@ internal class WebViewApplicationPageTransport(
         check(isAllowedUrl(current, url)) { "허용되지 않은 사이트로 이동했습니다." }
     }
 
-    private fun isAllowedUrl(current: BrowserSession, url: String): Boolean = runCatching {
-        val uri = Uri.parse(url)
-        uri.scheme.equals("https", ignoreCase = true) &&
-            uri.host.orEmpty().lowercase() in current.allowedHosts
-    }.getOrDefault(false)
+    private fun isAllowedUrl(current: BrowserSession, url: String): Boolean =
+        isApplicationNavigationAllowed(current.origin, url)
 
     private fun diagnosticUrl(url: String?): String = runCatching {
         val uri = URI(url.orEmpty())

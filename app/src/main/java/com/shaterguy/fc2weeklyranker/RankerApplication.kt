@@ -6,6 +6,7 @@ import android.os.Bundle
 import androidx.room.Room
 import com.shaterguy.fc2weeklyranker.data.AppDatabase
 import com.shaterguy.fc2weeklyranker.data.SettingsStore
+import com.shaterguy.fc2weeklyranker.domain.ContentMode
 import com.shaterguy.fc2weeklyranker.network.AvseeClient
 import com.shaterguy.fc2weeklyranker.network.WebViewApplicationPageTransport
 import com.shaterguy.fc2weeklyranker.repo.AppRepository
@@ -15,6 +16,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.first
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
 
@@ -75,6 +77,9 @@ object AppGraph {
             httpClient,
             applicationPageTransport = WebViewApplicationPageTransport(
                 app,
+                configuredOrigins = {
+                    ContentMode.entries.map { mode -> settings.baseUrl(mode).first() }.toSet()
+                },
                 hasUsableSearchResults = { html, pageUrl ->
                     sourceClient.hasUsableApplicationSearchResults(html, pageUrl)
                 },

@@ -49,6 +49,7 @@ class WebViewApplicationPageTransportInstrumentedTest {
         val transport = WebViewApplicationPageTransport(
             context,
             AvseeClient.USER_AGENT,
+            configuredOrigins = { setOf("https://fixture.invalid") },
             hasUsableSearchResults = parser::hasUsableApplicationSearchResults,
             fixtureResponse = fixture::respond,
             fixtureDiagnostic = { events.add(it) },

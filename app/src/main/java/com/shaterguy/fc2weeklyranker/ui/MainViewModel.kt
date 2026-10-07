@@ -12,6 +12,7 @@ import com.shaterguy.fc2weeklyranker.domain.RankedPost
 import com.shaterguy.fc2weeklyranker.domain.RankingMode
 import com.shaterguy.fc2weeklyranker.network.RemotePost
 import com.shaterguy.fc2weeklyranker.network.RemoteSearchPost
+import com.shaterguy.fc2weeklyranker.network.configuredApplicationOrigin
 import com.shaterguy.fc2weeklyranker.network.isTransientNetworkError
 import com.shaterguy.fc2weeklyranker.repo.AppRepository
 import com.shaterguy.fc2weeklyranker.search.SearchRecoveryPolicy
@@ -20,6 +21,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filterNotNull
@@ -40,6 +42,19 @@ data class SearchProgress(
     val query: String,
     val completedPages: Int,
     val totalPages: Int,
+)
+
+internal data class SavedApplicationOrigin(
+    val mode: ContentMode,
+    val baseUrl: String,
+    val generation: Long,
+)
+
+internal data class FailedSearchOrigin(
+    val requestKey: String,
+    val mode: ContentMode,
+    val baseUrl: String,
+    val message: String,
 )
 
 internal sealed interface RetryIntent {
@@ -119,6 +134,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val loading = MutableStateFlow(false)
     private val mutableRankingMode = MutableStateFlow(RankingMode.POPULARITY)
     private val mutableContentMode = MutableStateFlow(ContentMode.FC2)
+    private val mutableSavedApplicationOrigin = MutableStateFlow<SavedApplicationOrigin?>(null)
+    private val mutableFailedSearchOrigin = MutableStateFlow<FailedSearchOrigin?>(null)
+    private var contentModeInitialized = false
+    private var applicationOriginGeneration = 0L
     private val mutableSearchResults = MutableStateFlow<List<RemoteSearchPost>>(emptyList())
     private val mutableSearchMessage = MutableStateFlow<String?>(null)
     private val searchLoading = MutableStateFlow(false)
@@ -145,7 +164,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val isSearchCancelling = searchCancelling.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     val searchProgress = mutableSearchProgress.stateIn(viewModelScope, SharingStarted.Eagerly, null)
     val searchOpeningPostId = mutableSearchOpeningPostId.stateIn(viewModelScope, SharingStarted.Eagerly, null)
-    val baseUrl = repo.settings.baseUrl.stateIn(viewModelScope, SharingStarted.Eagerly, ContentMode.FC2.defaultBaseUrl)
+    internal val savedApplicationOrigin = mutableSavedApplicationOrigin.asStateFlow()
+    internal val failedSearchOrigin = mutableFailedSearchOrigin.asStateFlow()
+    val baseUrl = combine(mutableContentMode, mutableSavedApplicationOrigin) { mode, saved ->
+        saved?.takeIf { it.mode == mode }?.baseUrl.orEmpty()
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, "")
     val anchorEpochMillis = mutableContentMode
         .flatMapLatest { mode ->
             combine(repo.settings.anchorEpochMillis(mode), localAnchor) { stored, local ->
@@ -179,7 +202,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     init {
         viewModelScope.launch { runCatching { repo.recoverDownloads() } }
         viewModelScope.launch {
-            mutableContentMode.value = repo.settings.selectedContentMode.first()
+            val storedMode = repo.settings.selectedContentMode.first()
+            if (!contentModeInitialized) {
+                mutableContentMode.value = storedMode
+                contentModeInitialized = true
+            }
+            mutableContentMode.flatMapLatest { mode ->
+                repo.settings.baseUrl(mode).map { mode to it }
+            }.collect { (mode, storedUrl) ->
+                if (mode != mutableContentMode.value) return@collect
+                val origin = configuredApplicationOrigin(storedUrl)
+                val previous = mutableSavedApplicationOrigin.value
+                if (origin == null) {
+                    mutableSavedApplicationOrigin.value = null
+                } else if (previous == null || previous.mode != mode || previous.baseUrl != origin) {
+                    applicationOriginGeneration += 1
+                    mutableSavedApplicationOrigin.value = SavedApplicationOrigin(mode, origin, applicationOriginGeneration)
+                }
+            }
+        }
+        viewModelScope.launch {
             mutableContentMode.flatMapLatest { mode ->
                 combine(
                     searchDao.observeSession(mode.sourceKey),
@@ -198,7 +240,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         totalPages = it.totalPages.coerceAtLeast(0),
                     )
                 }
-                mutableSearchMessage.value = when {
+                val sessionMessage = when {
                     session?.status == SearchStatus.FAILED ->
                         "검색 실패: ${session.errorMessage ?: "알 수 없는 오류"}"
                     session?.status == SearchStatus.CANCELLED ->
@@ -209,11 +251,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         "검색 결과가 없습니다."
                     else -> null
                 }
+                mutableFailedSearchOrigin.value = if (session != null && session.status == SearchStatus.FAILED && sessionMessage != null) {
+                    FailedSearchOrigin(session.token, mode, session.baseUrl, sessionMessage)
+                } else null
+                mutableSearchMessage.value = sessionMessage
             }
         }
         viewModelScope.launch {
-            val mode = repo.settings.selectedContentMode.first()
-            mutableContentMode.value = mode
+            val mode = mutableSavedApplicationOrigin.filterNotNull().first().mode
             val token = beginGeneralOperation()
             val anchor = repo.ensureAnchor(mode)
             if (!isCurrentModeOperation(mode, token)) return@launch
@@ -234,6 +279,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun selectContentMode(mode: ContentMode) {
         val previousMode = mutableContentMode.value
         if (mode == previousMode) return
+        contentModeInitialized = true
 
         val previousSearchToken = currentSearchToken
         AppGraph.searchScheduler.cancelActive()
@@ -245,10 +291,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         currentSearchToken = null
         mutableSearchResults.value = emptyList()
         mutableSearchMessage.value = null
+        mutableFailedSearchOrigin.value = null
         mutableSearchProgress.value = null
         mutableSearchOpeningPostId.value = null
         searchLoading.value = false
         searchCancelling.value = false
+        mutableSavedApplicationOrigin.value = null
         mutableContentMode.value = mode
 
         viewModelScope.launch {
@@ -257,6 +305,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 repo.settings.setSelectedContentMode(mode)
             } catch (error: Throwable) {
                 if (isCurrentModeOperation(mode, token)) {
+                    mutableSavedApplicationOrigin.value = null
                     mutableContentMode.value = previousMode
                     mutableMessage.value = "모드 저장 실패: ${safeMessage(error)}"
                 }
@@ -357,33 +406,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     internal fun searchRequestKey(): String? = currentSearchToken
 
+    internal fun currentApplicationOrigin(): SavedApplicationOrigin? =
+        mutableSavedApplicationOrigin.value?.takeIf { it.mode == mutableContentMode.value }
+
+    internal fun isCurrentApplicationOrigin(origin: SavedApplicationOrigin): Boolean =
+        currentApplicationOrigin() == origin
+
     fun searchPosts(query: String) {
         val term = query.trim()
         if (term.isEmpty()) {
             mutableSearchResults.value = emptyList()
             mutableSearchMessage.value = null
+            mutableFailedSearchOrigin.value = null
             searchLoading.value = false
             return
         }
         if (searchCancelling.value) return
 
-        val mode = mutableContentMode.value
+        val savedOrigin = currentApplicationOrigin() ?: return
+        val mode = savedOrigin.mode
         uiOperations.next()
         loading.value = false
         mutableMessage.value = null
         mutableSearchResults.value = emptyList()
         mutableSearchMessage.value = null
+        mutableFailedSearchOrigin.value = null
         mutableSearchProgress.value = SearchProgress(term, 0, 0)
         searchLoading.value = true
 
-        val schedule = AppGraph.searchScheduler.start(term, baseUrl.value, mode)
+        val schedule = AppGraph.searchScheduler.start(term, savedOrigin.baseUrl, mode)
         currentSearchToken = schedule.request.token
         if (!schedule.scheduled) {
             searchLoading.value = false
             mutableSearchMessage.value = "검색 실패: 백그라운드 검색 작업을 시작하지 못했습니다."
         }
         viewModelScope.launch {
-            if (mutableContentMode.value != mode || currentSearchToken != schedule.request.token) return@launch
+            if (!isCurrentApplicationOrigin(savedOrigin) || currentSearchToken != schedule.request.token) return@launch
             searchDao.prepareSession(schedule.request)
             if (!schedule.scheduled) {
                 searchDao.fail(
@@ -440,6 +498,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         loading.value = false
         mutableMessage.value = null
         mutableSearchMessage.value = null
+        mutableFailedSearchOrigin.value = null
         val searchToken = currentSearchToken
         mutableSearchOpeningPostId.value = post.id
         viewModelScope.launch {
@@ -576,6 +635,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearSearchMessage() {
         mutableSearchMessage.value = null
+        mutableFailedSearchOrigin.value = null
     }
 
     private suspend fun ensureSearchPost(post: RemoteSearchPost, mode: ContentMode) {

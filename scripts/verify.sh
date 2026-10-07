@@ -47,6 +47,7 @@ bash -n scripts/verify_dev45_to_dev46_update.sh
 bash -n scripts/verify_dev46_to_dev47_update.sh
 bash -n scripts/verify_dev47_to_dev48_update.sh
 bash -n scripts/verify_dev48_to_dev49_update.sh
+bash -n scripts/verify_dev49_to_dev50_update.sh
 
 MAIN='app/src/main/java/com/shaterguy/fc2weeklyranker/MainActivity.kt'
 LAUNCHER='app/src/main/java/com/shaterguy/fc2weeklyranker/media/ExternalVideoPlayerLauncher.kt'

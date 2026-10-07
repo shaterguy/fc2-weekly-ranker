@@ -3,51 +3,43 @@ package com.shaterguy.fc2weeklyranker.network
 import java.net.URI
 import java.net.URLDecoder
 
-internal val OFFICIAL_APPLICATION_HOSTS = setOf("01.avsee.is", "02.avsee.is")
+internal fun configuredApplicationOrigin(baseUrl: String): String? =
+    BaseUrlPolicy.normalize(baseUrl).getOrNull()
 
-internal fun officialApplicationStartUrl(baseUrl: String): String? = runCatching {
-    val uri = URI(baseUrl)
+internal fun applicationLoginStartUrl(baseUrl: String): String? =
+    configuredApplicationOrigin(baseUrl)?.let { "$it/bbs/login.php" }
+
+// Validate the URI authority without migrating it to a different site.
+internal fun applicationPageOrigin(url: String): String? = runCatching {
+    val uri = URI(url)
     require(uri.scheme.equals("https", ignoreCase = true))
     require(uri.userInfo == null)
-    val host = uri.host.orEmpty().lowercase()
-    require(host in OFFICIAL_APPLICATION_HOSTS)
-    "https://$host/bbs/login.php"
+    require(uri.port == -1 || uri.port == 443)
+    val host = requireNotNull(uri.host).lowercase()
+    require(BaseUrlPolicy.normalize("https://$host").isSuccess)
+    "https://$host"
 }.getOrNull()
 
-internal fun isOfficialApplicationUrl(url: String): Boolean = runCatching {
-    val uri = URI(url)
-    uri.scheme.equals("https", ignoreCase = true) &&
-        uri.userInfo == null &&
-        uri.host.orEmpty().lowercase() in OFFICIAL_APPLICATION_HOSTS
-}.getOrDefault(false)
-private fun isOfficialGeneralSearchUrl(targetUrl: String): Boolean = runCatching {
+internal fun isApplicationNavigationAllowed(configuredOrigin: String, url: String): Boolean =
+    applicationPageOrigin(configuredOrigin)?.let { origin -> applicationPageOrigin(url) == origin } == true
+
+private fun isConfiguredGeneralSearchUrl(targetUrl: String, configuredOrigin: String): Boolean = runCatching {
     val uri = URI(targetUrl)
-    uri.scheme.equals("https", ignoreCase = true) &&
-        uri.userInfo == null &&
-        uri.host.orEmpty().lowercase() in OFFICIAL_APPLICATION_HOSTS &&
+    isApplicationNavigationAllowed(configuredOrigin, targetUrl) &&
         uri.path.orEmpty() == "/bbs/search.php"
 }.getOrDefault(false)
 
-private fun isSyntheticGeneralSearchUrl(targetUrl: String): Boolean = runCatching {
-    val uri = URI(targetUrl)
-    uri.scheme.equals("https", ignoreCase = true) &&
-        uri.userInfo == null &&
-        uri.host.orEmpty().equals("fixture.invalid", ignoreCase = true) &&
-        uri.path.orEmpty() == "/bbs/search.php"
-}.getOrDefault(false)
-
-internal fun isAuthenticationRequiredSearchResponse(status: Int, targetUrl: String): Boolean =
-    status in setOf(401, 403) && isOfficialGeneralSearchUrl(targetUrl)
+internal fun isAuthenticationRequiredSearchResponse(status: Int, targetUrl: String, configuredOrigin: String): Boolean =
+    status in setOf(401, 403) && isConfiguredGeneralSearchUrl(targetUrl, configuredOrigin)
 
 internal fun shouldDeferSearchChallengeHttpFailure(
     status: Int,
     targetUrl: String,
     currentDocumentObserved: Boolean,
     challenge: Boolean,
-    allowSyntheticFixture: Boolean = false,
+    configuredOrigin: String,
 ): Boolean {
-    val eligibleTarget = isOfficialGeneralSearchUrl(targetUrl) ||
-        (allowSyntheticFixture && isSyntheticGeneralSearchUrl(targetUrl))
+    val eligibleTarget = isConfiguredGeneralSearchUrl(targetUrl, configuredOrigin)
     return status == 403 && eligibleTarget && (!currentDocumentObserved || challenge)
 }
 
@@ -55,39 +47,30 @@ internal fun shouldResetDeferredSearchChallengeHttpFailure(
     status: Int,
     requestedUrl: String,
     observedUrl: String,
-    allowSyntheticFixture: Boolean = false,
+    configuredOrigin: String,
 ): Boolean = runCatching {
     if (status != 403) return@runCatching false
-    val eligibleRequest = isOfficialGeneralSearchUrl(requestedUrl) ||
-        (allowSyntheticFixture && isSyntheticGeneralSearchUrl(requestedUrl))
-    if (!eligibleRequest) return@runCatching false
-    val observed = URI(observedUrl)
-    observed.scheme.equals("https", ignoreCase = true) &&
-        observed.userInfo == null &&
-        observed.path.orEmpty() == "/bbs/search.php" &&
-        (
-            observed.host.orEmpty().lowercase() in OFFICIAL_APPLICATION_HOSTS ||
-                (allowSyntheticFixture && observed.host.orEmpty().equals("fixture.invalid", ignoreCase = true))
-        )
+    isConfiguredGeneralSearchUrl(requestedUrl, configuredOrigin) &&
+        isConfiguredGeneralSearchUrl(observedUrl, configuredOrigin)
 }.getOrDefault(false)
 
 internal fun classifyApplicationDocumentFailure(
     status: Int,
     targetUrl: String,
     challenge: Boolean,
+    configuredOrigin: String,
 ): PageFailureReason? = when {
+    !isApplicationNavigationAllowed(configuredOrigin, targetUrl) -> PageFailureReason.ERROR
     challenge -> if (status >= 400) PageFailureReason.HTTP else PageFailureReason.ERROR
-    isAuthenticationRequiredSearchResponse(status, targetUrl) -> PageFailureReason.AUTHENTICATION
+    isAuthenticationRequiredSearchResponse(status, targetUrl, configuredOrigin) -> PageFailureReason.AUTHENTICATION
     status !in 200..299 -> PageFailureReason.HTTP
     else -> null
 }
 
-internal fun isAuthenticationRedirect(url: String): Boolean = runCatching {
+internal fun isAuthenticationRedirect(url: String, configuredOrigin: String): Boolean = runCatching {
     val uri = URI(url)
     val path = uri.path.orEmpty().lowercase()
-    uri.scheme.equals("https", ignoreCase = true) &&
-        uri.userInfo == null &&
-        uri.host.orEmpty().lowercase() in OFFICIAL_APPLICATION_HOSTS &&
+    isApplicationNavigationAllowed(configuredOrigin, url) &&
         (path.endsWith("/login.php") || "/login/" in path)
 }.getOrDefault(false)
 
@@ -98,9 +81,9 @@ internal fun isMatchingApplicationDocument(
 ): Boolean = runCatching {
     val requested = URI(requestedUrl)
     val observed = URI(observedUrl)
+    val origin = applicationPageOrigin(requestedUrl) ?: return@runCatching false
     if (
-        !requested.scheme.equals("https", ignoreCase = true) ||
-        !observed.scheme.equals("https", ignoreCase = true) ||
+        applicationPageOrigin(observedUrl) != origin ||
         requested.host.orEmpty().lowercase() !in allowedHosts ||
         observed.host.orEmpty().lowercase() !in allowedHosts ||
         requested.path.orEmpty() != observed.path.orEmpty()

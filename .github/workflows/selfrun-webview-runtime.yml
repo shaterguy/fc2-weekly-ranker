@@ -11,7 +11,7 @@ permissions:
 jobs:
   webview-runtime:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     steps:
       - name: Checkout exact candidate
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
@@ -70,6 +70,11 @@ jobs:
             sleep 2
           done
           [[ "$(adb shell getprop sys.boot_completed | tr -d '\r')" == "1" ]]
+          for _ in $(seq 1 60); do
+            adb shell pm path android >/dev/null 2>&1 && break
+            sleep 2
+          done
+          adb shell pm path android >/dev/null
           adb install -r "$RUNNER_TEMP/app.apk"
           adb install -r -t "$RUNNER_TEMP/test.apk"
           OUTPUT="$RUNNER_TEMP/webview-runtime.txt"

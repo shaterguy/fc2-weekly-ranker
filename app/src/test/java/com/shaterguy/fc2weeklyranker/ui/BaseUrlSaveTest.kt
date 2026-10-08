@@ -18,6 +18,7 @@ import com.shaterguy.fc2weeklyranker.repo.AppRepository
 import com.shaterguy.fc2weeklyranker.search.SearchDatabase
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
@@ -97,6 +98,14 @@ class BaseUrlSaveTest {
         AppGraph.settings.setAnchor(1791439200000L, ContentMode.JAV)
         vm = ViewModelProvider.create(viewModels, ViewModelProvider.AndroidViewModelFactory(app)).get(MainViewModel::class.java)
         waitUntil { vm.baseUrl.value == OLD }
+        // A published address alone does not mean the ViewModel's initial ranking
+        // load/prefetch is complete. Finish it before measuring the save operation.
+        val initialPrefetch = prefetchCoordinator()
+        waitUntil {
+            (initialPrefetch.javaClass.getDeclaredField("job").apply { isAccessible = true }.get(initialPrefetch) as? Job)?.isCompleted == true
+        }
+        initialPrefetch.cancel()
+        requests.clear()
     }
 
     @After fun tearDown() {
@@ -110,11 +119,11 @@ class BaseUrlSaveTest {
     @Test fun saveOnlyValidatesAndPersistsWithoutCrawlDatabaseWritesOrPrefetch() = runBlocking {
         val before = db.openHelper.readableDatabase.query("SELECT total_changes()").use { it.moveToFirst(); it.getLong(0) }
         vm.saveBaseUrl(" https://saved.example.test/ ")
-        waitUntil { vm.baseUrl.value == "https://saved.example.test" && !vm.isLoading.value }
+        waitForSavedAddress("https://saved.example.test")
         assertTrue(vm.message.value.orEmpty(), vm.message.value.orEmpty().contains("주소를 저장했습니다"))
         assertEquals("Only board and detail connection validation may run", 2, requests.size)
         assertTrue(requests.none { it.contains("page=") })
-        val prefetch = MainViewModel::class.java.getDeclaredField("pagePrefetch").apply { isAccessible = true }.get(vm)
+        val prefetch = prefetchCoordinator()
         assertNull("Saving must not restart prefetch", prefetch.javaClass.getDeclaredField("target").apply { isAccessible = true }.get(prefetch))
         val after = db.openHelper.readableDatabase.query("SELECT total_changes()").use { it.moveToFirst(); it.getLong(0) }
         assertEquals("Saving must not write the ranking database", before, after)
@@ -132,12 +141,13 @@ class BaseUrlSaveTest {
 
     @Test fun saveCancelsTheRunningOldOriginPrefetch() {
         holdOldPrefetch = true
-        val prefetch = MainViewModel::class.java.getDeclaredField("pagePrefetch").apply { isAccessible = true }
-            .get(vm) as PagePrefetchCoordinator
-        prefetch.start(ContentMode.FC2, 1)
+        val prefetch = prefetchCoordinator()
+        AppGraph.sourceClient.clearCrawlCache()
+        // Startup has covered pages 0/1; use an uncovered window for the blocked job.
+        prefetch.start(ContentMode.FC2, 2)
         waitUntil { prefetchStarted.isCompleted }
         vm.saveBaseUrl("https://saved.example.test")
-        waitUntil { vm.baseUrl.value == "https://saved.example.test" && !vm.isLoading.value }
+        waitForSavedAddress("https://saved.example.test")
         assertTrue("Existing prefetch must be cancelled before validation", prefetchCancelled.isCompleted)
         assertNull("Save must leave prefetch idle", prefetch.javaClass.getDeclaredField("target").apply { isAccessible = true }.get(prefetch))
         assertEquals(2, requests.count { URI(it).host == "saved.example.test" })
@@ -162,7 +172,7 @@ class BaseUrlSaveTest {
         vm.saveBaseUrl("https://blocked.example.test")
         waitUntil { blocked.isCompleted }
         vm.saveBaseUrl("https://newest.example.test")
-        waitUntil { vm.baseUrl.value == "https://newest.example.test" && !vm.isLoading.value }
+        waitForSavedAddress("https://newest.example.test")
         release.complete(Unit)
         waitUntil { cancelled.isCompleted || requests.count { URI(it).host == "blocked.example.test" } > 1 }
         assertTrue("Replacing a save must cancel its pending connection validation", cancelled.isCompleted)
@@ -178,12 +188,25 @@ class BaseUrlSaveTest {
         waitUntil { cancelled.isCompleted || requests.count { URI(it).host == "blocked.example.test" } > 1 }
         assertTrue("Mode switch must cancel the previous save", cancelled.isCompleted)
         assertOldAddress()
-        waitUntil { vm.baseUrl.value == OLD }
+        waitUntil { vm.baseUrl.value == OLD && vm.currentApplicationOrigin()?.mode == ContentMode.JAV }
         assertEquals(ContentMode.JAV, vm.currentApplicationOrigin()?.mode)
     }
 
     private suspend fun assertOldAddress() {
         for (mode in ContentMode.entries) assertEquals(OLD, AppGraph.settings.baseUrl(mode).first())
+    }
+
+    private fun prefetchCoordinator(): PagePrefetchCoordinator =
+        MainViewModel::class.java.getDeclaredField("pagePrefetch").apply { isAccessible = true }
+            .get(vm) as PagePrefetchCoordinator
+
+    private fun waitForSavedAddress(expected: String) {
+        val saving = MainViewModel::class.java.getDeclaredField("baseUrlSaveJob").apply { isAccessible = true }
+            .get(vm) as Job
+        waitUntil {
+            saving.isCompleted && vm.baseUrl.value == expected && !vm.isLoading.value &&
+                vm.message.value.orEmpty().contains("주소를 저장했습니다")
+        }
     }
 
     private fun waitUntil(condition: () -> Boolean) {

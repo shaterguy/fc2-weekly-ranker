@@ -92,21 +92,33 @@ class AvseeClientBulkTagTest {
         }
 
         val serialSamples = mutableListOf<Long>()
-        repeat(5) {
+        val candidateSamples = mutableListOf<Long>()
+        suspend fun measureSerial() {
             val startedAt = System.nanoTime()
             val result = serialTagSearch(http, parser, "https://example.test", query)
             serialSamples += (System.nanoTime() - startedAt) / 1_000_000L
             assertEquals(expectedCount, result.size)
         }
-        val candidateSamples = mutableListOf<Long>()
-        repeat(5) {
+        suspend fun measureCandidate() {
             val startedAt = System.nanoTime()
             val result = parser.searchTagPosts("https://example.test", query)
             candidateSamples += (System.nanoTime() - startedAt) / 1_000_000L
             assertEquals(expectedCount, result.size)
         }
+        // Keep five measurements of each implementation and the strict 50% budget.
+        // Alternate pair order to reduce JIT/GC/host-load bias between entire phases.
+        repeat(5) { sample ->
+            if (sample % 2 == 0) { measureSerial(); measureCandidate() }
+            else { measureCandidate(); measureSerial() }
+        }
         val serialMedian = median(serialSamples)
         val candidateMedian = median(candidateSamples)
+        println(
+            "FC2_BULK_TAG_SAMPLES count=$expectedCount " +
+                "serial_ms=$serialSamples candidate_ms=$candidateSamples " +
+                "processors=${Runtime.getRuntime().availableProcessors()} " +
+                "max_heap_bytes=${Runtime.getRuntime().maxMemory()}",
+        )
         println(
             "FC2_BULK_TAG_METRIC count=$expectedCount delay_ms=$delayMillis " +
                 "serial_dev34_median_ms=$serialMedian candidate_median_ms=$candidateMedian " +

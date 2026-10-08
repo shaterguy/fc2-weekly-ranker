@@ -435,13 +435,12 @@ private fun SettingsScreen(vm: MainViewModel) {
             value = input,
             onValueChange = { input = it },
             label = { Text("사이트 기본 주소") },
-            supportingText = { Text("예: https://02.avsee.is · HTTPS 기본 주소만 저장됩니다.") },
+            supportingText = { Text("FC2와 JAV에 공통으로 적용됩니다. 저장 시 연결을 확인합니다.") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { vm.saveBaseUrl(input) }, enabled = !loading) { Text("저장 후 확인") }
-            OutlinedButton(onClick = vm::testConnection, enabled = !loading) { Text("연결 테스트") }
+            Button(onClick = { vm.saveBaseUrl(input) }, enabled = !loading) { Text("저장") }
         }
         HorizontalDivider()
         Text("고정 기준시각")

@@ -101,7 +101,7 @@ class SearchLoginNavigationTest {
         replaceGraphField("repository", AppRepository(app, AppGraph.database, AppGraph.settings, source))
         AppGraph.settings.setSelectedContentMode(ContentMode.FC2)
         AppGraph.settings.setBaseUrl(CONFIGURED_ORIGIN, ContentMode.FC2)
-        AppGraph.settings.setBaseUrl(JAV_ORIGIN, ContentMode.JAV)
+        AppGraph.settings.setBaseUrl(CONFIGURED_ORIGIN, ContentMode.JAV)
     }
 
     @After fun closeActivityAndRunner() {
@@ -109,6 +109,14 @@ class SearchLoginNavigationTest {
         activity?.pause()?.stop()?.destroy()
         searchDatabase?.close()
         database?.close()
+    }
+
+    @Test fun settingsShowsOneSaveActionForTheCommonAddress() {
+        launchSearchRoute()
+        compose.onNodeWithText("설정").performClick()
+        compose.onNodeWithText("저장").assertIsDisplayed()
+        compose.onNodeWithText("연결 테스트").assertDoesNotExist()
+        compose.onNodeWithText("FC2와 JAV에 공통으로 적용됩니다. 저장 시 연결을 확인합니다.").assertIsDisplayed()
     }
 
     @Test fun searchNavigationPropagatesProtectedFailureToActualDialog() {
@@ -221,18 +229,18 @@ class SearchLoginNavigationTest {
             oldDone()
             assertNull("an old-mode completion must not schedule a search", vm.searchRequestKey())
         }
-        waitForSavedBaseUrl(vm, JAV_ORIGIN)
+        waitForSavedBaseUrl(vm, CONFIGURED_ORIGIN)
         assertFalse(oldDialog.isShowing)
         assertTrue(Shadows.shadowOf(oldWebView).wasDestroyCalled())
         assertEquals(0, searchCalls.get())
         compose.onNodeWithText("사이트 로그인").performClick()
         waitForLoginDialog()
-        assertLoginWebView(JAV_ORIGIN)
+        assertLoginWebView(CONFIGURED_ORIGIN)
     }
 
     @Test fun immediateModeSwitchNeverSubmitsThePreviousSavedOrigin() {
         val vm = launchSearchRoute()
-        for ((mode, origin) in listOf(ContentMode.JAV to JAV_ORIGIN, ContentMode.FC2 to CONFIGURED_ORIGIN)) {
+        for ((mode, origin) in listOf(ContentMode.JAV to CONFIGURED_ORIGIN, ContentMode.FC2 to CONFIGURED_ORIGIN)) {
             var submitted = false
             compose.runOnIdle {
                 vm.selectContentMode(mode)
@@ -262,8 +270,8 @@ class SearchLoginNavigationTest {
             val mode = if (Uri.parse(url).getQueryParameter("onetable") == ContentMode.JAV.boardTable) {
                 ContentMode.JAV
             } else ContentMode.FC2
-            val expected = if (mode == ContentMode.JAV) JAV_ORIGIN else CONFIGURED_ORIGIN
-            assertEquals("source request must use its mode's saved origin", URI(expected).host, URI(url).host)
+            assertEquals("source request must use the common saved origin", URI(CONFIGURED_ORIGIN).host, URI(url).host)
+            assertEquals(mode.boardTable, Uri.parse(url).getQueryParameter("onetable"))
         }
     }
 
@@ -339,6 +347,5 @@ class SearchLoginNavigationTest {
 
     companion object {
         private const val CONFIGURED_ORIGIN = "https://03.avsee.is"
-        private const val JAV_ORIGIN = "https://jav-search.example.test"
     }
 }

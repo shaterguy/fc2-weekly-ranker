@@ -152,6 +152,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val pagePrefetch = PagePrefetchCoordinator(viewModelScope) { mode, pageIndex ->
         repo.ensurePage(pageIndex, mode)
     }
+    private var baseUrlSaveJob: Job? = null
 
     val pageIndex = page.stateIn(viewModelScope, SharingStarted.Eagerly, 0)
     val message = mutableMessage.stateIn(viewModelScope, SharingStarted.Eagerly, null)
@@ -283,6 +284,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         val previousSearchToken = currentSearchToken
         AppGraph.searchScheduler.cancelActive()
+        baseUrlSaveJob?.cancel()
         pagePrefetch.cancel()
         refreshOperations.next()
         val token = beginGeneralOperation()
@@ -574,35 +576,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun stopDownload(videoId: String) { viewModelScope.launch { repo.stopDownload(videoId) } }
 
     fun saveBaseUrl(input: String) {
+        baseUrlSaveJob?.cancel()
         val mode = mutableContentMode.value
         val token = beginGeneralOperation()
-        viewModelScope.launch {
+        baseUrlSaveJob = viewModelScope.launch {
             if (!isCurrentModeOperation(mode, token)) return@launch
             pagePrefetch.cancel()
             loading.value = true
-            var refreshed = false
             try {
                 repo.setBaseUrl(input, mode).onSuccess {
                     if (isCurrentModeOperation(mode, token)) {
                         mutableMessage.value = "사이트 주소를 저장했습니다. 기준시각은 그대로 유지됩니다."
                     }
-                    runCatching { repo.refreshPage(page.value, mode = mode) }
-                        .onSuccess {
-                            refreshed = true
-                            if (isCurrentModeOperation(mode, token)) mutableMessage.value = null
-                        }
-                        .onFailure {
-                            if (isCurrentModeOperation(mode, token)) {
-                                mutableMessage.value = "주소는 저장했지만 목록 갱신에 실패했습니다: ${safeMessage(it)}"
-                            }
-                        }
                 }.onFailure {
                     if (isCurrentModeOperation(mode, token)) mutableMessage.value = "주소 저장 실패: ${safeMessage(it)}"
                 }
             } finally {
                 if (isCurrentModeOperation(mode, token)) loading.value = false
             }
-            if (refreshed && isCurrentModeOperation(mode, token)) pagePrefetch.start(mode, page.value + 1)
         }
     }
 

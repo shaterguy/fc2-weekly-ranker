@@ -28,6 +28,36 @@ import java.util.concurrent.TimeUnit
 @RunWith(AndroidJUnit4::class)
 class WebViewApplicationPageTransportInstrumentedTest {
     @Test
+    fun candidateConnectionValidationDoesNotExpandTheApplicationOrigins() = runBlocking<Unit> {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val candidate = "https://fixture.invalid"
+        val configured = setOf("https://saved.example.test")
+        val transport = WebViewApplicationPageTransport(
+            context, configuredOrigins = { configured },
+            fixtureResponse = { request ->
+                val body = if (request.url.getQueryParameter("wr_id") != null) {
+                    "<article><meta itemprop='datePublished' content='2026-10-08KST12:00:00'><h1>Neutral fixture</h1></article>"
+                } else {
+                    "<form id='fboardlist'><div class='list-item'><h2><a href='/bbs/board.php?bo_table=javfc2&amp;wr_id=123'>Neutral fixture</a></h2><span class='comments'><b>3</b></span><span>20</span></div></form>"
+                }
+                WebResourceResponse("text/html", "UTF-8", 200, "OK", mapOf("Cache-Control" to "no-store"),
+                    ByteArrayInputStream(body.toByteArray(Charsets.UTF_8)))
+            },
+        )
+        try {
+            assertTrue(runCatching { transport.fetch("$candidate/bbs/board.php") }.isFailure)
+            val http = OkHttpClient.Builder().addInterceptor { throw AssertionError("Real HTTP is forbidden") }.build()
+            val client = AvseeClient(http, applicationPageTransport = transport)
+            assertTrue("Candidate board/detail must pass the production browser validation", client.testConnection(candidate).isSuccess)
+            assertEquals(setOf("https://saved.example.test"), configured)
+            assertTrue("Candidate authority must expire after validation",
+                runCatching { transport.fetch("$candidate/bbs/board.php") }.isFailure)
+        } finally {
+            withContext(NonCancellable) { transport.close() }
+        }
+    }
+
+    @Test
     fun generalSearchWaitsForRequestedWebViewDocument() = verifyFixture(isTag = false, holdImage = false, currentDom = false)
 
     @Test

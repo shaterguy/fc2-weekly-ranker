@@ -11,7 +11,6 @@ import com.shaterguy.fc2weeklyranker.domain.ContentMode
 import com.shaterguy.fc2weeklyranker.network.BaseUrlPolicy
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 
 private val Context.settingsDataStore by preferencesDataStore(name = "ranker_settings")
@@ -21,7 +20,7 @@ class SettingsStore(context: Context, private val clockMillis: () -> Long = { Sy
     val anchorEpochMillis: Flow<Long?> = anchorEpochMillis(ContentMode.FC2)
     val selectedContentMode: Flow<ContentMode> =
         dataStore.data.map { ContentMode.fromSourceKey(it[CONTENT_MODE]) }
-    val baseUrl: Flow<String> = selectedContentMode.flatMapLatest { mode -> baseUrl(mode) }
+    val baseUrl: Flow<String> = baseUrl(ContentMode.FC2)
     val visitedPostIds: Flow<Set<String>> = dataStore.data.map { it[VISITED_POST_IDS].orEmpty() }
     val javFavoriteTags: Flow<Set<String>> = favoriteTags(ContentMode.JAV)
     val fc2FavoriteTags: Flow<Set<String>> = favoriteTags(ContentMode.FC2)
@@ -31,9 +30,10 @@ class SettingsStore(context: Context, private val clockMillis: () -> Long = { Sy
     fun anchorEpochMillis(mode: ContentMode): Flow<Long?> =
         dataStore.data.map { it[anchorKey(mode)] }
 
+    @Suppress("UNUSED_PARAMETER")
     fun baseUrl(mode: ContentMode): Flow<String> =
         dataStore.data.map {
-            BaseUrlPolicy.canonicalizeOfficialOrigin(it[baseUrlKey(mode)] ?: mode.defaultBaseUrl)
+            BaseUrlPolicy.canonicalizeOfficialOrigin(it[BASE_URL] ?: it[JAV_BASE_URL] ?: DEFAULT_BASE_URL)
         }
 
     suspend fun ensureAnchor(mode: ContentMode = ContentMode.FC2): Long {
@@ -73,8 +73,12 @@ class SettingsStore(context: Context, private val clockMillis: () -> Long = { Sy
         dataStore.edit { it[CONTENT_MODE] = mode.sourceKey }
     }
 
+    @Suppress("UNUSED_PARAMETER")
     suspend fun setBaseUrl(normalizedBaseUrl: String, mode: ContentMode = ContentMode.FC2) {
-        dataStore.edit { it[baseUrlKey(mode)] = normalizedBaseUrl }
+        dataStore.edit {
+            it[BASE_URL] = normalizedBaseUrl
+            it[JAV_BASE_URL] = normalizedBaseUrl
+        }
     }
 
 
@@ -125,9 +129,6 @@ class SettingsStore(context: Context, private val clockMillis: () -> Long = { Sy
 
     private fun anchorKey(mode: ContentMode): Preferences.Key<Long> =
         if (mode == ContentMode.FC2) ANCHOR else JAV_ANCHOR
-
-    private fun baseUrlKey(mode: ContentMode): Preferences.Key<String> =
-        if (mode == ContentMode.FC2) BASE_URL else JAV_BASE_URL
 
     private fun favoriteTagsKey(mode: ContentMode): Preferences.Key<Set<String>> =
         if (mode == ContentMode.FC2) FC2_FAVORITE_TAGS else JAV_FAVORITE_TAGS

@@ -111,11 +111,17 @@ class AvseeClient(
         boardTable: String = "javfc2",
     ): Result<Unit> = withContext(ioDispatcher) {
         try {
-            val boardUrl = "$baseUrl${boardPath(boardTable)}"
-            val rows = parseBoardRows(fetch(boardUrl), boardUrl)
-            check(rows.isNotEmpty()) { "게시물 목록을 찾을 수 없습니다." }
-            val first = rows.first()
-            parsePostedDate(fetch(first.url, boardUrl), first.url, Instant.now())
+            suspend fun validate(transport: ApplicationPageTransport?) {
+                val boardUrl = "$baseUrl${boardPath(boardTable)}"
+                val rows = parseBoardRows(transport?.fetch(boardUrl) ?: fetch(boardUrl), boardUrl)
+                check(rows.isNotEmpty()) { "게시물 목록을 찾을 수 없습니다." }
+                val first = rows.first()
+                val detail = transport?.fetch(first.url, boardUrl) ?: fetch(first.url, boardUrl)
+                parsePostedDate(detail, first.url, Instant.now())
+            }
+            val transport = applicationPageTransport
+            if (transport == null) validate(null)
+            else transport.withConnectionValidationOrigin(baseUrl) { validate(it) }
             Result.success(Unit)
         } catch (error: CancellationException) {
             throw error

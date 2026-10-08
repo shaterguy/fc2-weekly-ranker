@@ -12,6 +12,9 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.job
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.currentCoroutineContext
@@ -24,10 +27,16 @@ import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 import org.json.JSONTokener
 import java.net.URI
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 
 interface ApplicationPageTransport {
     suspend fun fetch(url: String, referer: String? = null): String
+
+    suspend fun <T> withConnectionValidationOrigin(
+        baseUrl: String,
+        validate: suspend (ApplicationPageTransport) -> T,
+    ): T = validate(this)
 }
 
 internal class WebViewApplicationPageTransport(
@@ -41,6 +50,42 @@ internal class WebViewApplicationPageTransport(
     private val appContext = context.applicationContext
     private val mutex = Mutex()
     private var session: BrowserSession? = null
+
+    override suspend fun <T> withConnectionValidationOrigin(
+        baseUrl: String,
+        validate: suspend (ApplicationPageTransport) -> T,
+    ): T = coroutineScope {
+        val origin = BaseUrlPolicy.normalize(baseUrl).getOrThrow()
+        // A separate browser pins only this validation to the candidate. The application
+        // transport and its configured-origin provider never gain temporary authority.
+        val candidate = WebViewApplicationPageTransport(
+            appContext, userAgent, configuredOrigins = { setOf(origin) },
+            hasUsableSearchResults = hasUsableSearchResults,
+            fixtureResponse = fixtureResponse, fixtureDiagnostic = fixtureDiagnostic,
+        )
+        val active = AtomicBoolean(true)
+        val lifetime = currentCoroutineContext().job
+        val scoped = object : ApplicationPageTransport {
+            override suspend fun fetch(url: String, referer: String?): String {
+                lifetime.ensureActive()
+                check(active.get()) { "주소 연결 검증이 종료되었습니다." }
+                require(isApplicationNavigationAllowed(origin, url)) { "검증 중인 사이트의 페이지만 허용됩니다." }
+                require(referer == null || isApplicationNavigationAllowed(origin, referer)) {
+                    "검증 중인 사이트의 참조 주소만 허용됩니다."
+                }
+                val html = candidate.fetch(url, referer)
+                lifetime.ensureActive()
+                check(active.get()) { "주소 연결 검증이 종료되었습니다." }
+                return html
+            }
+        }
+        try {
+            validate(scoped)
+        } finally {
+            active.set(false)
+            withContext(NonCancellable) { candidate.close() }
+        }
+    }
 
     private data class BrowserSession(
         val origin: String,
@@ -149,9 +194,13 @@ internal class WebViewApplicationPageTransport(
         resetSession()
         val allowedHosts = setOf(target.host.lowercase())
         val navigation = NavigationState()
-        val webView = createWebView(allowedHosts, navigation)
-        val created = BrowserSession(origin, allowedHosts, webView, navigation)
-        session = created
+        // Register a created browser before prompt dispatcher cancellation can discard
+        // its return value. The fetch cancellation handler can then always destroy it.
+        val created = withContext(NonCancellable) {
+            val webView = createWebView(allowedHosts, navigation)
+            BrowserSession(origin, allowedHosts, webView, navigation).also { session = it }
+        }
+        currentCoroutineContext().ensureActive()
         if (fixtureResponse == null && fixtureDiagnostic == null) {
             bootstrap(created)
         }
@@ -459,7 +508,8 @@ internal class WebViewApplicationPageTransport(
         val old = session
         session = null
         if (old != null) {
-            withContext(Dispatchers.Main.immediate) {
+            // Cancellation must not strand a browser after its session reference is cleared.
+            withContext(NonCancellable + Dispatchers.Main.immediate) {
                 old.webView.stopLoading()
                 old.webView.loadUrl("about:blank")
                 old.webView.destroy()

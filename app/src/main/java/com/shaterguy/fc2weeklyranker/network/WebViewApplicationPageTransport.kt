@@ -360,7 +360,22 @@ internal class WebViewApplicationPageTransport(
                     httpStatus, url, snapshot.optString("url"),
                     configuredOrigin = current.origin,
                 )
-            if (!canInspectSearchRecovery) navigationFailure(current)?.let { return@withTimeout it }
+            if (!canInspectSearchRecovery) {
+                val failure = navigationFailure(current)
+                if (failure != null) {
+                    // A callback can change the status after the first Main-thread read.
+                    // Apply the same deferral to that fresh status before ending the search.
+                    if (shouldDeferSearchChallengeHttpFailure(
+                            failure.status, url, currentDocumentObserved, challenge,
+                            configuredOrigin = current.origin,
+                        )
+                    ) {
+                        delay(POLL_MILLIS)
+                        continue
+                    }
+                    return@withTimeout failure
+                }
+            }
             fixtureDiagnostic?.invoke(
                 "snapshot ready=${snapshot?.optString("ready")} url=${diagnosticUrl(snapshot?.optString("url"))} " +
                     "requested=${snapshot?.let { isRequestedDocument(current.allowedHosts, url, it.optString("url")) }} " +

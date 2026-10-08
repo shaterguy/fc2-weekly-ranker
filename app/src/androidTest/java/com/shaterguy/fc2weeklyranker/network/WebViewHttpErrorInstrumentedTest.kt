@@ -138,7 +138,11 @@ class WebViewHttpErrorInstrumentedTest {
         ) { transport, events ->
             supervisorScope {
                 val url = parser.buildSearchUrl(ORIGIN, "fixture", 1, "javfc2")
-                val fetching = async(Dispatchers.Default) { transport.fetch(url) }
+                val fetchFailure = AtomicReference<Throwable?>()
+                val fetching = async(Dispatchers.Default) {
+                    try { transport.fetch(url) }
+                    catch (error: Throwable) { fetchFailure.set(error); throw error }
+                }
                 try {
                     assertTrue("first search request was not intercepted", withContext(Dispatchers.IO) {
                         intercepted.await(5, TimeUnit.SECONDS)
@@ -158,7 +162,8 @@ class WebViewHttpErrorInstrumentedTest {
                         view.webViewClient.onReceivedHttpError(view, pendingRequest.get(), response(403, "Neutral pending response"))
                     }
                     delay(750)
-                    assertTrue("a callback on the previous document prematurely ended search; events=$events", fetching.isActive)
+                    assertTrue("a callback on the previous document prematurely ended search; " +
+                        "failure=${fetchFailure.get()}; events=$events", fetching.isActive)
                     releaseResponse.countDown()
                     val html = withTimeout(10_000) { fetching.await() }
                     assertTrue(html.contains("CHALLENGE_RECOVERED_RESULT"))

@@ -50,6 +50,7 @@ bash -n scripts/verify_dev48_to_dev49_update.sh
 bash -n scripts/verify_dev49_to_dev50_update.sh
 bash -n scripts/verify_dev50_to_dev51_update.sh
 bash -n scripts/verify_dev50_to_dev52_update.sh
+bash -n scripts/verify_dev50_to_dev53_update.sh
 
 MAIN='app/src/main/java/com/shaterguy/fc2weeklyranker/MainActivity.kt'
 LAUNCHER='app/src/main/java/com/shaterguy/fc2weeklyranker/media/ExternalVideoPlayerLauncher.kt'
@@ -82,8 +83,11 @@ if grep -Fq 'nativeVideoController.openFullscreen(video, autoPlay = true)' "$MAI
   exit 1
 fi
 
+# Performance fixtures use wall-clock timings. Complete unit tests before lint
+# and AndroidTest compilation can compete for the same runner CPUs.
+gradle --no-daemon --stacktrace :app:testDebugUnitTest
+
 gradle --no-daemon --stacktrace \
-  :app:testDebugUnitTest \
   :app:lintDebug \
   :app:assembleDebugAndroidTest \
   :external-stream-receiver:assembleDebug

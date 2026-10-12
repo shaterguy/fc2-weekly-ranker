@@ -1,10 +1,6 @@
 name: Android STABLE RC
 
 on:
-  push:
-    branches:
-      - 'v*-rc*'
-      - main
   workflow_dispatch:
 
 permissions:

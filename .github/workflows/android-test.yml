@@ -1,6 +1,10 @@
 name: Android TEST
 
 on:
+  push:
+    branches:
+      - 'v*-dev*'
+      - 'v*-rc*'
   workflow_dispatch:
 
 permissions:

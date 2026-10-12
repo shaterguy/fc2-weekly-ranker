@@ -1,6 +1,12 @@
 name: Android STABLE RC
 
 on:
+  push:
+    branches:
+      - 'v*-rc*'
+      - main
+    paths-ignore:
+      - '.github/workflows/**'
   workflow_dispatch:
 
 permissions:

@@ -5,6 +5,7 @@ on:
     branches:
       - 'v*-rc*'
       - main
+      - 'ci-fallback/**'
     paths-ignore:
       - '.github/workflows/**'
   workflow_dispatch:
@@ -14,6 +15,8 @@ permissions:
 
 jobs:
   package-stable:
+    if: >-
+      (github.event_name != 'push' || contains(github.event.head_commit.message, '[gh-fallback:android-stable.yml]'))
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -130,6 +133,8 @@ jobs:
           retention-days: 14
 
   release-preflight:
+    if: >-
+      (github.event_name != 'push' || contains(github.event.head_commit.message, '[gh-fallback:android-stable.yml]'))
     needs: package-stable
     runs-on: ubuntu-latest
     permissions:
@@ -176,7 +181,9 @@ jobs:
     needs:
       - package-stable
       - release-preflight
-    if: github.ref == 'refs/heads/main'
+    if: >-
+      (github.event_name != 'push' || contains(github.event.head_commit.message, '[gh-fallback:android-stable.yml]')) &&
+      (github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     permissions:
       actions: read

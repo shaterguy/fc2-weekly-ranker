@@ -111,8 +111,8 @@ class ApplicationNavigationPolicyTest {
     }
 
     @Test fun generalSearchCanonicalizationPreservesSearchBoardSortSizeAndPageIdentity() {
-        val requested = "https://02.avsee.is/bbs/search.php?sfl=wr_subject%7C%7Cwr_content&stx=needle&sop=and&result_type=all&result_sort=newest&gr_id=&srows=1000&onetable=javfc2&page=2"
-        val observed = "https://02.avsee.is/bbs/search.php?onetable=javfc2&page=2&stx=needle&sop=and&sfl=wr_subject%7C%7Cwr_content&result_type=all&result_sort=newest&gr_id=&srows=1000&server_default=1"
+        val requested = "https://02.avsee.is/bbs/search.php?sfl=wr_comment&stx=needle&sop=and&result_type=all&result_sort=newest&gr_id=&srows=1000&onetable=javfc2&page=2"
+        val observed = "https://02.avsee.is/bbs/search.php?onetable=javfc2&page=2&stx=needle&sop=and&sfl=wr_comment&result_type=all&result_sort=newest&gr_id=&srows=1000&server_default=1"
         assertTrue(isMatchingApplicationDocument(hosts, requested, observed))
         assertFalse(isMatchingApplicationDocument(hosts, requested, observed.replace("stx=needle", "stx=other")))
         assertFalse(isMatchingApplicationDocument(hosts, requested, observed.replace("onetable=javfc2", "onetable=javc")))

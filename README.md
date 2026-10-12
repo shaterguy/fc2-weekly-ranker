@@ -12,8 +12,8 @@ Android app for browsing the configured `javfc2` board in fixed seven-day window
 
 ## TEST channel
 
-- Historical TEST lineage starts at `v0.1.0-dev1`; the current development target is `v0.2.0-dev54`.
-- Source version: `0.2.0-dev54`, `versionCode=78`.
+- Historical TEST lineage starts at `v0.1.0-dev1`; the current development target is `v0.2.0-dev55`.
+- Source version: `0.2.0-dev55`, `versionCode=79`.
 - TEST application ID: `com.shaterguy.fc2weeklyranker.dev`.
 - The configured official origin is `https://02.avsee.is`. Existing exact `https://01.avsee.is` settings migrate to 02, while unrelated custom HTTPS origins remain unchanged. Application pages are fetched through the app WebView session so Cloudflare/browser-session state stays in the browser context.
 - DEV54 rechecks the existing search-403 deferral against a failure status read after the initial Main-thread status sample. A callback arriving between those reads must keep waiting for the requested document or challenge reload. Controlled neutral transport tests cover both previous-document and challenge-document timing. The native fixture keeps its existing assertions and deadlines and includes the fetch exception when premature completion is detected; CI preserves native output even on failure. Origin policy, settings saves and performance gates remain unchanged.

@@ -1,0 +1,76 @@
+name: Android DEV55 sign-only
+
+on:
+  push:
+    branches:
+      - work/SR-20261012-SSWP5C
+
+permissions:
+  contents: read
+
+jobs:
+  sign-test-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out immutable source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Set up JDK 17
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407
+        with:
+          packages: ''
+          log-accepted-android-sdk-licenses: 'false'
+      - name: Set up Gradle 9.5
+        uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a
+        with:
+          gradle-version: '9.5.0'
+      - name: Install Android API 37
+        shell: bash
+        run: sdkmanager "platforms;android-37.0" "build-tools;37.0.0"
+      - name: Build TEST APK
+        shell: bash
+        run: gradle --no-daemon --stacktrace :app:assembleDebug
+      - name: Sign and verify pinned TEST certificate
+        shell: bash
+        env:
+          SIGNING_PASSPHRASE: ${{ secrets.FC2_WEEKLY_RANKER_TEST_SIGNING_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          test -n "${SIGNING_PASSPHRASE:-}" || { echo 'TEST signing secret unavailable' >&2; exit 1; }
+          test "$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')" = '3.12'
+          python3 -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: -r tools/signing-requirements-linux-x86_64-py312.txt
+          BT="$ANDROID_HOME/build-tools/37.0.0"
+          IN=app/build/outputs/apk/debug/app-debug-unsigned.apk
+          test -s "$IN"
+          OUT=app/build/outputs/fc2-weekly-ranker-test
+          mkdir -p "$OUT"
+          PASS="$RUNNER_TEMP/fc2-dev55-test-signing-pass"
+          ALIGNED="$RUNNER_TEMP/fc2-dev55-aligned-unsigned.apk"
+          trap 'rm -f "$PASS" "$ALIGNED"' EXIT
+          umask 077
+          printf '%s' "$SIGNING_PASSPHRASE" > "$PASS"
+          "$BT/zipalign" -p -f 4 "$IN" "$ALIGNED"
+          APK="$OUT/FC2WeeklyRanker-v0.2.0-dev55.apk"
+          APKSIGNER="$BT/apksigner" bash tools/sign_test.sh "$ALIGNED" "$PASS" "$APK" > "$OUT/APKSIGNER_VERIFY.txt"
+          "$BT/apksigner" verify --verbose --print-certs --min-sdk-version 29 "$APK" > "$OUT/APK_VERIFY.txt"
+          BADGING="$("$BT/aapt" dump badging "$APK")"
+          grep -Fq "package: name='com.shaterguy.fc2weeklyranker.dev' versionCode='79' versionName='0.2.0-dev55'" <<<"$BADGING"
+          grep -Fq 'certificate_sha256=ff32473e516ff59ca24ada94fe22e8282ce70fd66bd94fb0975340106d981cfd' "$OUT/APKSIGNER_VERIFY.txt"
+          sha256sum "$APK" > "$OUT/SHA256SUMS.txt"
+          printf '%s\n' "$GITHUB_SHA" > "$OUT/SOURCE_COMMIT.txt"
+      - name: Upload signed TEST APK
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: FC2WeeklyRanker-v0.2.0-dev55-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            app/build/outputs/fc2-weekly-ranker-test/FC2WeeklyRanker-v0.2.0-dev55.apk
+            app/build/outputs/fc2-weekly-ranker-test/SHA256SUMS.txt
+            app/build/outputs/fc2-weekly-ranker-test/SOURCE_COMMIT.txt
+            app/build/outputs/fc2-weekly-ranker-test/APKSIGNER_VERIFY.txt
+          if-no-files-found: error
+          retention-days: 14

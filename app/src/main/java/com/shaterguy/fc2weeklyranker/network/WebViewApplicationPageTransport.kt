@@ -28,10 +28,13 @@ import org.json.JSONObject
 import org.json.JSONTokener
 import java.net.URI
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.resume
 
 interface ApplicationPageTransport {
     suspend fun fetch(url: String, referer: String? = null): String
+
+    suspend fun fetchRankingPage(url: String, referer: String? = null): String = fetch(url, referer)
 
     suspend fun <T> withConnectionValidationOrigin(
         baseUrl: String,
@@ -50,6 +53,7 @@ internal class WebViewApplicationPageTransport(
     private val appContext = context.applicationContext
     private val mutex = Mutex()
     private var session: BrowserSession? = null
+    private val htmlRequestSequence = AtomicLong()
 
     override suspend fun <T> withConnectionValidationOrigin(
         baseUrl: String,
@@ -120,7 +124,13 @@ internal class WebViewApplicationPageTransport(
         val httpFailureAfterTimeout: Boolean = false,
     )
 
-    override suspend fun fetch(url: String, referer: String?): String = mutex.withLock {
+    override suspend fun fetch(url: String, referer: String?): String =
+        fetchPage(url, referer, rankingHtml = false)
+
+    override suspend fun fetchRankingPage(url: String, referer: String?): String =
+        fetchPage(url, referer, rankingHtml = true)
+
+    private suspend fun fetchPage(url: String, referer: String?, rankingHtml: Boolean): String = mutex.withLock {
         val target = validatedTarget(url)
         var lastFailure: Throwable? = null
         repeat(MAX_SESSION_ATTEMPTS) { attempt ->
@@ -128,7 +138,8 @@ internal class WebViewApplicationPageTransport(
             try {
                 val current = withPageFailureStage(PageFailureStage.SESSION) { ensureSession(target) }
                 val result = withPageFailureStage(PageFailureStage.DOCUMENT) {
-                    fetchInSession(current, target.toString(), referer)
+                    if (rankingHtml) fetchRankingInSession(current, target.toString(), referer)
+                    else fetchInSession(current, target.toString(), referer)
                 }
                 retryFailure = !result.httpFailureAfterTimeout
                 val failureReason = classifyApplicationDocumentFailure(
@@ -291,6 +302,7 @@ internal class WebViewApplicationPageTransport(
         current: BrowserSession,
         url: String,
         referer: String?,
+        requireNewDocument: Boolean = false,
     ): PageResult {
         var lastObservedChallenge = false
         return try {
@@ -298,7 +310,7 @@ internal class WebViewApplicationPageTransport(
         val requestedPath = URI(url).path.orEmpty()
         val isSearchRequest = requestedPath == "/bbs/search.php" || requestedPath == "/bbs/tag.php"
         val isFirstNavigation = !current.hasNavigated
-        val previousTimeOrigin = if (isFirstNavigation || !isSearchRequest) {
+        val previousTimeOrigin = if (isFirstNavigation || (!isSearchRequest && !requireNewDocument)) {
             0.0
         } else {
             pageSnapshot(current.webView)?.optDouble("timeOrigin", 0.0) ?: 0.0
@@ -322,6 +334,14 @@ internal class WebViewApplicationPageTransport(
             // HTTP callbacks can arrive while about:blank or the previous document is
             // still ready. Readiness alone must not end this request's 403 deferral.
             val currentDocumentObserved = snapshot != null &&
+                (!requireNewDocument || (
+                    snapshot.optDouble("timeOrigin", 0.0).isFinite() &&
+                        snapshot.optDouble("timeOrigin", 0.0) > 0.0 &&
+                        (isFirstNavigation || (
+                            previousTimeOrigin.isFinite() && previousTimeOrigin > 0.0 &&
+                                snapshot.optDouble("timeOrigin", 0.0) != previousTimeOrigin
+                            ))
+                    )) &&
                 isRequestedDocument(current.allowedHosts, url, snapshot.optString("url")) &&
                 isUsableApplicationDocument(
                     snapshot.optString("ready"),
@@ -427,6 +447,58 @@ internal class WebViewApplicationPageTransport(
                 httpFailureAfterTimeout = true,
             ) ?: throw error
         }
+    }
+
+    private suspend fun fetchRankingInSession(
+        current: BrowserSession,
+        url: String,
+        referer: String?,
+    ): PageResult {
+        // Use the existing pinned browser session; do not export its cookie jar.
+        val snapshot = pageSnapshot(current.webView)
+        val canFetch = isRankingHtmlTarget(url) && snapshot != null &&
+            isAllowedUrl(current, snapshot.optString("url")) &&
+            !looksLikeChallenge(snapshot.optString("title"), snapshot.optString("text"))
+        if (canFetch) {
+            val slot = "__fc2RankingHtml" + htmlRequestSequence.incrementAndGet()
+            try {
+                val result = withTimeout(FETCH_TIMEOUT_MILLIS) {
+                    val started = evaluate(current.webView, rankingHtmlStartScript(
+                        url, referer?.takeIf { isAllowedUrl(current, it) }, slot, MAX_BODY_CHARS,
+                    ))
+                    if (started != "true") return@withTimeout JSONObject()
+                    var response: JSONObject? = null
+                    while (response == null) {
+                        currentCoroutineContext().ensureActive()
+                        val raw = decodeEvaluateString(evaluate(current.webView, rankingHtmlPollScript(slot)))
+                        response = raw?.takeIf { it != "null" }?.let(::JSONObject)
+                        if (response == null) delay(HTML_POLL_MILLIS)
+                    }
+                    response
+                }
+                val body = result.optString("body")
+                val finalUrl = result.optString("url")
+                if (result.optInt("status") in 200..299 && body.length <= MAX_BODY_CHARS &&
+                    isRequestedDocument(current.allowedHosts, url, finalUrl) &&
+                    !looksLikeChallenge("", body) &&
+                    withContext(Dispatchers.Default) { isUsableRankingHtml(body, url) }
+                ) {
+                    return PageResult(result.optInt("status"), finalUrl, body)
+                }
+            } catch (error: TimeoutCancellationException) {
+                currentCoroutineContext().ensureActive()
+                // A fetch timeout gets one normal browser navigation, as do redirects.
+            } finally {
+                withContext(NonCancellable) {
+                    runCatching {
+                        withTimeout(1_000L) { evaluate(current.webView, rankingHtmlCleanupScript(slot)) }
+                    }
+                }
+            }
+        }
+        // Challenges, redirects, unsupported markup and HTTP errors keep the previous
+        // navigation/status/recovery contract instead of becoming empty data.
+        return fetchInSession(current, url, referer, requireNewDocument = true)
     }
 
     private fun isCurrentMainFrame(
@@ -541,6 +613,7 @@ internal class WebViewApplicationPageTransport(
         private const val BOOTSTRAP_TIMEOUT_MILLIS = 50_000L
         private const val FETCH_TIMEOUT_MILLIS = 30_000L
         private const val POLL_MILLIS = 250L
+        private const val HTML_POLL_MILLIS = 25L
         private const val REBOOT_DELAY_MILLIS = 250L
     }
 }

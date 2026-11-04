@@ -958,7 +958,7 @@ class AvseeClient(
         synchronized(crawlHtmlCache) {
             crawlHtmlCache[url]?.let { return it }
         }
-        val html = fetch(url, referer)
+        val html = applicationPageTransport?.fetchRankingPage(url, referer) ?: fetch(url, referer)
         synchronized(crawlHtmlCache) {
             if (crawlCacheGeneration.get() == generation) {
                 crawlHtmlCache[url] = html

@@ -1,0 +1,90 @@
+name: Android DEV focused verification and protected signing
+
+on:
+  push:
+    branches:
+      - 'sign-dev/**'
+
+permissions:
+  contents: write
+
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out exact verified source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Set up JDK
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Set up signing tools
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407
+        with:
+          packages: ''
+          log-accepted-android-sdk-licenses: 'false'
+      - name: Install signing toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager "build-tools;37.0.0" "platforms;android-37.0"
+          python3 -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: -r tools/signing-requirements-linux-x86_64-py312.txt
+      - name: Set up JVM test Gradle
+        uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a
+        with:
+          gradle-version: '9.5.0'
+      - name: Verify browser transport on supported x86 host
+        shell: bash
+        run: |
+          gradle --no-daemon --console=plain :app:testDebugUnitTest \
+            --tests '*RankingHtml*Test' \
+            --tests '*SearchHttpCallbackRaceTest' \
+            --tests '*CandidateOriginConnectionTest' \
+            --tests '*SearchResponseValidationTest' \
+            --tests '*WebViewOrigin*Test'
+      - name: Preserve focused test evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dev-transport-tests-${{ github.run_id }}-${{ github.run_attempt }}
+          path: app/build/test-results/testDebugUnitTest/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Download verified unsigned DEV artifact
+        if: success()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#sign-dev/}"
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-dev[0-9]+$ ]]
+          mkdir -p "$RUNNER_TEMP/dev-sign"
+          gh release download "$TAG" --pattern 'UNSIGNED_IDENTITY.json' --pattern '*.unsigned.apk' --dir "$RUNNER_TEMP/dev-sign"
+          python3 scripts/verify_unsigned_dev.py "$RUNNER_TEMP/dev-sign" "$GITHUB_SHA" "$TAG"
+          printf 'DEV_TAG=%s\n' "$TAG" >> "$GITHUB_ENV"
+      - name: Sign and verify fixed DEV lineage
+        shell: bash
+        env:
+          SIGNING_PASSPHRASE: ${{ secrets.FC2_WEEKLY_RANKER_TEST_SIGNING_PASSPHRASE }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test -n "${SIGNING_PASSPHRASE:-}"
+          BT="$ANDROID_HOME/build-tools/37.0.0"
+          STAGE="$RUNNER_TEMP/dev-sign"
+          PASS="$RUNNER_TEMP/fc2-dev-sign-pass"
+          trap 'rm -f "$PASS"' EXIT
+          umask 077
+          printf '%s' "$SIGNING_PASSPHRASE" > "$PASS"
+          APK="$STAGE/FC2WeeklyRanker-$DEV_TAG.apk"
+          "$BT/zipalign" -p -f 4 "$STAGE/FC2WeeklyRanker-$DEV_TAG.unsigned.apk" "$STAGE/aligned.apk"
+          APKSIGNER="$BT/apksigner" bash tools/sign_test.sh "$STAGE/aligned.apk" "$PASS" "$APK" > "$STAGE/APKSIGNER_VERIFY.txt"
+          "$BT/zipalign" -c 4 "$APK"
+          "$BT/aapt" dump badging "$APK" > "$STAGE/APK_BADGING.txt"
+          python3 scripts/verify_unsigned_dev.py "$STAGE" "$GITHUB_SHA" "$DEV_TAG" --signed
+          (cd "$STAGE" && sha256sum "FC2WeeklyRanker-$DEV_TAG.apk" > SHA256SUMS.txt)
+          printf '%s\n' "$GITHUB_SHA" > "$STAGE/SOURCE_COMMIT.txt"
+          gh release upload "$DEV_TAG" "$APK" "$STAGE/SHA256SUMS.txt" "$STAGE/SOURCE_COMMIT.txt" "$STAGE/APKSIGNER_VERIFY.txt" "$STAGE/APK_BADGING.txt"

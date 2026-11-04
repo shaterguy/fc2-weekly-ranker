@@ -247,7 +247,7 @@ class RankingBrowserShadow : ShadowWebView() {
         super.loadUrl(url)
     }
 
-    @Implementation override fun loadUrl(url: String, additionalHttpHeaders: Map<String, String>) {
+    @Implementation override fun loadUrl(url: String, additionalHttpHeaders: Map<String, String>?) {
         beginNavigation()
         super.loadUrl(url, additionalHttpHeaders)
     }

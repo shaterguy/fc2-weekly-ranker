@@ -50,7 +50,8 @@ private val COUNT_TOKEN = Regex("(?<![A-Za-z0-9])(?:\\d{1,3}(?:,\\d{3})+|\\d+)(?
 private val GET_RETRY_DELAYS_MILLIS = listOf(250L, 750L)
 
 private fun boardPath(boardTable: String): String =
-    "/bbs/board.php?bo_table=$boardTable&sop=and&sst=wr_datetime&sod=desc"
+    if (boardTable == "javm") "/javm?sop=and&sst=wr_datetime&sod=desc"
+    else "/bbs/board.php?bo_table=$boardTable&sop=and&sst=wr_datetime&sod=desc"
 
 data class RemoteMedia(val url: String, val referer: String, val kind: String, val ordinal: Int)
 data class RemoteTag(val query: String, val label: String)
@@ -637,7 +638,7 @@ class AvseeClient(
         val postedAt = parsePostedAt(doc, referenceInstant) ?: error("게시시각을 찾을 수 없습니다.")
         val media = if (includeMedia) parseMedia(doc, detailUrl) else emptyList()
         val boardTable = boardTableFromUrl(detailUrl)
-        val tags = if (boardTable == "javc" || boardTable == "javfc2") parseDetailTags(doc) else emptyList()
+        val tags = if (boardTable in setOf("javc", "javfc2", "javm")) parseDetailTags(doc) else emptyList()
         return RemotePost(
             id = id,
             url = detailUrl,
@@ -1008,9 +1009,10 @@ class AvseeClient(
         }
 
     private fun boardTableFromUrl(url: String): String? {
-        decodedQueryParam(url, "bo_table")?.takeIf { it == "javfc2" || it == "javc" }?.let { return it }
+        val boards = setOf("javfc2", "javc", "javm")
+        decodedQueryParam(url, "bo_table")?.takeIf { it in boards }?.let { return it }
         val segments = runCatching { URI(url).path.orEmpty().trim('/').split('/') }.getOrDefault(emptyList())
-        return segments.firstOrNull()?.takeIf { it == "javfc2" || it == "javc" }
+        return segments.firstOrNull()?.takeIf { it in boards }
     }
 
     private fun postIdFromUrl(url: String, expectedBoardTable: String? = null): String? {
@@ -1018,7 +1020,7 @@ class AvseeClient(
         val queryId = decodedQueryParam(url, "wr_id")?.takeIf(String::isNotBlank)
         if (queryId != null && (expectedBoardTable == null || queryBoard == expectedBoardTable)) return queryId
         val segments = runCatching { URI(url).path.orEmpty().trim('/').split('/') }.getOrDefault(emptyList())
-        if (segments.size != 2 || segments[0] !in setOf("javfc2", "javc")) return null
+        if (segments.size != 2 || segments[0] !in setOf("javfc2", "javc", "javm")) return null
         if (expectedBoardTable != null && segments[0] != expectedBoardTable) return null
         return segments[1].takeIf { id -> id.isNotBlank() && id.all(Char::isDigit) }
     }

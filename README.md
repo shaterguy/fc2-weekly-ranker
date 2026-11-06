@@ -12,10 +12,11 @@ Android app for browsing the configured `javfc2` board in fixed seven-day window
 
 ## TEST channel
 
-- Historical TEST lineage starts at `v0.1.0-dev1`; the current development target is `v0.2.0-dev56`.
-- Source version: `0.2.0-dev56`, `versionCode=80`.
+- Historical TEST lineage starts at `v0.1.0-dev1`; the current development target is `v0.2.0-dev57`.
+- Source version: `0.2.0-dev57`, `versionCode=81`.
 - TEST application ID: `com.shaterguy.fc2weeklyranker.dev`.
 - The configured official origin is `https://02.avsee.is`. Existing exact `https://01.avsee.is` settings migrate to 02, while unrelated custom HTTPS origins remain unchanged. Application pages are fetched through the app WebView session so Cloudflare/browser-session state stays in the browser context.
+- DEV57 adds the LTX (`javm`) board alongside FC2 and JAV, using the same user-saved HTTPS origin, with isolated post IDs, anchor dates, rank observations, favorites, tag favorites, search sessions and downloads. The LTX list is loaded from the selected origin's `/javm` route; the LTX search/tag endpoints use `onetable=javm`. Existing FC2/JAV settings and stored data remain unchanged.
 - DEV56 fetches ranking-only board/detail HTML inside the existing same-origin WebView session, without navigating or loading response images/frames. Browser cookies remain inside WebView; requests use no-store and disallow redirects. HTTP failures, challenge pages, empty/script-populated lists and unsupported markup fall back to the previous navigation path. Search, login, media discovery, ranking boundaries, Room data and the DEV55 comment-search change are preserved. Current user-configured site: https://04.avsee.is; the saved-origin policy remains unchanged.
 - DEV54 rechecks the existing search-403 deferral against a failure status read after the initial Main-thread status sample. A callback arriving between those reads must keep waiting for the requested document or challenge reload. Controlled neutral transport tests cover both previous-document and challenge-document timing. The native fixture keeps its existing assertions and deadlines and includes the fetch exception when premature completion is detected; CI preserves native output even on failure. Origin policy, settings saves and performance gates remain unchanged.
 - DEV53 completes the canonical JVM unit tests in a separate Gradle invocation before lint and AndroidTest/receiver builds. This removes competition from those build tasks during wall-clock performance fixtures. Production code and the existing performance fixture, warmups, five samples and 50% tag-median gate remain unchanged.

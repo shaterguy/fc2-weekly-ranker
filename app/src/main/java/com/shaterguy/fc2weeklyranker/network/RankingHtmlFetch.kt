@@ -12,14 +12,15 @@ internal fun isRankingHtmlTarget(url: String): Boolean = runCatching {
     val query = uri.rawQuery.orEmpty().split('&').map { it.split('=', limit = 2) }
     val board = query.firstOrNull { it[0] == "bo_table" }?.getOrNull(1)
         ?.let { URLDecoder.decode(it, "UTF-8") }
-    (path == "/bbs/board.php" && board in setOf("javfc2", "javc")) ||
-        Regex("^/(javfc2|javc)/[0-9]+/?$").matches(path)
+    (path == "/bbs/board.php" && board in setOf("javfc2", "javc", "javm")) ||
+        path == "/javm" || path == "/javm/" ||
+        Regex("^/(javfc2|javc|javm)/[0-9]+/?$").matches(path)
 }.getOrDefault(false)
 
 internal fun isUsableRankingHtml(html: String, url: String): Boolean {
     val doc = Jsoup.parse(html, url)
     val target = URI(url)
-    val isList = target.path == "/bbs/board.php" &&
+    val isList = (target.path == "/bbs/board.php" || target.path == "/javm" || target.path == "/javm/") &&
         target.rawQuery.orEmpty().split('&').none { it.substringBefore('=') == "wr_id" }
     if (isList) {
         val board = doc.selectFirst("#fboardlist") ?: return false

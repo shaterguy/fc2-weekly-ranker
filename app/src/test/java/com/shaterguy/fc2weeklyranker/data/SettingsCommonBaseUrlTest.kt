@@ -83,8 +83,10 @@ class SettingsCommonBaseUrlTest {
     @Test fun savingEitherModeWritesBothKeysAndPreservesModeData() = runBlocking {
         store.setAnchor(1000L, ContentMode.FC2)
         store.setAnchor(2000L, ContentMode.JAV)
+        store.setAnchor(3000L, ContentMode.LTX)
         store.toggleFavoriteTag("fc2-fixture", ContentMode.FC2)
         store.toggleFavoriteTag("jav-fixture", ContentMode.JAV)
+        store.toggleFavoriteTag("ltx-fixture", ContentMode.LTX)
         for (mode in ContentMode.entries) {
             val url = "https://${mode.sourceKey.lowercase()}.example.test"
             store.setSelectedContentMode(mode)
@@ -97,8 +99,10 @@ class SettingsCommonBaseUrlTest {
         }
         assertEquals(1000L, store.anchorEpochMillis(ContentMode.FC2).first())
         assertEquals(2000L, store.anchorEpochMillis(ContentMode.JAV).first())
+        assertEquals(3000L, store.anchorEpochMillis(ContentMode.LTX).first())
         assertEquals(setOf("fc2-fixture"), store.favoriteTags(ContentMode.FC2).first())
         assertEquals(setOf("jav-fixture"), store.favoriteTags(ContentMode.JAV).first())
+        assertEquals(setOf("ltx-fixture"), store.favoriteTags(ContentMode.LTX).first())
     }
 
     @Test fun committedAddressReopensFromDiskWithBothLegacyKeys() = runBlocking {

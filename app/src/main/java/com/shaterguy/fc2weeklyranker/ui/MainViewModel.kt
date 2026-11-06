@@ -716,8 +716,11 @@ internal fun searchPostEntity(
 internal fun rankingVisiblePosts(posts: List<PostEntity>): List<PostEntity> =
     posts.filterNot { it.snapshotKey == SEARCH_SNAPSHOT_KEY }
 
-internal fun contentModeForLocalPostId(postId: String): ContentMode =
-    if (postId.startsWith("jav:")) ContentMode.JAV else ContentMode.FC2
+internal fun contentModeForLocalPostId(postId: String): ContentMode = when {
+    postId.startsWith("jav:") -> ContentMode.JAV
+    postId.startsWith("ltx:") -> ContentMode.LTX
+    else -> ContentMode.FC2
+}
 
 internal fun cancelPendingProbeRegistrations(jobs: Collection<Job>?) {
     jobs?.forEach { it.cancel() }

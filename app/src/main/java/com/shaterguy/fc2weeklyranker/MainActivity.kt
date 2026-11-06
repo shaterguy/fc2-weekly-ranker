@@ -300,6 +300,7 @@ private fun ContentModeSelector(selected: ContentMode, onSelect: (ContentMode) -
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             ContentModeButton(ContentMode.FC2, selected, onSelect, Modifier.weight(1f))
             ContentModeButton(ContentMode.JAV, selected, onSelect, Modifier.weight(1f))
+            ContentModeButton(ContentMode.LTX, selected, onSelect, Modifier.weight(1f))
         }
     }
 }
@@ -435,7 +436,7 @@ private fun SettingsScreen(vm: MainViewModel) {
             value = input,
             onValueChange = { input = it },
             label = { Text("사이트 기본 주소") },
-            supportingText = { Text("FC2와 JAV에 공통으로 적용됩니다. 저장 시 연결을 확인합니다.") },
+            supportingText = { Text("FC2·JAV·LTX에 공통으로 적용됩니다. 저장 시 연결을 확인합니다.") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )

@@ -23,6 +23,7 @@ class SettingsStore(context: Context, private val clockMillis: () -> Long = { Sy
     val baseUrl: Flow<String> = baseUrl(ContentMode.FC2)
     val visitedPostIds: Flow<Set<String>> = dataStore.data.map { it[VISITED_POST_IDS].orEmpty() }
     val javFavoriteTags: Flow<Set<String>> = favoriteTags(ContentMode.JAV)
+    val ltxFavoriteTags: Flow<Set<String>> = favoriteTags(ContentMode.LTX)
     val fc2FavoriteTags: Flow<Set<String>> = favoriteTags(ContentMode.FC2)
     val fullscreenGestureSensitivity: Flow<String> =
         dataStore.data.map { it[FULLSCREEN_GESTURE_SENSITIVITY] ?: DEFAULT_FULLSCREEN_GESTURE_SENSITIVITY }
@@ -127,22 +128,30 @@ class SettingsStore(context: Context, private val clockMillis: () -> Long = { Sy
         dataStore.edit { prefs -> prefs[VISITED_POST_IDS] = prefs[VISITED_POST_IDS].orEmpty() + postId }
     }
 
-    private fun anchorKey(mode: ContentMode): Preferences.Key<Long> =
-        if (mode == ContentMode.FC2) ANCHOR else JAV_ANCHOR
+    private fun anchorKey(mode: ContentMode): Preferences.Key<Long> = when (mode) {
+        ContentMode.FC2 -> ANCHOR
+        ContentMode.JAV -> JAV_ANCHOR
+        ContentMode.LTX -> LTX_ANCHOR
+    }
 
-    private fun favoriteTagsKey(mode: ContentMode): Preferences.Key<Set<String>> =
-        if (mode == ContentMode.FC2) FC2_FAVORITE_TAGS else JAV_FAVORITE_TAGS
+    private fun favoriteTagsKey(mode: ContentMode): Preferences.Key<Set<String>> = when (mode) {
+        ContentMode.FC2 -> FC2_FAVORITE_TAGS
+        ContentMode.JAV -> JAV_FAVORITE_TAGS
+        ContentMode.LTX -> LTX_FAVORITE_TAGS
+    }
 
     companion object {
         const val DEFAULT_BASE_URL = "https://02.avsee.is"
         const val DEFAULT_FULLSCREEN_GESTURE_SENSITIVITY = "NORMAL"
         private val ANCHOR = longPreferencesKey("anchor_epoch_millis")
         private val JAV_ANCHOR = longPreferencesKey("jav_anchor_epoch_millis")
+        private val LTX_ANCHOR = longPreferencesKey("ltx_anchor_epoch_millis")
         private val CONTENT_MODE = stringPreferencesKey("content_mode")
         private val BASE_URL = stringPreferencesKey("base_url")
         private val JAV_BASE_URL = stringPreferencesKey("jav_base_url")
         private val VISITED_POST_IDS = stringSetPreferencesKey("visited_post_ids")
         private val JAV_FAVORITE_TAGS = stringSetPreferencesKey("jav_favorite_tags")
+        private val LTX_FAVORITE_TAGS = stringSetPreferencesKey("ltx_favorite_tags")
         private val FC2_FAVORITE_TAGS = stringSetPreferencesKey("fc2_favorite_tags")
         private val RANKING_COVERED_WINDOWS = stringSetPreferencesKey("ranking_covered_windows_v1")
         private val FULLSCREEN_GESTURE_SENSITIVITY = stringPreferencesKey("fullscreen_gesture_sensitivity")

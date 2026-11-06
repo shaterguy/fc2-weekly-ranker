@@ -15,12 +15,14 @@ class RankingHtmlPolicyTest {
             "$ORIGIN/bbs/board.php?bo_table=javfc2&page=1",
             "$ORIGIN/bbs/board.php?bo_table=javc&wr_id=42",
             "$ORIGIN/javfc2/42", "$ORIGIN/javc/42/",
+            "$ORIGIN/javm", "$ORIGIN/javm?page=2", "$ORIGIN/javm/42", "$ORIGIN/bbs/board.php?bo_table=javm&page=2",
         )) assertTrue(url, isRankingHtmlTarget(url))
         for (url in listOf(
             "$ORIGIN/bbs/search.php?onetable=javfc2",
             "$ORIGIN/bbs/tag.php?q=fixture", "$ORIGIN/bbs/login.php",
             "$ORIGIN/bbs/board.php?bo_table=other", "$ORIGIN/javc/42/extra",
             "$ORIGIN/video.mp4", "$ORIGIN/bbs/board.php/extra?bo_table=javfc2",
+            "$ORIGIN/javm/42/extra",
         )) assertFalse(url, isRankingHtmlTarget(url))
     }
 
@@ -33,6 +35,10 @@ class RankingHtmlPolicyTest {
             "<div class='list-item'><h2><a href='/javfc2/42'>Sidebar</a></h2></div>",
         )) assertFalse(html, isUsableRankingHtml(html, BOARD))
         assertTrue(isUsableRankingHtml(BOARD_HTML, BOARD))
+        assertTrue(isUsableRankingHtml(
+            "<form id='fboardlist'><div class='list-item'><h2><a href='/javm/42'>Neutral fixture</a></h2></div></form>",
+            "$ORIGIN/javm?sop=and&sst=wr_datetime&sod=desc&page=1",
+        ))
         assertTrue(isUsableRankingHtml(
             "<article><meta itemprop='datePublished' content='2026-11-04KST10:00:00'></article>",
             "$ORIGIN/javfc2/42",

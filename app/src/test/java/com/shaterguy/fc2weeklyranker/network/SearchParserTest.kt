@@ -10,6 +10,24 @@ class SearchParserTest {
     private val client = AvseeClient(OkHttpClient())
 
     @Test
+    fun `search results keep the highest known metrics across duplicate comment hits`() {
+        val url = client.buildSearchUrl("https://example.test", "needle", 1)
+        val html = """<ul class='search-results'>
+            <li class='search-result'><div class='search-result-title'><a href='/javfc2/42#c_1'>Post</a></div></li>
+            <li class='search-result'><div class='search-result-title'><a href='/javfc2/42#c_2'>Post</a></div>
+              <div class='search-result-meta'>댓글 1234 추천수 2,346</div>
+            </li>
+            <li class='search-result'><div class='search-result-title'><a href='/javfc2/42#c_3'>Post</a></div>
+              <div class='search-result-meta'>댓글 1200 추천 2,345</div>
+            </li>
+        </ul>"""
+        val post = client.parseSearchPage(html, url).posts.single()
+        assertEquals(3, post.occurrenceCount)
+        assertEquals(1234, post.commentCount)
+        assertEquals(2346, post.recommendationCount)
+    }
+
+    @Test
     fun `builds FC2 search url with encoded query and javfc2 onetable`() {
         val url = client.buildSearchUrl("https://example.test", "한글 test", 3)
         assertTrue(url.startsWith("https://example.test/bbs/search.php?sfl=wr_comment&stx="))

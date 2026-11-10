@@ -186,11 +186,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         rankingVisiblePosts(currentPosts)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val rankedPosts = mutableContentMode.flatMapLatest { mode ->
-        combine(posts, repo.rankingObservations(mode), rankingMode) { currentPosts, observations, rankingMode ->
+        val observationsForSort = rankingMode.flatMapLatest { sort ->
+            val effectiveSort = if (mode != ContentMode.LTX && sort == RankingMode.RECOMMENDATIONS) {
+                RankingMode.POPULARITY
+            } else sort
+            repo.rankingObservations(mode, effectiveSort == RankingMode.RECOMMENDATIONS)
+                .map { effectiveSort to it }
+        }
+        combine(posts, anchorEpochMillis, observationsForSort) { currentPosts, anchor, (sort, observations) ->
             AdaptiveRanking.rank(
                 currentPosts.filter { it.sourceKey == mode.sourceKey },
                 observations,
-                rankingMode,
+                sort,
+                anchorEpochMillis = anchor,
             )
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList<RankedPost>())
@@ -299,6 +307,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         searchLoading.value = false
         searchCancelling.value = false
         mutableSavedApplicationOrigin.value = null
+        if (mode != ContentMode.LTX && mutableRankingMode.value == RankingMode.RECOMMENDATIONS) {
+            mutableRankingMode.value = RankingMode.POPULARITY
+        }
         mutableContentMode.value = mode
 
         viewModelScope.launch {

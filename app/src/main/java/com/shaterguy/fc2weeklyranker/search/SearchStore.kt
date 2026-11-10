@@ -64,8 +64,10 @@ internal data class SearchResultEntity(
     val title: String,
     val sequence: Long,
     @ColumnInfo(defaultValue = "1") val occurrenceCount: Int = 1,
+    val commentCount: Int? = null,
+    val recommendationCount: Int? = null,
 ) {
-    fun toRemote(): RemoteSearchPost = RemoteSearchPost(postId, url, title, occurrenceCount)
+    fun toRemote(): RemoteSearchPost = RemoteSearchPost(postId, url, title, occurrenceCount, commentCount, recommendationCount)
 }
 
 @Dao
@@ -95,11 +97,22 @@ internal abstract class SearchDao {
     @Query(
         """
         UPDATE search_results
-        SET occurrenceCount = occurrenceCount + :delta
+        SET occurrenceCount = occurrenceCount + :delta,
+            commentCount = CASE WHEN :comments IS NOT NULL AND
+                (commentCount IS NULL OR :comments > commentCount) THEN :comments ELSE commentCount END,
+            recommendationCount = CASE WHEN :recommendations IS NOT NULL AND
+                (recommendationCount IS NULL OR :recommendations > recommendationCount)
+                THEN :recommendations ELSE recommendationCount END
         WHERE sessionToken = :token AND postId = :postId
         """,
     )
-    protected abstract suspend fun incrementOccurrenceCount(token: String, postId: String, delta: Int): Int
+    protected abstract suspend fun updateResultCounts(
+        token: String,
+        postId: String,
+        delta: Int,
+        comments: Int?,
+        recommendations: Int?,
+    ): Int
 
     @Query("DELETE FROM search_results")
     protected abstract suspend fun clearResults()
@@ -200,7 +213,7 @@ internal abstract class SearchDao {
             val baseSequence = page.toLong() * PAGE_SEQUENCE_STRIDE
             posts.forEachIndexed { index, post ->
                 require(post.occurrenceCount >= 1)
-                val updated = incrementOccurrenceCount(token, post.id, post.occurrenceCount)
+                val updated = updateResultCounts(token, post.id, post.occurrenceCount, post.commentCount, post.recommendationCount)
                 if (updated == 0) {
                     insertResults(
                         listOf(
@@ -211,6 +224,8 @@ internal abstract class SearchDao {
                                 title = post.title,
                                 sequence = baseSequence + index,
                                 occurrenceCount = post.occurrenceCount,
+                                commentCount = post.commentCount,
+                                recommendationCount = post.recommendationCount,
                             ),
                         ),
                     )
@@ -227,7 +242,7 @@ internal abstract class SearchDao {
 
 @Database(
     entities = [SearchSessionEntity::class, SearchResultEntity::class],
-    version = 3,
+    version = 4,
     exportSchema = true,
 )
 internal abstract class SearchDatabase : RoomDatabase() {
@@ -237,6 +252,13 @@ internal abstract class SearchDatabase : RoomDatabase() {
         val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE search_session ADD COLUMN sourceKey TEXT NOT NULL DEFAULT 'FC2'")
+            }
+        }
+
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE search_results ADD COLUMN commentCount INTEGER")
+                db.execSQL("ALTER TABLE search_results ADD COLUMN recommendationCount INTEGER")
             }
         }
 

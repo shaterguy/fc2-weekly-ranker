@@ -73,6 +73,8 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
     private val probeSessions = mutableMapOf<ProbeKey, ProbeSession>()
     private val downloadScheduler = DownloadScheduler(context)
 
+    private val tagRankingRefreshMutex = Mutex()
+
     fun posts(
         anchorMillis: Long,
         pageIndex: Int,
@@ -85,9 +87,12 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
             window.upperInclusive.toEpochMilli(),
             mode.sourceKey,
         ).map { stored ->
+            val eligible = if (mode.rankingTag == null) stored else stored.filter {
+                it.snapshotKey.startsWith(TAG_RANKING_SNAPSHOT_PREFIX)
+            }
             rank(
                 anchor,
-                stored.map { post ->
+                eligible.map { post ->
                     RankCandidate(
                         value = post,
                         postedAt = Instant.ofEpochMilli(post.postedAtEpochMillis),
@@ -99,9 +104,12 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
         }
     }
 
-    fun rankingObservations(mode: ContentMode = ContentMode.FC2): Flow<List<RankObservationEntity>> =
+    fun rankingObservations(
+        mode: ContentMode = ContentMode.FC2,
+        recommendations: Boolean = false,
+    ): Flow<List<RankObservationEntity>> =
         settings.baseUrl(mode).flatMapLatest { baseUrl ->
-            db.rankObservationDao().observeDataset(rankDatasetKey(baseUrl, mode))
+            db.rankObservationDao().observeDataset(rankDatasetKey(baseUrl, mode, recommendations))
         }
 
     fun favorites(mode: ContentMode = ContentMode.FC2): Flow<List<PostEntity>> = db.postDao().favorites(mode.sourceKey)
@@ -136,7 +144,21 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
         force: Boolean,
         mode: ContentMode,
     ) {
+        if (mode.rankingTag == null) {
+            collectRankingWindow(pageIndex, anchorMillis, force, mode)
+        } else {
+            tagRankingRefreshMutex.withLock { collectRankingWindow(pageIndex, anchorMillis, force, mode) }
+        }
+    }
+
+    private suspend fun collectRankingWindow(
+        pageIndex: Int,
+        anchorMillis: Long,
+        force: Boolean,
+        mode: ContentMode,
+    ) {
         val anchor = Instant.ofEpochMilli(anchorMillis)
+        val window = windowFor(anchor, pageIndex)
         val baseUrl = settings.baseUrl(mode).first()
         val datasetKey = rankDatasetKey(baseUrl, mode)
         val coverageKey = coverageKey(baseUrl, anchorMillis, pageIndex, mode)
@@ -145,12 +167,12 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
         val knownDates = db.postDao().knownPostDates(mode.sourceKey).associate { known ->
             mode.remotePostId(known.id) to Instant.ofEpochMilli(known.postedAtEpochMillis).atZone(SEOUL).toLocalDate()
         }
-        val remote = source.crawlWindow(
-            baseUrl = baseUrl,
-            window = windowFor(anchor, pageIndex),
-            knownDates = knownDates,
-            boardTable = mode.boardTable,
-        )
+        val tag = mode.rankingTag
+        val remote = if (tag == null) {
+            source.crawlWindow(baseUrl, window, knownDates, mode.boardTable)
+        } else {
+            source.crawlTagWindow(baseUrl, tag, window, knownDates)
+        }
         val ranked = rank(anchor, remote.map { RankCandidate(it, it.postedAt, it.commentCount, it.id) })
         val now = System.currentTimeMillis()
         val postEntities = ranked.map { (candidate, rate) ->
@@ -162,36 +184,55 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
                 postedAtEpochMillis = post.postedAt.toEpochMilli(),
                 recommendationCount = post.commentCount,
                 dailyRate = rate,
-                snapshotKey = snapshotKey(anchorMillis, pageIndex),
+                snapshotKey = if (tag == null) snapshotKey(anchorMillis, pageIndex)
+                    else "$TAG_RANKING_SNAPSHOT_PREFIX$anchorMillis:$pageIndex",
                 fetchedAtEpochMillis = now,
                 sourceKey = mode.sourceKey,
+                tagRecommendationCount = post.tagRecommendationCount,
             )
         }
-        val observations = remote.mapNotNull { post ->
-            val postedAt = post.postedAt.toEpochMilli()
-            val commentCount = post.commentCount
-            if (commentCount !in 0..MAX_COMMENT_COUNT) return@mapNotNull null
-            if (now + MAX_CLOCK_SKEW_MILLIS < postedAt) return@mapNotNull null
-            RankObservationEntity(
-                datasetKey = datasetKey,
-                postId = mode.localPostId(post.id),
-                postedAtEpochMillis = postedAt,
-                commentCount = commentCount,
-                observedAtEpochMillis = now,
-                observedBucketEpochMillis = observationBucket(now),
-            )
+        val recommendationDatasetKey = rankDatasetKey(baseUrl, mode, recommendations = true)
+        val observations = buildList {
+            for (post in remote) {
+                val postedAt = post.postedAt.toEpochMilli()
+                if (now + MAX_CLOCK_SKEW_MILLIS < postedAt) continue
+                val observation = RankObservationEntity(
+                    datasetKey = datasetKey,
+                    postId = mode.localPostId(post.id),
+                    postedAtEpochMillis = postedAt,
+                    commentCount = post.commentCount,
+                    observedAtEpochMillis = now,
+                    observedBucketEpochMillis = observationBucket(now),
+                )
+                if (post.commentCount in 0..MAX_COMMENT_COUNT) add(observation)
+                post.tagRecommendationCount?.takeIf { it in 0..MAX_COMMENT_COUNT }?.let { count ->
+                    add(observation.copy(datasetKey = recommendationDatasetKey, commentCount = count))
+                }
+            }
         }
         db.withTransaction {
-            if (postEntities.isNotEmpty()) db.postDao().upsert(postEntities)
+            val posts = db.postDao()
+            if (tag != null) {
+                posts.clearTagRankingMembership(
+                    mode.sourceKey,
+                    window.startInclusive.toEpochMilli(),
+                    window.upperInclusive.toEpochMilli(),
+                    "$TAG_RANKING_SNAPSHOT_PREFIX%",
+                    "tag-ranking-excluded",
+                    now,
+                )
+            }
+            if (postEntities.isNotEmpty()) posts.upsert(postEntities)
             val observationDao = db.rankObservationDao()
             observationDao.deleteOlderThan(now - OBSERVATION_RETENTION_MILLIS)
             if (observations.isNotEmpty()) {
                 observationDao.upsertNewest(observations)
-                observations.mapTo(linkedSetOf()) { it.postId }.forEach { postId ->
-                    observationDao.trimPost(datasetKey, postId, MAX_OBSERVATIONS_PER_POST)
+                observations.mapTo(linkedSetOf()) { it.datasetKey to it.postId }.forEach { (key, postId) ->
+                    observationDao.trimPost(key, postId, MAX_OBSERVATIONS_PER_POST)
                 }
             }
             observationDao.trimDataset(datasetKey, MAX_OBSERVATIONS_TOTAL)
+            if (tag != null) observationDao.trimDataset(recommendationDatasetKey, MAX_OBSERVATIONS_TOTAL)
         }
         settings.markRankingWindowCovered(coverageKey)
     }
@@ -225,13 +266,13 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
         mode: ContentMode = ContentMode.FC2,
     ): Result<String> {
         val normalized = BaseUrlPolicy.normalize(input).getOrElse { return Result.failure(it) }
-        source.testConnection(normalized, mode.boardTable).getOrElse { return Result.failure(it) }
+        source.testConnection(normalized, mode.boardTable, mode.rankingTag).getOrElse { return Result.failure(it) }
         settings.setBaseUrl(normalized, mode)
         return Result.success(normalized)
     }
 
     suspend fun testCurrentBaseUrl(mode: ContentMode = ContentMode.FC2): Result<Unit> =
-        source.testConnection(settings.baseUrl(mode).first(), mode.boardTable)
+        source.testConnection(settings.baseUrl(mode).first(), mode.boardTable, mode.rankingTag)
 
     suspend fun toggleFavorite(postId: String) {
         if (db.postDao().isFavorite(postId)) db.postDao().removeFavorite(postId) else db.postDao().addFavorite(FavoriteEntity(postId, System.currentTimeMillis()))
@@ -401,6 +442,8 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
         private const val MAX_COMMENT_COUNT = 1_000_000
         private const val MAX_CLOCK_SKEW_MILLIS = 5L * 60L * 1_000L
 
+        private const val TAG_RANKING_SNAPSHOT_PREFIX = "tag-ranking-v1:"
+
         fun snapshotKey(anchorMillis: Long, pageIndex: Int): String = "ranking-v5-comments:$anchorMillis:$pageIndex"
 
         internal fun coverageKey(
@@ -410,14 +453,22 @@ class AppRepository(private val context: Context, private val db: AppDatabase, v
             mode: ContentMode = ContentMode.FC2,
         ): String {
             val window = windowFor(Instant.ofEpochMilli(anchorMillis), pageIndex)
-            val sourcePart = if (mode == ContentMode.FC2) "" else ":${mode.boardTable}"
+            val sourcePart = when {
+                mode.rankingTag != null -> ":tag=${mode.rankingTag}"
+                mode == ContentMode.FC2 -> ""
+                else -> ":${mode.boardTable}"
+            }
             return "ranking-window-v1:$baseUrl$sourcePart:${window.startDate}:${window.endDate}"
         }
 
         internal fun rankDatasetKey(
             baseUrl: String,
             mode: ContentMode = ContentMode.FC2,
-        ): String = "${baseUrl.trimEnd('/').lowercase()}|${mode.boardTable}"
+            recommendations: Boolean = false,
+        ): String {
+            val metric = if (recommendations) "|recommendations" else ""
+            return "${baseUrl.trimEnd('/').lowercase()}|${mode.rankingTag ?: mode.boardTable}$metric"
+        }
 
         internal fun observationBucket(observedAtEpochMillis: Long): Long =
             observedAtEpochMillis - observedAtEpochMillis % OBSERVATION_BUCKET_MILLIS

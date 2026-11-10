@@ -104,7 +104,8 @@ internal fun isMatchingApplicationDocument(
         "/bbs/tag.php" ->
             same(req, obs, "q") &&
                 same(req, obs, "eq") &&
-                same(req, obs, "onetable") &&
+                req["onetable"]?.firstOrNull().orEmpty() == obs["onetable"]?.firstOrNull().orEmpty() &&
+                (req["tag_op"]?.firstOrNull() ?: "or") == (obs["tag_op"]?.firstOrNull() ?: "or") &&
                 same(req, obs, "result_sort") &&
                 page(req) == page(obs)
         else -> req == obs

@@ -120,6 +120,30 @@ class AdaptiveRankingTest {
         assertEquals("legacy-high", ranked.first().post.id)
     }
 
+    @Test
+    fun `recommendations use the same age-adjusted popularity model on their own counts`() {
+        val older = post("older", ageHours = 144, legacyRate = 100.0)
+            .copy(recommendationCount = 1000, tagRecommendationCount = 24)
+        val newer = post("newer", ageHours = 24, legacyRate = 1.0)
+            .copy(recommendationCount = 1, tagRecommendationCount = 10)
+        val missing = post("missing", ageHours = 24, legacyRate = 999.0)
+        val observations = listOf(obs(older, 24), obs(newer, 10))
+        val recommendations = AdaptiveRanking.rank(
+            listOf(missing, older, newer), observations, RankingMode.RECOMMENDATIONS, now,
+        )
+        val equivalentPopularity = AdaptiveRanking.rank(
+            listOf(older.copy(dailyRate = 4.0), newer.copy(dailyRate = 10.0)),
+            observations,
+            RankingMode.POPULARITY,
+            now,
+        )
+
+        assertEquals(listOf("newer", "older", "missing"), recommendations.map { it.post.id })
+        assertEquals(equivalentPopularity.map { it.popularityScore }, recommendations.take(2).map { it.popularityScore })
+        assertEquals(1, recommendations.first().post.recommendationCount)
+        assertNull(recommendations.last().commentCount)
+    }
+
     private fun post(id: String, ageHours: Int, legacyRate: Double): PostEntity = PostEntity(
         id = id,
         url = "https://example.test/$id",

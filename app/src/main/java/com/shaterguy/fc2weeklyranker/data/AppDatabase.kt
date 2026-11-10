@@ -50,6 +50,7 @@ data class PostEntity(
     val snapshotKey: String,
     val fetchedAtEpochMillis: Long,
     @ColumnInfo(defaultValue = "'FC2'") val sourceKey: String = "FC2",
+    val tagRecommendationCount: Int? = null,
 )
 
 data class KnownPostDate(
@@ -135,6 +136,24 @@ interface PostDao {
         upperInclusiveEpochMillis: Long,
         sourceKey: String = "FC2",
     ): Flow<List<PostEntity>>
+
+    @Query(
+        """
+        UPDATE posts SET snapshotKey = :excludedSnapshotKey
+        WHERE sourceKey = :sourceKey
+          AND postedAtEpochMillis BETWEEN :startMillis AND :endMillis
+          AND snapshotKey LIKE :tagSnapshotPattern
+          AND fetchedAtEpochMillis <= :fetchedBefore
+        """,
+    )
+    suspend fun clearTagRankingMembership(
+        sourceKey: String,
+        startMillis: Long,
+        endMillis: Long,
+        tagSnapshotPattern: String,
+        excludedSnapshotKey: String,
+        fetchedBefore: Long,
+    )
 
     @Query("SELECT id, postedAtEpochMillis FROM posts WHERE sourceKey = :sourceKey")
     suspend fun knownPostDates(sourceKey: String = "FC2"): List<KnownPostDate>
@@ -450,7 +469,7 @@ interface DownloadDao {
 
 @Database(
     entities = [PostEntity::class, FavoriteEntity::class, VideoEntity::class, DownloadEntity::class, RankObservationEntity::class],
-    version = 4,
+    version = 5,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -492,6 +511,12 @@ abstract class AppDatabase : RoomDatabase() {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE posts ADD COLUMN sourceKey TEXT NOT NULL DEFAULT 'FC2'")
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_posts_sourceKey ON posts(sourceKey)")
+            }
+        }
+
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE posts ADD COLUMN tagRecommendationCount INTEGER")
             }
         }
 

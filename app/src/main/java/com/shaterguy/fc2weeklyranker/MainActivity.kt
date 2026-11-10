@@ -340,7 +340,8 @@ private fun RankingScreen(vm: MainViewModel, onPost: (String) -> Unit) {
     val window = remember(anchor, page) { windowFor(Instant.ofEpochMilli(anchor), page) }
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         Spacer(Modifier.height(12.dp))
-        Text("${mode.sourceKey} 7일 댓글 랭킹", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        val title = if (mode == ContentMode.LTX) "LTX 7일 랭킹" else "${mode.sourceKey} 7일 댓글 랭킹"
+        Text(title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         Text("기준 ${formatDateTime(anchor)}")
         Text("${window.startDate} ∼ ${window.endDate}", style = MaterialTheme.typography.bodyLarge)
         Row(
@@ -352,7 +353,7 @@ private fun RankingScreen(vm: MainViewModel, onPost: (String) -> Unit) {
             TextButton(onClick = vm::refreshAnchor, enabled = !loading) { Text("기준 새로고침") }
             OutlinedButton(onClick = vm::olderPage, enabled = !loading) { Text("이전 7일") }
         }
-        RankingModeSelector(rankingMode, vm::selectRankingMode)
+        RankingModeSelector(rankingMode, mode == ContentMode.LTX, vm::selectRankingMode)
         StatusLine(loading, message, vm::clearMessage)
         if (!loading && posts.isEmpty()) Text("이 기간에 표시할 게시물이 없습니다.", Modifier.padding(vertical = 24.dp))
         LazyColumn(contentPadding = PaddingValues(bottom = 20.dp)) {
@@ -372,7 +373,11 @@ private fun RankingScreen(vm: MainViewModel, onPost: (String) -> Unit) {
 }
 
 @Composable
-private fun RankingModeSelector(selected: RankingMode, onSelect: (RankingMode) -> Unit) {
+private fun RankingModeSelector(
+    selected: RankingMode,
+    showRecommendations: Boolean,
+    onSelect: (RankingMode) -> Unit,
+) {
     Row(
         Modifier.fillMaxWidth().padding(vertical = 6.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -393,6 +398,18 @@ private fun RankingModeSelector(selected: RankingMode, onSelect: (RankingMode) -
         } else {
             OutlinedButton(onClick = { onSelect(RankingMode.TRENDING) }, modifier = Modifier.weight(1f)) {
                 Text("급상승순")
+            }
+        }
+        if (showRecommendations) {
+            val recommendations = RankingMode.RECOMMENDATIONS
+            if (selected == recommendations) {
+                Button(onClick = { onSelect(recommendations) }, modifier = Modifier.weight(1f)) {
+                    Text("추천순")
+                }
+            } else {
+                OutlinedButton(onClick = { onSelect(recommendations) }, modifier = Modifier.weight(1f)) {
+                    Text("추천순")
+                }
             }
         }
     }
@@ -884,7 +901,8 @@ private fun PostCard(
                     )
                 }
                 if (showMetrics) {
-                    Text("댓글 ${post.recommendationCount} · 일평균 ${"%.2f".format(post.dailyRate)}")
+                    val recommendations = post.tagRecommendationCount?.let { " · 추천 $it" }.orEmpty()
+                    Text("댓글 ${post.recommendationCount}$recommendations · 일평균 ${"%.2f".format(post.dailyRate)}")
                     rankingSummary?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                 }
                 Text(formatDate(post.postedAtEpochMillis), style = MaterialTheme.typography.bodySmall)
@@ -898,6 +916,11 @@ private fun formatRankingSummary(ranked: RankedPost, mode: RankingMode): String 
     return when (mode) {
         RankingMode.POPULARITY -> "인기점수 ${"%.1f".format(ranked.popularityScore)} · 관측댓글 $observed"
         RankingMode.TRENDING -> "급상승점수 ${"%.1f".format(ranked.trendingScore)} · 관측댓글 $observed"
+        RankingMode.RECOMMENDATIONS -> if (ranked.post.tagRecommendationCount == null) {
+            "추천수 확인 불가"
+        } else {
+            "추천점수 ${"%.1f".format(ranked.popularityScore)}"
+        }
     }
 }
 

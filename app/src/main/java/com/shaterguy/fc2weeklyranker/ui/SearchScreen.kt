@@ -10,6 +10,7 @@ import android.webkit.WebViewClient
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -50,13 +51,14 @@ import com.shaterguy.fc2weeklyranker.network.configuredApplicationOrigin
 import com.shaterguy.fc2weeklyranker.network.isApplicationNavigationAllowed
 import com.shaterguy.fc2weeklyranker.network.rejectUnconfiguredMainFrame
 
-internal enum class SearchSortMode { FIRST_SEEN, OCCURRENCE }
+internal enum class SearchSortMode { FIRST_SEEN, OCCURRENCE, RECOMMENDATIONS }
 
 internal fun sortSearchResults(
     results: List<RemoteSearchPost>,
     mode: SearchSortMode,
 ): List<RemoteSearchPost> = when (mode) {
     SearchSortMode.FIRST_SEEN -> results
+    SearchSortMode.RECOMMENDATIONS -> results.sortedByDescending { it.recommendationCount ?: -1 }
     SearchSortMode.OCCURRENCE -> results.withIndex()
         .sortedWith(
             compareByDescending<IndexedValue<RemoteSearchPost>> { it.value.occurrenceCount }
@@ -208,27 +210,25 @@ fun SearchScreen(
             Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            if (sortMode == SearchSortMode.FIRST_SEEN) {
-                Button(
-                    onClick = { sortName = SearchSortMode.FIRST_SEEN.name },
-                    modifier = Modifier.weight(1f),
-                ) { Text("기본순") }
-            } else {
-                OutlinedButton(
-                    onClick = { sortName = SearchSortMode.FIRST_SEEN.name },
-                    modifier = Modifier.weight(1f),
-                ) { Text("기본순") }
-            }
-            if (sortMode == SearchSortMode.OCCURRENCE) {
-                Button(
-                    onClick = { sortName = SearchSortMode.OCCURRENCE.name },
-                    modifier = Modifier.weight(1f),
-                ) { Text("중복횟수순") }
-            } else {
-                OutlinedButton(
-                    onClick = { sortName = SearchSortMode.OCCURRENCE.name },
-                    modifier = Modifier.weight(1f),
-                ) { Text("중복횟수순") }
+            listOf(
+                SearchSortMode.FIRST_SEEN to "기본순",
+                SearchSortMode.OCCURRENCE to "중복횟수순",
+                SearchSortMode.RECOMMENDATIONS to "추천순",
+            ).forEach { (sort, label) ->
+                val padding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
+                if (sortMode == sort) {
+                    Button(
+                        onClick = { sortName = sort.name },
+                        modifier = Modifier.weight(1f),
+                        contentPadding = padding,
+                    ) { Text(label) }
+                } else {
+                    OutlinedButton(
+                        onClick = { sortName = sort.name },
+                        modifier = Modifier.weight(1f),
+                        contentPadding = padding,
+                    ) { Text(label) }
+                }
             }
         }
 
@@ -289,7 +289,12 @@ fun SearchScreen(
                             fontWeight = FontWeight.SemiBold,
                             color = if (visited) MaterialTheme.colorScheme.outline else MaterialTheme.colorScheme.onSurface,
                         )
-                        Text("검색 결과 출현 ${post.occurrenceCount}회", style = MaterialTheme.typography.bodyMedium)
+                        val metrics = listOfNotNull(
+                            "검색 결과 출현 ${post.occurrenceCount}회",
+                            post.commentCount?.let { "댓글 $it" },
+                            post.recommendationCount?.let { "추천 $it" },
+                        )
+                        Text(metrics.joinToString(" · "), style = MaterialTheme.typography.bodyMedium)
                         Text(
                             if (openingPostId == post.id) "게시물을 여는 중…" else "앱에서 게시물 보기",
                             style = MaterialTheme.typography.bodySmall,

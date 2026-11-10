@@ -48,5 +48,48 @@ class CurrentTagParserContractTest {
         assertEquals("3000001", parsed.posts.first().id)
         assertEquals(3, parsed.posts.first().commentCount)
         assertEquals(5_582, parsed.posts.first().viewCount)
+        assertEquals(1, parsed.posts.first().recommendationCount)
+        assertEquals(java.time.Instant.parse("2026-10-01T03:00:00Z"), parsed.posts.first().postedAt)
+    }
+
+    @Test
+    fun `LTX rank data follows tag pages across boards and filters the seven-day window`() = kotlinx.coroutines.runBlocking {
+        val baseUrl = "https://example.test"
+        val requested = mutableListOf<String>()
+        val transport = object : ApplicationPageTransport {
+            override suspend fun fetch(url: String, referer: String?): String {
+                requested += url
+                val page = url.substringAfterLast("page=").toInt()
+                val rows = when (page) {
+                    1 -> listOf(Triple("/javm/42", "11.09", "추천 1234"))
+                    2 -> listOf(
+                        Triple("/javc/42", "11.05", "<i class='fa fa-thumbs-up'></i>2,345"),
+                        Triple("/javfc2/72", "10.30", "추천 8"),
+                    )
+                    else -> error("Unexpected page $page")
+                }.joinToString("") { (path, day, rec) ->
+                    """<li class='tag-result'>
+                       <div class='tag-result-title'><a href='$path'>Result</a></div>
+                       <div class='tag-result-meta'>댓글 99 조회 1234 <time>2026.$day 10:00</time> $rec</div>
+                       </li>"""
+                }
+                return """<ul class='tag-results'>$rows</ul>
+                    <a href='/bbs/tag.php?q=%23LTX&eq=&tag_op=or&onetable=&result_sort=newest&page=2'>2</a>
+                    <a href='/bbs/tag.php?q=%23LTX&eq=&tag_op=and&onetable=&result_sort=newest&page=99'>wrong operator</a>"""
+            }
+        }
+        val client = AvseeClient(OkHttpClient(), applicationPageTransport = transport)
+        val window = com.shaterguy.fc2weeklyranker.domain.windowFor(java.time.Instant.parse("2026-11-10T12:00:00Z"), 0)
+        val posts = client.crawlTagWindow(baseUrl, "#LTX", window)
+
+        assertEquals(listOf("42", "javc:42"), posts.map { it.id })
+        assertEquals(listOf(1234, 2345), posts.map { it.tagRecommendationCount })
+        assertEquals(
+            listOf(
+                "$baseUrl/bbs/tag.php?q=%23LTX&eq=&tag_op=or&onetable=&result_sort=newest&page=1",
+                "$baseUrl/bbs/tag.php?q=%23LTX&eq=&tag_op=or&onetable=&result_sort=newest&page=2",
+            ),
+            requested,
+        )
     }
 }

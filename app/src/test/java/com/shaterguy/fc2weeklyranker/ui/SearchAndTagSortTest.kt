@@ -46,6 +46,18 @@ class SearchAndTagSortTest {
     }
 
     @Test
+    fun `search and tag recommendations keep zero above unknown and preserve ties`() {
+        val search = listOf(null, 0, 1_200, 1_200).mapIndexed { index, count ->
+            RemoteSearchPost("$index", "https://example.test/$index", "$index", recommendationCount = count)
+        }
+        val tags = search.map {
+            RemoteTagPost(it.id, it.url, it.title, 0, 0, it.recommendationCount)
+        }
+        assertEquals(listOf("2", "3", "1", "0"), sortSearchResults(search, SearchSortMode.RECOMMENDATIONS).map { it.id })
+        assertEquals(listOf("2", "3", "1", "0"), sortTagResults(tags, TagSortMode.RECOMMENDATIONS).map { it.id })
+    }
+
+    @Test
     fun `JAV tag navigation IDs stay source namespaced`() {
         assertEquals("jav:123", ContentMode.JAV.localPostId("123"))
         assertEquals("123", ContentMode.JAV.remotePostId("jav:123"))

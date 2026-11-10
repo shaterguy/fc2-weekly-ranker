@@ -21,6 +21,7 @@ import okhttp3.Request
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import org.jsoup.nodes.TextNode
 import java.net.ConnectException
 import java.net.NoRouteToHostException
 import java.net.ProtocolException
@@ -47,6 +48,7 @@ private const val TAG_PATH = "/bbs/tag.php"
 private const val UA = "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 Chrome/151 Mobile Safari/537.36"
 private val SEOUL = ZoneId.of("Asia/Seoul")
 private val COUNT_TOKEN = Regex("(?<![A-Za-z0-9])(?:\\d{1,3}(?:,\\d{3})+|\\d+)(?![A-Za-z0-9])")
+private const val COMMENT_MARKERS = ".fa-comment, .fa-comments, .fa-comment-o, .fa-commenting, .fa-commenting-o"
 private val GET_RETRY_DELAYS_MILLIS = listOf(250L, 750L)
 
 private fun boardPath(boardTable: String): String =
@@ -66,14 +68,36 @@ data class RemotePost(
     val detailRecommendationCount: Int? = null,
     val detailCommentCount: Int? = null,
 )
-data class RemoteRankPost(val id: String, val url: String, val title: String, val postedAt: Instant, val commentCount: Int)
-data class RemoteSearchPost(val id: String, val url: String, val title: String, val occurrenceCount: Int = 1)
+data class RemoteRankPost(
+    val id: String,
+    val url: String,
+    val title: String,
+    val postedAt: Instant,
+    val commentCount: Int,
+    val tagRecommendationCount: Int? = null,
+)
+data class RemoteSearchPost(
+    val id: String,
+    val url: String,
+    val title: String,
+    val occurrenceCount: Int = 1,
+    val commentCount: Int? = null,
+    val recommendationCount: Int? = null,
+) {
+    internal fun merge(other: RemoteSearchPost): RemoteSearchPost = copy(
+        occurrenceCount = occurrenceCount + other.occurrenceCount,
+        commentCount = listOfNotNull(commentCount, other.commentCount).maxOrNull(),
+        recommendationCount = listOfNotNull(recommendationCount, other.recommendationCount).maxOrNull(),
+    )
+}
 data class RemoteTagPost(
     val id: String,
     val url: String,
     val title: String,
     val commentCount: Int,
     val viewCount: Int,
+    val recommendationCount: Int? = null,
+    val postedAt: Instant? = null,
 )
 internal data class BoardRow(val id: String, val url: String, val title: String, val commentCount: Int)
 internal data class SearchPage(val posts: List<RemoteSearchPost>, val totalPages: Int)
@@ -110,9 +134,16 @@ class AvseeClient(
     suspend fun testConnection(
         baseUrl: String,
         boardTable: String = "javfc2",
+        tagQuery: String? = null,
     ): Result<Unit> = withContext(ioDispatcher) {
         try {
             suspend fun validate(transport: ApplicationPageTransport?) {
+                if (tagQuery != null) {
+                    val tagUrl = buildTagSearchUrl(baseUrl, tagQuery, 1, "")
+                    val html = transport?.fetch(tagUrl) ?: fetch(tagUrl)
+                    check(parseTagPage(html, tagUrl, "").posts.isNotEmpty()) { "태그 검색 결과를 찾을 수 없습니다." }
+                    return
+                }
                 val boardUrl = "$baseUrl${boardPath(boardTable)}"
                 val rows = parseBoardRows(transport?.fetch(boardUrl) ?: fetch(boardUrl), boardUrl)
                 check(rows.isNotEmpty()) { "게시물 목록을 찾을 수 없습니다." }
@@ -415,6 +446,50 @@ class AvseeClient(
         out.values.toList()
     }
 
+    suspend fun crawlTagWindow(
+        baseUrl: String,
+        query: String,
+        window: DateWindow,
+        knownDates: Map<String, LocalDate> = emptyMap(),
+    ): List<RemoteRankPost> = withContext(ioDispatcher) {
+        val firstUrl = buildTagSearchUrl(baseUrl, query, 1, "")
+        val posts = linkedMapOf<String, RemoteRankPost>()
+        val dates = ConcurrentHashMap<String, LocalDate>().apply { putAll(knownDates) }
+        var previousDate: LocalDate? = null
+        var page = 1
+        while (true) {
+            check(page <= MAX_CRAWL_BOARD_REQUESTS) { "태그 검색의 날짜 범위를 확인할 수 없습니다." }
+            val pageUrl = buildTagSearchUrl(baseUrl, query, page, "")
+            val html = fetchApplicationPage(pageUrl, firstUrl.takeIf { page > 1 })
+            val parsed = parseTagPage(html, pageUrl, "")
+            if (parsed.posts.isEmpty()) break
+            val rows = parsed.posts.map { post ->
+                post.postedAt?.let { dates[post.id] = it.atZone(SEOUL).toLocalDate() }
+                BoardRow(post.id, post.url, post.title, post.commentCount)
+            }
+            val pageDates = resolveBoardDates(rows, pageUrl, window.upperInclusive, dates)
+            check(previousDate?.isBefore(pageDates.first()) != true) {
+                "태그 검색 결과의 작성일 순서를 확인할 수 없습니다."
+            }
+            parsed.posts.zip(pageDates).forEach { (post, date) ->
+                if (date in window.startDate..window.endDate) {
+                    val postedAt = post.postedAt ?: date.atStartOfDay(SEOUL).toInstant()
+                    if (window.contains(postedAt)) {
+                        posts.putIfAbsent(
+                            post.id,
+                            RemoteRankPost(post.id, post.url, post.title, postedAt, post.commentCount, post.recommendationCount),
+                        )
+                    }
+                }
+            }
+            val lastDate = pageDates.last()
+            previousDate = lastDate
+            if (lastDate.isBefore(window.startDate) || page >= parsed.totalPages) break
+            page += 1
+        }
+        posts.values.toList()
+    }
+
     suspend fun searchPosts(
         baseUrl: String,
         query: String,
@@ -496,7 +571,8 @@ class AvseeClient(
         val term = query.trim()
         require(term.isNotEmpty())
         val encoded = URLEncoder.encode(term, "UTF-8")
-        return "$baseUrl$TAG_PATH?q=$encoded&eq=&onetable=${boardTable.orEmpty()}&result_sort=newest&page=$page"
+        val operator = if (boardTable.isEmpty()) "&tag_op=or" else ""
+        return "$baseUrl$TAG_PATH?q=$encoded&eq=$operator&onetable=$boardTable&result_sort=newest&page=$page"
     }
 
     internal fun hasUsableApplicationSearchResults(html: String, pageUrl: String): Boolean =
@@ -505,7 +581,7 @@ class AvseeClient(
             TAG_PATH -> parseTagPage(
                 html,
                 pageUrl,
-                decodedQueryParam(pageUrl, "onetable")?.takeIf(String::isNotBlank) ?: "javc",
+                decodedQueryParam(pageUrl, "onetable") ?: "javc",
             ).posts.isNotEmpty()
             else -> false
         }
@@ -521,9 +597,15 @@ class AvseeClient(
             val url = link.absUrl("href").takeIf(String::isNotBlank) ?: return@forEach
             val id = postIdFromUrl(url, boardTable) ?: return@forEach
             val title = link.text().trim().takeIf(String::isNotBlank) ?: "게시물 $id"
-            val normalized = RemoteSearchPost(id, url.substringBefore('#'), title)
-            val existing = posts[id]
-            posts[id] = if (existing == null) normalized else existing.copy(occurrenceCount = existing.occurrenceCount + 1)
+            val info = row.selectFirst(".search-result-meta, .search-result-info, .search-result-stats, .search-meta, .media-info")
+            val normalized = RemoteSearchPost(
+                id,
+                url.substringBefore('#'),
+                title,
+                commentCount = parseListMetric(info, "댓글", COMMENT_MARKERS),
+                recommendationCount = parseListRecommendation(info),
+            )
+            mergeSearchPost(posts, normalized)
         }
 
         val currentPage = decodedQueryParam(pageUrl, "page")?.toIntOrNull()?.coerceAtLeast(1) ?: 1
@@ -543,19 +625,25 @@ class AvseeClient(
         return SearchPage(posts.values.toList(), totalPages)
     }
 
-    internal fun parseTagPage(html: String, pageUrl: String, boardTable: String = "javc"): TagPage {
+    internal fun parseTagPage(
+        html: String,
+        pageUrl: String,
+        boardTable: String = "javc",
+        referenceInstant: Instant = Instant.now(),
+    ): TagPage {
         val doc = Jsoup.parse(html, pageUrl)
         val posts = LinkedHashMap<String, RemoteTagPost>()
         doc.select(".tag-results .tag-result, .tagbox-media .media, .post-wrap .media").forEach { row ->
             val preferredLinks = row.select(".tag-result-title a[href], .media-heading a[href]")
             val candidateLinks = if (preferredLinks.isNotEmpty()) preferredLinks else row.select("a[href]")
-            val link = candidateLinks
-                .firstOrNull { postIdFromUrl(it.absUrl("href"), boardTable) != null }
+            val link = candidateLinks.firstOrNull { tagResultId(it.absUrl("href"), pageUrl, boardTable) != null }
                 ?: return@forEach
-            val url = link.absUrl("href").takeIf(String::isNotBlank) ?: return@forEach
-            val id = postIdFromUrl(url, boardTable) ?: return@forEach
+            val url = link.absUrl("href")
+            val id = tagResultId(url, pageUrl, boardTable) ?: return@forEach
             val title = link.text().trim().takeIf(String::isNotBlank) ?: "게시물 $id"
-            val (commentCount, viewCount) = parseTagMetrics(row.selectFirst(".tag-result-meta, .media-info")) ?: return@forEach
+            val info = row.selectFirst(".tag-result-meta, .media-info")
+            val (commentCount, viewCount) = parseTagMetrics(info) ?: return@forEach
+            val postedAt = info?.let { parsePostedAt(it, referenceInstant) }
             posts.putIfAbsent(
                 id,
                 RemoteTagPost(
@@ -564,6 +652,8 @@ class AvseeClient(
                     title = title,
                     commentCount = commentCount,
                     viewCount = viewCount,
+                    recommendationCount = parseListRecommendation(info),
+                    postedAt = postedAt,
                 ),
             )
         }
@@ -654,9 +744,7 @@ class AvseeClient(
 
     private fun mergeSearchPost(out: LinkedHashMap<String, RemoteSearchPost>, post: RemoteSearchPost) {
         val existing = out[post.id]
-        out[post.id] = if (existing == null) post else existing.copy(
-            occurrenceCount = existing.occurrenceCount + post.occurrenceCount,
-        )
+        out[post.id] = existing?.merge(post) ?: post
     }
 
     private fun parseDetailTags(doc: Document): List<RemoteTag> {
@@ -672,14 +760,38 @@ class AvseeClient(
         return tags.values.toList()
     }
 
+    private fun parseListRecommendation(info: Element?): Int? =
+        parseListMetric(info, "(?:추천|좋아요)", ".fa-thumbs-up, .fa-thumbs-o-up, .fa-heart, .fa-heart-o, .wr-good")
+
+    private fun parseListMetric(info: Element?, label: String, markers: String): Int? {
+        if (info == null) return null
+        Regex("(?:$label)\\s*(?:수)?\\s*[:：]?\\s*(\\d+(?:,\\d{3})*)(?![\\d,])")
+            .find(info.text())?.groupValues?.get(1)?.let(::parseCountToken)?.let { return it }
+
+        val marker = info.selectFirst(markers) ?: return null
+        parseCountToken(marker.text())?.let { return it }
+        val siblings = marker.parent()?.childNodes().orEmpty().drop(marker.siblingIndex() + 1)
+        for (sibling in siblings) {
+            val value = when (sibling) {
+                is TextNode -> sibling.text()
+                is Element -> {
+                    if (sibling.tagName() in setOf("i", "time") || sibling.selectFirst("i, time") != null) break
+                    sibling.text()
+                }
+                else -> continue
+            }.trim()
+            if (value.isEmpty()) continue
+            return COUNT_TOKEN.matchEntire(value)?.value?.let(::parseCountToken)
+        }
+        return null
+    }
+
     private fun parseTagMetrics(info: Element?): Pair<Int, Int>? {
         if (info == null) return null
         val text = info.text()
-        val labeledComment = Regex("댓글\\s*[:：]?\\s*(\\d{1,3}(?:,\\d{3})*|\\d+)")
-            .find(text)?.groupValues?.getOrNull(1)?.replace(",", "")?.toIntOrNull()
-        val labeledView = Regex("조회\\s*[:：]?\\s*(\\d{1,3}(?:,\\d{3})*|\\d+)")
-            .find(text)?.groupValues?.getOrNull(1)?.replace(",", "")?.toIntOrNull()
-        if (labeledComment != null && labeledView != null) return labeledComment to labeledView
+        val comment = parseListMetric(info, "댓글", COMMENT_MARKERS)
+        val views = parseListMetric(info, "조회", ".fa-eye")
+        if (comment != null && views != null) return comment to views
         if (info.selectFirst(".fa-comment") == null || info.selectFirst(".fa-eye") == null) return null
         val metrics = COUNT_TOKEN.findAll(text)
             .mapNotNull { match -> match.value.replace(",", "").toIntOrNull() }
@@ -809,7 +921,7 @@ class AvseeClient(
             ?: error("게시시각을 찾을 수 없습니다.")
     }
 
-    private fun parsePostedAt(doc: Document, referenceInstant: Instant): Instant? {
+    private fun parsePostedAt(doc: Element, referenceInstant: Instant): Instant? {
         doc.select("[itemprop=datePublished][content]").firstNotNullOfOrNull { node ->
             parsePublishedContent(node.attr("content"))
         }?.let { return it }
@@ -820,7 +932,7 @@ class AvseeClient(
 
         val texts = listOfNotNull(
             doc.selectFirst("#bo_v_info")?.text()?.takeIf(String::isNotBlank),
-            doc.body()?.text()?.takeIf(String::isNotBlank),
+            (if (doc is Document) doc.body()?.text() else doc.text())?.takeIf(String::isNotBlank),
         ).distinct()
 
         for (text in texts) {
@@ -1006,7 +1118,29 @@ class AvseeClient(
     private fun tagPaginationMatches(currentUrl: String, candidateUrl: String): Boolean =
         listOf("q", "eq", "onetable", "result_sort").all { key ->
             decodedQueryParam(currentUrl, key).orEmpty() == decodedQueryParam(candidateUrl, key).orEmpty()
+        } && (decodedQueryParam(currentUrl, "tag_op") ?: "or") ==
+            (decodedQueryParam(candidateUrl, "tag_op") ?: "or")
+
+    private fun tagResultId(url: String, pageUrl: String, boardTable: String): String? {
+        if (boardTable.isNotEmpty()) return postIdFromUrl(url, boardTable)
+        val origin = applicationPageOrigin(pageUrl) ?: return null
+        if (applicationPageOrigin(url) != origin) return null
+        val path = URI(url).path
+        val table: String?
+        val id: String?
+        if (path == "/bbs/board.php") {
+            table = decodedQueryParam(url, "bo_table")
+            id = decodedQueryParam(url, "wr_id")
+        } else {
+            val segments = path.trim('/').split('/')
+            if (segments.size != 2) return null
+            table = segments[0]
+            id = segments[1]
         }
+        if (table == null || !table.matches(Regex("[A-Za-z0-9_]+"))) return null
+        if (id.isNullOrEmpty() || !id.all { it in '0'..'9' }) return null
+        return if (table == "javm") id else "$table:$id"
+    }
 
     private fun boardTableFromUrl(url: String): String? {
         val boards = setOf("javfc2", "javc", "javm")

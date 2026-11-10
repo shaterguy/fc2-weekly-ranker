@@ -2,6 +2,7 @@ package com.shaterguy.fc2weeklyranker.domain
 
 import com.shaterguy.fc2weeklyranker.data.PostEntity
 import com.shaterguy.fc2weeklyranker.data.RankObservationEntity
+import java.time.Instant
 import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.expm1
@@ -21,7 +22,7 @@ private const val TREND_LOOKBACK_MILLIS = 72L * HOUR_MILLIS
 private const val LN_2 = 0.6931471805599453
 private const val MAX_LOG_AGE_CORRECTION = 1.3862943611198906
 
-enum class RankingMode { POPULARITY, TRENDING }
+enum class RankingMode { POPULARITY, TRENDING, RECOMMENDATIONS }
 
 data class RankedPost(
     val post: PostEntity,
@@ -38,7 +39,22 @@ object AdaptiveRanking {
         observations: List<RankObservationEntity>,
         mode: RankingMode,
         nowEpochMillis: Long = System.currentTimeMillis(),
+        anchorEpochMillis: Long = nowEpochMillis,
     ): List<RankedPost> {
+        if (mode == RankingMode.RECOMMENDATIONS) {
+            val (known, unknown) = posts.partition { it.tagRecommendationCount != null }
+            val originals = known.associateBy { it.id }
+            val scoredPosts = known.map { post ->
+                val count = requireNotNull(post.tagRecommendationCount)
+                post.copy(
+                    recommendationCount = count,
+                    dailyRate = dailyRate(Instant.ofEpochMilli(anchorEpochMillis), Instant.ofEpochMilli(post.postedAtEpochMillis), count),
+                )
+            }
+            val scored = rank(scoredPosts, observations, RankingMode.POPULARITY, nowEpochMillis)
+                .map { it.copy(post = originals.getValue(it.post.id)) }
+            return scored + unknown.map { RankedPost(it, null, 0.0, 0.0, 0.0, false) }
+        }
         if (posts.isEmpty()) return emptyList()
         val histories = observations.asSequence()
             .filter { isValidObservation(it, nowEpochMillis) }

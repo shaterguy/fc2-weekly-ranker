@@ -3,6 +3,7 @@ package com.shaterguy.fc2weeklyranker.ui
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -33,13 +34,14 @@ import androidx.compose.ui.unit.dp
 import com.shaterguy.fc2weeklyranker.domain.ContentMode
 import com.shaterguy.fc2weeklyranker.network.RemoteTagPost
 
-internal enum class TagSortMode { ORIGINAL, COMMENTS, VIEWS }
+internal enum class TagSortMode { ORIGINAL, COMMENTS, VIEWS, RECOMMENDATIONS }
 
 internal fun sortTagResults(
     results: List<RemoteTagPost>,
     mode: TagSortMode,
 ): List<RemoteTagPost> = when (mode) {
     TagSortMode.ORIGINAL -> results
+    TagSortMode.RECOMMENDATIONS -> results.sortedByDescending { it.recommendationCount ?: -1 }
     TagSortMode.COMMENTS -> results.withIndex()
         .sortedWith(
             compareByDescending<IndexedValue<RemoteTagPost>> { it.value.commentCount }
@@ -159,6 +161,7 @@ fun TagResultsScreen(
             TagSortButton("기본", TagSortMode.ORIGINAL, sortMode, Modifier.weight(1f)) { sortName = it.name }
             TagSortButton("댓글순", TagSortMode.COMMENTS, sortMode, Modifier.weight(1f)) { sortName = it.name }
             TagSortButton("조회순", TagSortMode.VIEWS, sortMode, Modifier.weight(1f)) { sortName = it.name }
+            TagSortButton("추천순", TagSortMode.RECOMMENDATIONS, sortMode, Modifier.weight(1f)) { sortName = it.name }
         }
 
         if (loading) {
@@ -197,7 +200,7 @@ fun TagResultsScreen(
                             color = if (visited) MaterialTheme.colorScheme.outline else MaterialTheme.colorScheme.onSurface,
                         )
                         Text(
-                            "댓글 ${post.commentCount} · 조회 ${post.viewCount}",
+                            "댓글 ${post.commentCount} · 조회 ${post.viewCount} · 추천 ${post.recommendationCount ?: "확인 불가"}",
                             style = MaterialTheme.typography.bodyMedium,
                         )
                         if (openingPostId == post.id) {
@@ -218,9 +221,10 @@ private fun TagSortButton(
     modifier: Modifier,
     onSelect: (TagSortMode) -> Unit,
 ) {
+    val padding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
     if (mode == selected) {
-        Button(onClick = { onSelect(mode) }, modifier = modifier) { Text(label) }
+        Button(onClick = { onSelect(mode) }, modifier = modifier, contentPadding = padding) { Text(label) }
     } else {
-        OutlinedButton(onClick = { onSelect(mode) }, modifier = modifier) { Text(label) }
+        OutlinedButton(onClick = { onSelect(mode) }, modifier = modifier, contentPadding = padding) { Text(label) }
     }
 }
